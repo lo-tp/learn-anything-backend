@@ -9,7 +9,7 @@ from pydantic import SecretStr
 
 load_dotenv()
 
-PORT = int(os.getenv("PORT", 8000))
+PORT = int(os.getenv("PORT", "8000"))
 
 app = FastAPI()
 
