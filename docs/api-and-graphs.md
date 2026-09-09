@@ -204,7 +204,8 @@ material_graph = material_graph_fn(checkpointer=checkpointer)
 |--------|------|---------|
 | `POST` | `/sessions/{id}/plan/generate` | Trigger plan generation (auto after probe or explicit) |
 | `POST` | `/sessions/{id}/plan/adjust` | Submit a free-text adjustment, get regenerated plan |
-| `POST` | `/sessions/{id}/plan/approve` | Approve plan, trigger material generation |
+| `POST` | `/sessions/{id}/plan/approve` | Approve plan, kick off background material generation (returns `202` immediately) |
+| `GET` | `/sessions/{id}/materials` | Poll material generation progress (step IDs generated so far) |
 
 ### Execution phase (no LLM — deterministic only)
 
@@ -829,6 +830,79 @@ for step in plan["steps"]:
 
 ---
 
+### Material generation driver (background task)
+
+Generating slides + questions for every step can take minutes, so `POST /plan/approve` should **not** block. It approves the plan, **returns `202` immediately**, and schedules the per-step loop as a **background task**. The task writes one `StepMaterial` row per step and commits after each — so the **domain DB is the resume point**. The graph checkpointer is deliberately *not* involved, keeping the two stores independent (no double-stored state).
+
+**Flow:**
+
+```
+POST /plan/approve
+   │
+   ├─ write approved Plan row (request db)
+   ├─ background_tasks.add_task(generate_materials, session_id, steps, boundary_map)
+   └─ return 202 { "phase": "generating", ... }
+
+generate_materials (background task, its OWN db session):
+   for step in steps (dependency order):
+        if StepMaterial(step) already exists: skip     # resume past it
+        result = material_graph.invoke(...)            # linear per-step graph
+        db.add(StepMaterial(...)); db.commit()         # one durable row per step
+        summaries.append(result["summary"])
+```
+
+**Driver code:**
+
+```python
+from fastapi import BackgroundTasks
+
+async def generate_materials(session_id: str, steps: list[dict], boundary_map: dict):
+    db = SessionFactory()          # its OWN session — never reuse the request's
+    try:
+        summaries: list[dict] = []
+        for step in steps:
+            if db.query(StepMaterial).filter_by(
+                session_id=session_id, step_id=step["id"]).first():
+                continue            # already generated — resume past it
+            result = material_graph.invoke(
+                {"step": step, "established_concepts": summaries,
+                 "learner_context": boundary_map},
+            )
+            db.add(StepMaterial(
+                session_id=session_id, step_id=step["id"],
+                slides=result["slides"], questions=result["questions"],
+                summary=result["summary"],
+            ))
+            db.commit()             # durable checkpoint, one step at a time
+            summaries.append(result["summary"])
+    finally:
+        db.close()
+
+@router.post("/sessions/{id}/plan/approve", status_code=202)
+async def approve(id: str, background_tasks: BackgroundTasks, db=Depends(get_db)):
+    # ... write approved Plan row via `db` ... (commit)
+    background_tasks.add_task(generate_materials, id, plan["steps"], boundary_map)
+    return {"phase": "generating", "message": "Material generation started."}
+
+@router.get("/sessions/{id}/materials")
+async def materials_status(id: str, db=Depends(get_db)):
+    session = db.get(Session, id)
+    done = db.query(StepMaterial).filter_by(session_id=id).all()
+    return {"phase": session.phase, "generated_steps": [m.step_id for m in done]}
+```
+
+**Key points:**
+
+| Concern | Handling |
+|---------|----------|
+| Don't block the request | `POST /plan/approve` returns `202` before generation starts |
+| Resume across restarts | Each step is a committed `StepMaterial` row; on retry, skip steps that already exist |
+| Don't corrupt the request session | The task opens its **own** DB session (the request's is closed by the time it runs) |
+| Keep stores independent | Resume state lives in the **DB**, not the graph checkpointer — no double-stored state |
+| Client visibility | Poll `GET /sessions/{id}/materials` until phase flips to `executing` |
+
+**Durability / migration:** `BackgroundTasks` runs **in-process** — no retry, lost on crash/restart. That matches the in-memory MVP (everything is lost on restart anyway). When you move to Postgres and want generation to survive restarts, **swap `add_task` for a queue job** (ARQ / RQ / Celery / Dramatiq / SQS) with a worker — the `generate_materials` body stays identical, only the enqueue call changes.
+
 ---
 
 ## Graph Invocation Flow (end-to-end)
@@ -896,7 +970,7 @@ Execution (step 6) requires **no graph and no LLM** — it's a DB read + index c
 
 3. **Plan graph uses LangGraph interrupts (same pattern as Probe), held by the in-memory checkpointer.** The graph pauses after `render_plan` (checkpoint saved in memory) and resumes via `Command(resume=...)` when the user's next response arrives (adjust or approve). The `current_plan` and `research` baselines live in the checkpointer (keyed by `thread_id = f"{session_id}:plan"`) across the loop, not in the domain DB. On approval, the final plan is written to the `Plan` row (same `session_id`, incremented `version` on each pass).
 
-4. **Material generation is sequential and must stay sequential.** Each step's `write_slides` node needs the accumulated `ConceptSummary` list from all prior steps, so steps must be generated in order. The context stays small (~1-2k tokens for the summaries) regardless of plan length. For large plans, consider a background task + polling endpoint so the client isn't waiting synchronously.
+4. **Material generation is sequential and must stay sequential.** Each step's `write_slides` node needs the accumulated `ConceptSummary` list from all prior steps, so steps must be generated in order. The context stays small (~1-2k tokens for the summaries) regardless of plan length. For large plans, run it as a background task with a polling endpoint (see the **Material generation driver** subsection) so the client isn't waiting synchronously.
 
 5. **Execution is purely deterministic.** No LLM, no graph. The `POST .../answers` handler compares `selected_index` to `correct_index` for each question, computes the score, and returns results. The "revisit" message on failure is a static template (e.g. "Review the slides before retrying"), not an LLM-generated suggestion.
 
