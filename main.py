@@ -3,6 +3,7 @@ from typing import TypedDict
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from pydantic import SecretStr
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 
@@ -16,7 +17,7 @@ app = FastAPI()
 # --- LLM ---
 
 llm = ChatOpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
+    api_key=SecretStr(os.getenv("OPENAI_API_KEY", "")),
     base_url=os.getenv("OPENAI_BASE_URL"),
     model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
 )
@@ -30,7 +31,7 @@ class State(TypedDict):
 
 def hello_node(state: State) -> State:
     response = llm.invoke("how's your day")
-    return {"message": response.content}
+    return {"message": str(response.content)}
 
 
 def build_graph():
