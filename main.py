@@ -1,11 +1,17 @@
 import os
-from typing import TypedDict
+import uuid
+from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from langchain_openai import ChatOpenAI
-from langgraph.graph import END, StateGraph
-from pydantic import SecretStr
+from langgraph.types import Command
+from pydantic import BaseModel, SecretStr
+from sqlalchemy.orm import Session as DBSession
+
+from db import Phase, Session, get_db
+from graphs import checkpointer, graph_config
+from graphs.clarify import ClarifyState, build_clarify_graph
 
 load_dotenv()
 
@@ -23,36 +29,128 @@ llm = ChatOpenAI(
 )
 
 
-# --- LangGraph ---
+# --- Graphs ---
+
+clarify_graph = build_clarify_graph(llm, checkpointer=checkpointer)
 
 
-class State(TypedDict):
-    message: str
+# --- Request schemas ---
 
 
-def hello_node(state: State) -> State:
-    response = llm.invoke("how's your day")
-    return {"message": str(response.content)}
+class GoalIn(BaseModel):
+    goal: str
 
 
-def build_graph():
-    graph = StateGraph(State)
-    graph.add_node("hello", hello_node)
-    graph.set_entry_point("hello")
-    graph.add_edge("hello", END)
-    return graph.compile()
+class ClarifyIn(BaseModel):
+    answer: str
 
 
-graph = build_graph()
+# --- Helpers ---
+
+
+def initial_clarify_state(goal: str) -> ClarifyState:
+    return {
+        "goal": goal,
+        "working_goal": goal,
+        "open_dimensions": [],
+        "round_count": 0,
+        "clarifying_questions": [],
+        "last_answer": None,
+        "narrowed_goal": None,
+    }
+
+
+def interpret_clarify(
+    result: dict[str, Any], session: Session, db: DBSession
+) -> dict[str, Any]:
+    """Map a Clarify graph run result onto the session row + HTTP response.
+
+    The graph either ended with a ``narrowed_goal`` (advance to probing) or
+    paused at the interrupt with ``clarifying_questions`` (stay clarifying).
+    """
+    if "__interrupt__" in result:
+        return {
+            "session_id": session.session_id,
+            "phase": Phase.CLARIFYING.value,
+            "clarifying_questions": result.get("clarifying_questions", []),
+        }
+    session.narrowed_goal = result["narrowed_goal"]
+    session.phase = Phase.PROBING.value
+    db.commit()
+    return {
+        "session_id": session.session_id,
+        "phase": Phase.PROBING.value,
+        "narrowed_goal": session.narrowed_goal,
+    }
 
 
 # --- Routes ---
 
 
-@app.get("/")
-async def hello():
-    result = await graph.ainvoke({"message": ""})
-    return {"message": result["message"]}
+@app.post("/sessions")
+def create_session(body: GoalIn, db: DBSession = Depends(get_db)):
+    """Create a session and make the first Clarify graph call."""
+    session = Session(
+        session_id=uuid.uuid4().hex, goal=body.goal, phase=Phase.CLARIFYING.value
+    )
+    db.add(session)
+    db.commit()
+    result = clarify_graph.invoke(
+        initial_clarify_state(body.goal),
+        graph_config(session.session_id, "clarify"),
+    )
+    return interpret_clarify(result, session, db)
+
+
+@app.post("/sessions/{session_id}/clarify")
+def clarify_session(
+    session_id: str, body: ClarifyIn, db: DBSession = Depends(get_db)
+):
+    """Resume the Clarify graph loop with the learner's answer."""
+    session = db.get(Session, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.phase != Phase.CLARIFYING.value:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Session is in phase '{session.phase}', not 'clarifying'",
+        )
+    result = clarify_graph.invoke(
+        Command(resume={"answer": body.answer}),
+        graph_config(session_id, "clarify"),
+    )
+    return interpret_clarify(result, session, db)
+
+
+@app.get("/sessions/{session_id}")
+def get_session(session_id: str, db: DBSession = Depends(get_db)):
+    """Get current session state & progress."""
+    session = db.get(Session, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    plan = session.plan
+    total_steps = len(plan.steps) if plan else 0
+    completed_steps = [p.step_id for p in session.step_progress if p.complete]
+    step_scores = {
+        p.step_id: p.score for p in session.step_progress if p.score is not None
+    }
+    current_step_id: str | None = None
+    if plan:
+        for step in plan.steps:
+            if step["id"] not in completed_steps:
+                current_step_id = step["id"]
+                break
+    return {
+        "session_id": session_id,
+        "phase": session.phase,
+        "narrowed_goal": session.narrowed_goal,
+        "progress": {
+            "current_step_id": current_step_id,
+            "completed_steps": completed_steps,
+            "total_steps": total_steps,
+            "step_scores": step_scores,
+        },
+    }
 
 
 if __name__ == "__main__":
