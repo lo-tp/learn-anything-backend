@@ -8,7 +8,12 @@ The system is a **stateful session**. Each session walks through phases:
 clarifying → probing → planning → reviewing → generating → executing → complete
 ```
 
-All state lives in an **in-memory SQLite database** (via SQLAlchemy ORM). LangGraph graphs are invoked from FastAPI handlers to drive the LLM interactions within each phase. Swapping to a persistent DB later is a one-line connection-string change.
+State lives in **two stores** with distinct responsibilities:
+
+1. **Domain state** — the `Session` row, its phase, probe questions, plan, materials, and step progress — lives in an **in-memory SQLite database** (via SQLAlchemy ORM). This is the durable record the API reads and writes.
+2. **Graph execution state** — each LangGraph graph's in-flight state, including exactly where it is paused at an interrupt and intermediate node outputs (e.g. the plan's `current_plan` baseline, the `research` output, mid-loop boundary estimates) — lives in a **LangGraph checkpointer**, keyed by `thread_id = f"{session_id}:{graph_name}"`. The checkpointer is what lets the Clarify, Probe, and Plan graphs *pause at an interrupt and resume on the next request* without the handler re-deriving state. For now it is **in-memory** (`MemorySaver`), matching the in-memory domain DB.
+
+LangGraph graphs are invoked from FastAPI handlers to drive the LLM interactions within each phase.  **Both stores are in-memory for the MVP and will later migrate to Postgres together** — the domain DB via a connection-string change, and the checkpointer via `PostgresSaver` (a drop-in replacement for `MemorySaver`).
 
 ---
 
@@ -133,6 +138,50 @@ Base.metadata.create_all(engine)
 
 ---
 
+## Graph Checkpointer
+
+The **domain DB** (above) holds the session's durable record. LangGraph needs a second store — a **checkpointer** — to hold each graph's *execution* state across calls. This is what makes interrupt/resume work. For now we use the in-memory `MemorySaver`, consistent with the in-memory domain DB; both migrate to Postgres later (see note 6).
+
+**Thread identity:** `thread_id = f"{session_id}:{graph_name}"`. A single session runs **three** different graphs (Clarify, Probe, Plan), and the checkpointer namespaces *all* checkpoints by `thread_id`. Reusing a bare `session_id` for all of them would make their pause states **collide and overwrite each other**. Each graph therefore gets its own thread — `abc123:clarify`, `abc123:probe`, `abc123:plan` — so each loop pauses and resumes independently within the same session.
+
+```python
+from langgraph.checkpoint.memory import MemorySaver
+
+# One in-memory checkpoint store shared by every graph (MVP).
+# Lives for the process lifetime; lost on restart — same as the domain DB.
+checkpointer = MemorySaver()
+
+def graph_config(session_id: str, graph: str) -> dict:
+    # One distinct checkpoint thread per (session, graph). A session runs the
+    # Clarify, Probe, and Plan graphs, so they must NOT share a thread — each
+    # gets its own namespace, e.g. "abc123:clarify", "abc123:probe", "abc123:plan".
+    return {"configurable": {"thread_id": f"{session_id}:{graph}"}}
+
+# Run a graph for a session (the checkpointer is bound at compile time):
+def run_graph(graph, state, session_id: str, graph_name: str):
+    return graph.invoke(state, graph_config(session_id, graph_name))
+```
+
+Graphs are compiled with the checkpointer:
+
+```python
+clarify_graph  = clarify_graph_fn(checkpointer=checkpointer)
+probe_graph    = probe_graph_fn(checkpointer=checkpointer)
+plan_graph     = plan_graph_fn(checkpointer=checkpointer)
+material_graph = material_graph_fn(checkpointer=checkpointer)
+```
+
+**What the checkpointer stores (per thread):**
+- The graph state dict at each super-step (node outputs accumulated so far)
+- The pending node(s) — i.e. exactly where the graph is paused at an interrupt
+- The full checkpoint history (enables replay / time-travel debugging)
+
+**What it does NOT replace — the domain DB.** The checkpointer holds *graph-internal* state (e.g. `current_plan`, `research`, mid-loop boundary estimates). When a graph produces a durable artifact (a `Plan` row, a `StepMaterial` row, the final `boundary_map`), the handler writes it to the SQLAlchemy DB so it is queryable by the API and independent of the graph.
+
+> **Migration path (later):** when the domain DB moves to Postgres, swap `MemorySaver` for `PostgresSaver` (`pip install langgraph-checkpoint-postgres`) — it implements the same checkpointer interface, so only the construction changes: `checkpointer = PostgresSaver(conn)`. The per-graph `thread_id = f"{session_id}:{graph_name}"` keying and all invocation code stay identical.
+
+---
+
 ## Endpoints
 
 ### Session lifecycle
@@ -170,6 +219,8 @@ Base.metadata.create_all(engine)
 
 #### `POST /sessions`
 
+Creates the session and makes the **first call to the Clarify Graph** (`thread_id = f"{session_id}:clarify"`). If the raw goal is already specific enough, the graph ends immediately and the session advances to `probing`; otherwise it interrupts with clarifying questions and the session sits in `clarifying`.
+
 ```json
 // Request
 { "goal": "I want to learn Newton's second law of motion." }
@@ -194,15 +245,26 @@ Base.metadata.create_all(engine)
 
 #### `POST /sessions/{id}/clarify`
 
+Drives the **Clarify Graph** loop (`thread_id = f"{session_id}:clarify"`). Each call resumes the graph with the user's answer; the loop continues until the goal is specific enough. So the response is either the narrowed goal (hand-off to Probe) **or** another round of clarifying questions.
+
 ```json
 // Request
 { "answer": "I want the physical intuition and some math. I know what force and mass are but not acceleration formally." }
 
-// Response
+// Response A (goal now specific enough — hand off to Probe)
 {
   "session_id": "abc123",
   "phase": "probing",
   "narrowed_goal": "Newton's second law: physical intuition + mathematical formulation. Learner knows force and mass, needs formal acceleration."
+}
+
+// Response B (still too broad — another clarification round)
+{
+  "session_id": "abc123",
+  "phase": "clarifying",
+  "clarifying_questions": [
+    "Do you want worked-example practice, or just the derivation and intuition?"
+  ]
 }
 ```
 
@@ -424,9 +486,89 @@ Submit all answers for the step in one batch. No LLM — deterministic index com
 
 ## LangGraph Graphs
 
-Three graphs. Each is invoked from a FastAPI handler. State is persisted in the in-memory DB between invocations (the graph itself is stateless per-invocation; we pass/retrieve state via the session store). Execution (step 6) needs no graph — it's a DB read + index comparison.
+Four graphs. Each is invoked from a FastAPI handler. State is persisted in the in-memory DB between invocations (the graph itself is stateless per-invocation; we pass/retrieve state via the session store). Three of the four — **Clarify**, **Probe**, and **Plan** — are interrupt/resume **loops** held by the in-memory checkpointer; **Material** is linear. Execution (step 6) needs no graph — it's a DB read + index comparison.
 
-### Graph 1: Probe Graph
+### Graph 1: Clarify Graph
+
+**Purpose:** Iteratively narrow a possibly-broad goal into a precise, learnable `narrowed_goal`. Loops on user clarification until the goal is specific enough (or a safety cap is hit), then hands off to Probe.
+
+**Entry:** `(goal, prior_clarifications)`  
+**Exit:** `narrowed_goal` (when specific enough) or `clarifying_questions` (when another round is needed)
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   CLARIFY GRAPH                         │
+│                                                         │
+│  ┌──────────────┐     ┌──────────────┐                 │
+│  │ assess_      │     │ refine_goal  │                 │
+│  │ goal         │     │              │                 │
+│  │              │     │              │                 │
+│  └──┬───────┬───┘     └──────┬───────┘                 │
+│     │       │                │                         │
+│  (specific)│  (too broad)   │                          │
+│     │       ▼                │                          │
+│     │  ┌──────────────┐      │                          │
+│     │  │ generate_    │      │                          │
+│     │  │ questions    │      │                          │
+│     │  └──────┬───────┘      │                          │
+│     │         │              │                          │
+│     │         ▼              │                          │
+│     │    [interrupt]         │                          │
+│     │    (return qs)         │                          │
+│     │         │              │                          │
+│     │   (user answer)        │                          │
+│     │         │              │                          │
+│     │         └──────────────┘  (loop back to assess_   │
+│     │                      goal with new context)       │
+│     ▼                                                   │
+│  ┌──────────┐                                          │
+│  │   END    │  (output narrowed_goal)                  │
+│  │(narrowed)│                                          │
+│  └──────────┘                                          │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Nodes:**
+
+| Node | LLM task |
+|------|----------|
+| `assess_goal` | Given the goal + all prior clarification answers, judge whether it is specific enough to plan against. Output: `"specific"` (with the `narrowed_goal`) or `"too_broad"` (with the dimensions still open). |
+| `generate_questions` | Given the open dimensions, produce 1-3 targeted clarifying questions that will most reduce the remaining ambiguity. |
+| `refine_goal` | Given the goal + the latest answer, fold it into a tighter working goal and update the set of open dimensions (feeds the next `assess_goal`). |
+
+**Control flow:**
+- `assess_goal` → conditional:
+  - `"specific"` → END (output `narrowed_goal`)
+  - `"too_broad"` → `generate_questions` → **interrupt** (return questions to the client)
+- On next call with the user's answer: `refine_goal` → back to `assess_goal`
+- **Safety cap:** if the goal is still too broad after N rounds (e.g. 3), `assess_goal` emits the best-effort `narrowed_goal` and ends, so the user is never stuck in the loop.
+
+**State persisted across the loop (in the checkpointer, keyed by `thread_id = f"{session_id}:clarify"`):**
+- `working_goal` — the goal as it has been narrowed so far
+- `open_dimensions` — the axes still under-specified (e.g. "depth", "prerequisites", "focus area")
+- `round_count` — how many clarification rounds have occurred (drives the safety cap)
+
+**Invocation pattern from FastAPI:**
+
+```python
+from langgraph.types import Command
+config = graph_config(session_id, "clarify")   # thread_id = f"{session_id}:clarify"
+
+# First call (POST /sessions) — assess the raw goal, then either end with a
+# narrowed_goal or interrupt with clarifying questions.
+result = clarify_graph.invoke({"goal": raw_goal}, config)
+# result = {"narrowed_goal": "..."}  (specific enough → phase probing)
+# or result = {"clarifying_questions": [...]}  (paused at interrupt → phase clarifying)
+
+# Subsequent calls (POST /sessions/{id}/clarify) — resume with the user's answer.
+result = clarify_graph.invoke(Command(resume={"answer": "..."}), config)
+# result = {"narrowed_goal": "..."}  (now specific enough)
+# or result = {"clarifying_questions": [...]}  (another round)
+```
+
+---
+
+### Graph 2: Probe Graph
 
 **Purpose:** Adaptive questioning loop that brackets the learner's boundary.
 
@@ -475,27 +617,33 @@ Three graphs. Each is invoked from a FastAPI handler. State is persisted in the 
   - `"done"` → END (output `boundary_map`)
 
 **Invocation pattern from FastAPI:**
-```python
-# First call (no answer):
-result = probe_graph.invoke({
-    "goal": session["narrowed_goal"],
-    "history": [],
-    "answer": None
-})
-# result = {"next_question": {...}}
 
-# Subsequent calls:
-result = probe_graph.invoke({
-    "goal": session["narrowed_goal"],
-    "history": session["probe_answers"],
-    "answer": {"question_id": ..., "selected_index": ...}
-})
-# result = {"next_question": {...}} or {"boundary_map": {...}}
+The graph is paused/resumed by the **checkpointer** keyed on `thread_id = f"{session_id}:probe"` — the handler does not track the pause itself.
+
+```python
+from langgraph.types import Command
+config = graph_config(session_id, "probe")   # thread_id = f"{session_id}:probe"
+
+# First call (no answer) — generates question 1, then pauses at the interrupt.
+# The checkpoint (with the pending node) is saved to the checkpointer.
+result = probe_graph.invoke(
+    {"goal": session["narrowed_goal"], "history": [], "answer": None},
+    config,
+)
+# result = {"next_question": {...}}   (graph is now paused)
+
+# Subsequent calls — resume with the learner's answer. The checkpointer
+# restores the paused state and continues from the pending node.
+result = probe_graph.invoke(
+    Command(resume={"question_id": ..., "selected_index": ...}),
+    config,
+)
+# result = {"next_question": {...}} (paused again) or {"boundary_map": {...}} (done)
 ```
 
 ---
 
-### Graph 2: Plan Graph
+### Graph 3: Plan Graph
 
 **Purpose:** Generate the learning plan, then loop on user adjustments until approved.
 
@@ -554,40 +702,51 @@ The graph loops: generate/refine → interrupt (show plan to user) → user appr
 - `"adjust: <text>"` → loop back to `design_plan` (skip `research_topic`)
 
 **Invocation pattern from FastAPI:**
+
+As with the Probe graph, the pause is stored in the **checkpointer** (`thread_id = f"{session_id}:plan"`); the `current_plan` and `research` baselines live in the checkpoint, not in the handler.
+
 ```python
-# Initial generation (first call, no prior plan):
-result = plan_graph.invoke({
-    "goal": session["narrowed_goal"],
-    "boundary_map": session["boundary_map"],
-    "response": None  # first call, no user response yet
-})
+from langgraph.types import Command
+config = graph_config(session_id, "plan")   # thread_id = f"{session_id}:plan"
+
+# Initial generation (first call, no prior plan) — runs research → design → render,
+# then pauses at the interrupt (checkpoint saved).
+result = plan_graph.invoke(
+    {
+        "goal": session["narrowed_goal"],
+        "boundary_map": session["boundary_map"],
+        "response": None,
+    },
+    config,
+)
 # result = { "plan": {...} }  (graph is now paused at interrupt)
 
-# User adjusts (subsequent call):
-result = plan_graph.invoke({
-    "goal": session["narrowed_goal"],
-    "boundary_map": session["boundary_map"],
-    "response": { "action": "adjust", "text": "I don't know what gravity is — add a step…" }
-})
+# User adjusts (subsequent call) — resume; checkpointer restores the paused state
+# and the graph re-enters at design_plan (research is skipped).
+result = plan_graph.invoke(
+    Command(resume={ "action": "adjust", "text": "I don't know what gravity is — add a step…" }),
+    config,
+)
 # result = { "plan": {...} }  (graph interrupts again with refined plan)
 
-# User approves (final call):
-result = plan_graph.invoke({
-    "goal": session["narrowed_goal"],
-    "boundary_map": session["boundary_map"],
-    "response": { "action": "approve" }
-})
+# User approves (final call) — resume to the terminal branch.
+result = plan_graph.invoke(
+    Command(resume={ "action": "approve" }),
+    config,
+)
 # result = { "plan": {...}, "approved": True }  (graph reaches END)
 ```
 
-**State persisted across the loop (via LangGraph checkpointer, keyed by `session_id`):**
+**State persisted across the loop (in the checkpointer, keyed by `thread_id = f"{session_id}:plan"`):**
 - `current_plan` — the last rendered plan (baseline for next refinement)
 - `research` — the topic research output (reused across refinements)
 - `pass_count` — how many refinement passes have occurred
 
+These live in the `MemorySaver` checkpoint, so the graph resumes from its in-memory checkpoint between requests within a process run (lost on restart, same as the domain DB for the MVP).
+
 ---
 
-### Graph 3: Material Generation Graph
+### Graph 4: Material Generation Graph
 
 **Purpose:** For a single approved plan step, generate the HTML slides, quiz questions, and a compact summary of established concepts (for use by subsequent steps).
 
@@ -677,9 +836,12 @@ for step in plan["steps"]:
 ```
 Client                    FastAPI Handler              LangGraph
   │                           │                           │
-  │── POST /sessions ────────►│                           │
-  │                           │── (simple LLM call) ────►│  [clarify: is goal specific?]
-  │◄── session_id, phase ────│                           │
+  │── POST /sessions ────────►│── invoke ───────────────►│  [Clarify Graph: assess_goal]
+  │◄── session_id, phase ────│   (narrowed_goal or       │
+  │                           │    clarifying_questions)  │
+  │                           │                           │
+  │── POST /clarify {ans} ───►│── resume ───────────────►│  [Clarify Graph: refine → assess]
+  │◄── narrowed_goal ────────│   (or more questions)     │
   │                           │                           │
   │── POST /probe ───────────►│── invoke ───────────────►│  [Probe Graph: generate_question]
   │◄── question 1 ───────────│                           │
@@ -717,9 +879,10 @@ Client                    FastAPI Handler              LangGraph
 
 | # | Graph | Phases served | LLM calls per invocation | Loop? |
 |---|-------|---------------|--------------------------|-------|
-| 1 | **Probe** | Probing | 1 (generate) or 2 (evaluate + decide) | Yes — interrupt/resume loop |
-| 2 | **Plan** | Planning, Reviewing | 2-3 (research once + design + render per pass) | Yes — interrupt/resume loop until approved |
-| 3 | **Material** | Generating (on approve) | 3 (slides + questions + summary) per step | No — linear, called N times |
+| 1 | **Clarify** | Clarifying | 1-2 (assess + optional questions) per round | Yes — interrupt/resume loop until specific (capped) |
+| 2 | **Probe** | Probing | 1 (generate) or 2 (evaluate + decide) | Yes — interrupt/resume loop |
+| 3 | **Plan** | Planning, Reviewing | 2-3 (research once + design + render per pass) | Yes — interrupt/resume loop until approved |
+| 4 | **Material** | Generating (on approve) | 3 (slides + questions + summary) per step | No — linear, called N times |
 
 Execution (step 6) requires **no graph and no LLM** — it's a DB read + index comparison.
 
@@ -727,17 +890,19 @@ Execution (step 6) requires **no graph and no LLM** — it's a DB read + index c
 
 ## Implementation Notes
 
-1. **Probe graph uses LangGraph interrupts.** The `generate_question` node emits the question and the graph pauses. The next `POST /probe` call resumes with the answer. Use `graph.invoke()` with a thread/checkpointer keyed by `session_id` to persist the pause state in memory.
+1. **Clarify graph uses LangGraph interrupts, held by an in-memory checkpointer.** `POST /sessions` makes the first call (`assess_goal`); if the goal is too broad the graph interrupts with clarifying questions, and each `POST /sessions/{id}/clarify` resumes with `Command(resume={"answer": ...})`. The `working_goal`, `open_dimensions`, and `round_count` live in the checkpointer (`thread_id = f"{session_id}:clarify"`) across rounds. A safety cap (e.g. 3 rounds) forces a best-effort `narrowed_goal` so the user is never stuck. On exit, `narrowed_goal` is written to the `Session` row and the phase advances to `probing`.
 
-2. **Plan graph uses LangGraph interrupts (same pattern as Probe).** The graph pauses after `render_plan` and resumes when the user's next response arrives (adjust or approve). The `current_plan` and `research` are persisted in the graph state across the loop. On approval, the final plan is written to the `Plan` row (same `session_id`, incremented `version` on each pass).
+2. **Probe graph uses LangGraph interrupts, held by an in-memory checkpointer.** The `generate_question` node emits the question and the graph pauses; the pause (pending node + accumulated state) is written to the `MemorySaver` checkpointer under `thread_id = f"{session_id}:probe"`. The next `POST /probe` call resumes by invoking with `Command(resume=answer)` and the same config — the checkpointer restores the paused state, so the handler never re-derives it.
 
-3. **Material generation is sequential and must stay sequential.** Each step's `write_slides` node needs the accumulated `ConceptSummary` list from all prior steps, so steps must be generated in order. The context stays small (~1-2k tokens for the summaries) regardless of plan length. For large plans, consider a background task + polling endpoint so the client isn't waiting synchronously.
+3. **Plan graph uses LangGraph interrupts (same pattern as Probe), held by the in-memory checkpointer.** The graph pauses after `render_plan` (checkpoint saved in memory) and resumes via `Command(resume=...)` when the user's next response arrives (adjust or approve). The `current_plan` and `research` baselines live in the checkpointer (keyed by `thread_id = f"{session_id}:plan"`) across the loop, not in the domain DB. On approval, the final plan is written to the `Plan` row (same `session_id`, incremented `version` on each pass).
 
-4. **Execution is purely deterministic.** No LLM, no graph. The `POST .../answers` handler compares `selected_index` to `correct_index` for each question, computes the score, and returns results. The "revisit" message on failure is a static template (e.g. "Review the slides before retrying"), not an LLM-generated suggestion.
+4. **Material generation is sequential and must stay sequential.** Each step's `write_slides` node needs the accumulated `ConceptSummary` list from all prior steps, so steps must be generated in order. The context stays small (~1-2k tokens for the summaries) regardless of plan length. For large plans, consider a background task + polling endpoint so the client isn't waiting synchronously.
 
-5. **All state is in an in-memory SQLite DB.** No persistent storage. On process restart, all sessions are lost (acceptable for MVP). To persist, change the connection string: `sqlite:////absolute/path/to/learn.db` or a Postgres URL. The ORM models don't change.
+5. **Execution is purely deterministic.** No LLM, no graph. The `POST .../answers` handler compares `selected_index` to `correct_index` for each question, computes the score, and returns results. The "revisit" message on failure is a static template (e.g. "Review the slides before retrying"), not an LLM-generated suggestion.
 
-6. **Use a session-scoped DB session per request.** FastAPI dependency:
+6. **Both stores are in-memory for the MVP and migrate to Postgres together.** Domain state (sessions, questions, plan, materials, progress) is in an in-memory SQLite DB; graph execution state is in an in-memory `MemorySaver` checkpointer. On process restart both are lost (acceptable for MVP). **Later migration to Postgres:** change the domain engine's connection string to a Postgres URL (the ORM models don't change), and swap the checkpointer from `MemorySaver` to `PostgresSaver` (same interface, only the construction changes). The two stores remain independent: the checkpointer never holds API-queryable domain records, and the domain DB never holds graph execution state.
+
+7. **Use a session-scoped DB session per request.** FastAPI dependency:
 ```python
 from sqlalchemy.orm import Session as DBSession
 from sqlalchemy.orm import sessionmaker
