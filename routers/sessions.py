@@ -1,7 +1,7 @@
 """Session lifecycle routes: creation, clarification loop, status read-back."""
 
 import uuid
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from langgraph.types import Command
@@ -30,7 +30,7 @@ class ClarifyResult(BaseModel):
     """Outcome of a Clarify graph call: either questions or a narrowed goal."""
 
     session_id: str
-    phase: Literal["clarifying", "probing"]
+    phase: Phase
     narrowed_goal: str | None = None
     clarifying_questions: list[str] | None = None
 
@@ -75,7 +75,7 @@ def interpret_clarify(
     if "__interrupt__" in result:
         return ClarifyResult(
             session_id=session.session_id,
-            phase=Phase.CLARIFYING.value,
+            phase=Phase.CLARIFYING,
             clarifying_questions=result.get("clarifying_questions", []),
         )
     session.narrowed_goal = result["narrowed_goal"]
@@ -83,7 +83,7 @@ def interpret_clarify(
     db.commit()
     return ClarifyResult(
         session_id=session.session_id,
-        phase=Phase.PROBING.value,
+        phase=Phase.PROBING,
         narrowed_goal=session.narrowed_goal,
     )
 
