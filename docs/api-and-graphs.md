@@ -288,8 +288,7 @@ This is the **combined** probe endpoint. First call has no answer (starts the pr
     "explanation": "a = F/m = 10/2 = 5 m/s². Acceleration is force divided by mass.",
     "strand": "newton_second_law_basic",
     "difficulty": 2
-  },
-  "questions_remaining": 9
+  }
 }
 
 // Request (subsequent call — submit answer)
@@ -298,10 +297,6 @@ This is the **combined** probe endpoint. First call has no answer (starts the pr
 // Response (next question)
 {
   "phase": "probing",
-  "previous": {
-    "question_id": "q1",
-    "was_correct": true
-  },
   "question": {
     "id": "q2",
     "text": "If the mass of an object doubles while the net force stays the same, what happens to its acceleration?",
@@ -310,8 +305,7 @@ This is the **combined** probe endpoint. First call has no answer (starts the pr
     "explanation": "F = ma, so a = F/m. If m doubles and F stays the same, a halves.",
     "strand": "newton_second_law_proportionality",
     "difficulty": 3
-  },
-  "questions_remaining": 8
+  }
 }
 
 // Response (probe complete — edge bracketed on all strands)
@@ -323,7 +317,6 @@ This is the **combined** probe endpoint. First call has no answer (starts the pr
     "acceleration_concept": { "floor": "Knows acceleration informally as 'speeding up'", "ceiling": "Doesn't know it's a vector / rate of change of velocity", "gap_type": "narrow" },
     "f_ma_relation": { "floor": null, "ceiling": "Hasn't seen F=ma as a unified equation", "gap_type": "systematic" }
   },
-  "message": "Probe complete. Generating plan…"
 }
 ```
 
