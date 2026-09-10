@@ -1,3 +1,3 @@
-from . import sessions
+from . import probe, sessions
 
-__all__ = ["sessions"]
+__all__ = ["probe", "sessions"]
