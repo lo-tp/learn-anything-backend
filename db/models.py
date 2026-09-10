@@ -101,6 +101,7 @@ class ProbeQuestion(Base):
     text: Mapped[str] = mapped_column(Text)
     options: Mapped[list[str]] = mapped_column(JSON)
     correct_index: Mapped[int] = mapped_column(Integer)
+    explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
     strand: Mapped[str] = mapped_column(String)
     difficulty: Mapped[int] = mapped_column(Integer)
     # Answer (null until answered)
