@@ -189,6 +189,7 @@ material_graph = material_graph_fn(checkpointer=checkpointer)
 | Method | Path | Purpose |
 |--------|------|---------|
 | `POST` | `/sessions` | Create session, start goal capture |
+| `GET` | `/sessions` | List all sessions (newest first), optionally filtered by one or more `?phase=` values |
 | `GET` | `/sessions/{id}` | Get current session state & progress |
 | `POST` | `/sessions/{id}/clarify` | Submit clarification answer (if goal was too broad) |
 
@@ -217,6 +218,32 @@ material_graph = material_graph_fn(checkpointer=checkpointer)
 > **Note:** Slide HTML content is served by a separate sandbox service (out of scope). The `slides` array in the step manifest contains IDs that the client uses to fetch individual slides from the sandbox.
 
 ### Endpoint details
+
+#### `GET /sessions`
+
+Lists all sessions, newest `created_at` first. Filter with a repeatable `phase` query parameter (OR semantics), e.g. `GET /sessions?phase=generating&phase=probing`. An invalid phase value returns `422` (enum validation).
+
+```json
+// Response
+{
+  "sessions": [
+    {
+      "session_id": "abc123",
+      "phase": "probing",
+      "goal": "I want to learn Newton's second law of motion.",
+      "narrowed_goal": "Newton's second law: physical intuition + mathematical formulation.",
+      "created_at": "2026-09-11T07:00:00Z"
+    },
+    {
+      "session_id": "def456",
+      "phase": "executing",
+      "goal": "I want to learn integration by parts.",
+      "narrowed_goal": null,
+      "created_at": "2026-09-10T15:30:00Z"
+    }
+  ]
+}
+```
 
 #### `POST /sessions`
 

@@ -1,6 +1,8 @@
 """Session status routes: state & progress read-back."""
 
-from fastapi import APIRouter, Depends, HTTPException
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
 
@@ -26,7 +28,42 @@ class SessionState(BaseModel):
     progress: Progress
 
 
+class SessionListItem(BaseModel):
+    session_id: str
+    phase: Phase
+    goal: str
+    narrowed_goal: str | None
+    created_at: datetime
+
+
+class SessionList(BaseModel):
+    sessions: list[SessionListItem]
+
+
 # --- Routes ---
+
+
+@router.get("/sessions", response_model=SessionList)
+def list_sessions(
+    phase: list[Phase] | None = Query(default=None),
+    db: DBSession = Depends(get_db),
+) -> SessionList:
+    """List all sessions, newest first, optionally filtered by phase(s)."""
+    query = db.query(Session).order_by(Session.created_at.desc())
+    if phase is not None:
+        query = query.filter(Session.phase.in_([p.value for p in phase]))
+    return SessionList(
+        sessions=[
+            SessionListItem(
+                session_id=s.session_id,
+                phase=Phase(s.phase),
+                goal=s.goal,
+                narrowed_goal=s.narrowed_goal,
+                created_at=s.created_at,
+            )
+            for s in query.all()
+        ]
+    )
 
 
 @router.get("/sessions/{session_id}", response_model=SessionState)
