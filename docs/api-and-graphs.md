@@ -754,6 +754,7 @@ result = plan_graph.invoke(
 
 **State persisted across the loop (in the checkpointer, keyed by `thread_id = f"{session_id}:plan"`):**
 - `current_plan` — the last rendered plan (baseline for next refinement)
+- `design_steps` — the current pass's design output (carries the adjustment into the renderer)
 - `research` — the topic research output (reused across refinements)
 - `pass_count` — how many refinement passes have occurred
 
