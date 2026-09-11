@@ -607,7 +607,7 @@ result = clarify_graph.invoke(Command(resume={"answer": "..."}), config)
 
 | Node | LLM task |
 |------|----------|
-| `decompose_strands` | *(once, at start)* Given the `narrowed_goal`, enumerate the prerequisite strands/concepts the lesson depends on — **not just the headline topic**. Seed `boundary_map` with every strand at `{floor: null, ceiling: null, gap_type: "unknown"}` and record the fixed `strands` list. |
+| `decompose_strands` | *(once, at start)* Given the `narrowed_goal`, enumerate the **direct** prerequisite strands the learner must already understand to learn that specific goal — scoped tightly to the goal itself, not the course/subject it belongs to (no adjacent topics, follow-ups, or prerequisites-of-prerequisites). Seed `boundary_map` with every strand at `{floor: null, ceiling: null, gap_type: "unknown"}` and record the fixed `strands` list. |
 | `generate_question` | Given `goal` + `history` + `boundary_map`, produce the next MCQ/TF question targeting a strand that is **not yet fully bracketed**. Choose strand and difficulty to bracket the edge — escalate on all-correct, probe around a miss. |
 | `evaluate_answer` | Given the question, the learner's answer, and history: mark correct/incorrect, update the **full** `boundary_map` (all seeded strands) for the relevant strand (floor/ceiling/gap_type), append to `history`. |
 | `decide_next` | Given updated boundary: are **all seeded strands** bracketed (non-null floor AND ceiling, or `gap_type == "none"`)? Have we hit 10 questions? → return `"continue"` or `"done"`. |
