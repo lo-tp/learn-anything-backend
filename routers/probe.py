@@ -55,7 +55,7 @@ def _persist_question(
     row = ProbeQuestion(
         id=q["id"],
         session_id=session_id,
-        question_id=q["id"],
+        question_id=uuid.UUID(q["id"]),
         text=q["text"],
         options=q["options"],
         correct_index=q["correct_index"],
