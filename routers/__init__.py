@@ -1,3 +1,3 @@
-from . import clarify, plan, probe, sessions
+from . import clarify, plan, probe, sessions, slides
 
-__all__ = ["clarify", "plan", "probe", "sessions"]
+__all__ = ["clarify", "plan", "probe", "sessions", "slides"]

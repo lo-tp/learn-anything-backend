@@ -153,11 +153,12 @@ class StepMaterial(Base):
 class SlideContent(Base):
     __tablename__ = "slide_contents"
 
-    # Composite PK: slide_id values ({step_id}_slide_{n}) are only unique
-    # within a session — step IDs are generated per session (s0, s1, ...).
+    # Globally unique sole PK: "{session_id}_{step_id}_slide_{n}" — the session
+    # prefix makes it safe across sessions (step IDs repeat per session).
+    # Served to the sandbox service via GET /slides/{slide_id} (internal).
     slide_id: Mapped[str] = mapped_column(String, primary_key=True)
     session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.session_id"), primary_key=True, index=True
+        ForeignKey("sessions.session_id"), index=True
     )
     step_id: Mapped[str] = mapped_column(String)
     content: Mapped[str] = mapped_column(Text)

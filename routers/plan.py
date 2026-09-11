@@ -177,9 +177,10 @@ def generate_materials(session_id: str) -> None:
 
                 # One SlideContent row per slide + one StepMaterial row, in the
                 # same transaction — one durable checkpoint per step.
+                # Slide IDs are globally unique: prefixed with the session ID.
                 slide_ids: list[str] = []
                 for n, html in enumerate(result["slides"], start=1):
-                    slide_id = f"{step['id']}_slide_{n}"
+                    slide_id = f"{session_id}_{step['id']}_slide_{n}"
                     slide_ids.append(slide_id)
                     db.add(
                         SlideContent(

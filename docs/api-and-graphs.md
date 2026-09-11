@@ -113,7 +113,7 @@ class StepMaterial(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id"), index=True)
     step_id: Mapped[str] = mapped_column(String)
-    slides: Mapped[list] = mapped_column(JSON)                 # list of slide IDs (references to sandbox service)
+    slides: Mapped[list] = mapped_column(JSON)                 # list of globally-unique slide IDs (sandbox fetches HTML via GET /slides/{id})
     questions: Mapped[list] = mapped_column(JSON)              # list of {id, text, options, correct_index, explanation}
     summary: Mapped[dict] = mapped_column(JSON)                # ConceptSummary: {step_id, title, key_points: [str]}
 
@@ -123,8 +123,8 @@ class StepMaterial(Base):
 class SlideContent(Base):
     __tablename__ = "slide_contents"
 
-    slide_id: Mapped[str] = mapped_column(String, primary_key=True)   # "{step_id}_slide_{n}" — unique per session (composite PK)
-    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id"), primary_key=True, index=True)
+    slide_id: Mapped[str] = mapped_column(String, primary_key=True)   # "{session_id}_{step_id}_slide_{n}" — globally unique (sole PK)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id"), index=True)
     step_id: Mapped[str] = mapped_column(String)
     content: Mapped[str] = mapped_column(Text)                        # the slide HTML
 
@@ -233,7 +233,13 @@ material_graph = material_graph_fn()
 | `GET` | `/sessions/{id}/steps/{step_id}` | Fetch step manifest: slide IDs + questions |
 | `POST` | `/sessions/{id}/steps/{step_id}/answers` | Submit all answers → get results, score, pass/fail, next step |
 
-> **Note:** Slide HTML content is served by a separate sandbox service (out of scope). The `slides` array in the step manifest contains IDs that the client uses to fetch individual slides from the sandbox.
+> **Note:** Slide HTML content is served to the client by a separate sandbox service. The `slides` array in the step manifest contains globally-unique slide IDs; the sandbox fetches the raw HTML from this backend via the internal `GET /slides/{slide_id}` endpoint.
+
+### Slides (internal — sandbox service only)
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/slides/{slide_id}` | Fetch raw slide HTML by globally-unique ID (internal — the client never calls this) |
 
 ### Endpoint details
 
@@ -438,8 +444,8 @@ Poll material generation progress. Each generated step carries its **summary** p
       "step_id": "s0",
       "summary": { "step_id": "s0", "title": "Truths", "key_points": ["kp1", "kp2"] },
       "items": [
-        { "type": "slide", "slide_id": "s0_slide_1" },
-        { "type": "slide", "slide_id": "s0_slide_2" },
+        { "type": "slide", "slide_id": "abc123_s0_slide_1" },
+        { "type": "slide", "slide_id": "abc123_s0_slide_2" },
         { "type": "question", "id": "s0_q1", "text": "...", "options": ["a", "b"], "correct_index": 0, "explanation": "..." }
       ]
     }
@@ -463,14 +469,14 @@ On `error` the failure message is **not** exposed here — the phase is terminal
 
 #### `GET /sessions/{id}/steps/{step_id}`
 
-Returns the step manifest: slide IDs (for the sandbox service) and questions.
+Returns the step manifest: globally-unique slide IDs and questions.
 
 ```json
 // Response
 {
   "step_id": "s0",
   "title": "Gravitational force",
-  "slides": ["s0_slide_1", "s0_slide_2", "s0_slide_3"],
+  "slides": ["abc123_s0_slide_1", "abc123_s0_slide_2", "abc123_s0_slide_3"],
   "questions": [
     {
       "id": "q1",
@@ -490,7 +496,21 @@ Returns the step manifest: slide IDs (for the sandbox service) and questions.
 }
 ```
 
-The client uses the `slides` IDs to fetch individual slide HTML from the sandbox service (separate system, out of scope).
+The client uses the `slides` IDs to fetch individual slide HTML from the sandbox service (separate system); the sandbox fetches the raw HTML from this backend via `GET /slides/{slide_id}` (internal).
+
+#### `GET /slides/{slide_id}` (internal — sandbox service only)
+
+Not part of the client API: only the **sandbox service** calls this to fetch the raw slide HTML it renders/serves to the client. Slide IDs are globally unique (`{session_id}_{step_id}_slide_{n}`).
+
+```json
+// Response
+{
+  "slide_id": "abc123_s0_slide_1",
+  "content": "<html>…</html>"
+}
+```
+
+Unknown slide ID: `404`.
 
 #### `POST /sessions/{id}/steps/{step_id}/answers`
 
@@ -875,7 +895,7 @@ These live in the `MemorySaver` checkpoint, so the graph resumes from its in-mem
 
 | Node | LLM task |
 |------|----------|
-| `write_slides` | Write 3-7 self-contained HTML slides for this step (no external assets; each renders standalone). Follow teacher.md: establish unconditional truths before building, motivate every step ("how could I have discovered this?"), show the dependency connection to prior steps (referenced via `established_concepts`). Use LaTeX for math. The node returns the HTML strings; the driver assigns IDs `{step_id}_slide_{n}` and stores one `SlideContent` row per slide. |
+| `write_slides` | Write 3-7 self-contained HTML slides for this step (no external assets; each renders standalone). Follow teacher.md: establish unconditional truths before building, motivate every step ("how could I have discovered this?"), show the dependency connection to prior steps (referenced via `established_concepts`). Use LaTeX for math. The node returns the HTML strings; the driver assigns globally-unique IDs `{session_id}_{step_id}_slide_{n}` and stores one `SlideContent` row per slide. |
 | `write_questions` | Write 3-5 MCQ/TF questions testing that the step's concepts landed. Follow the option-construction procedure in teacher.md (bare claims, mutate correct → distractors, no asymmetric bolding, explanations separate). The node code assigns IDs `{step_id}_q{n}` (the LLM does not). |
 | `summarize_step` | Given the generated slides, extract 3-5 key points: definitions, formulas, core insights. Output is a compact `ConceptSummary` object stored for use by subsequent steps. |
 
@@ -908,12 +928,12 @@ for step in plan.steps:  # already in dependency order
     # Store one SlideContent row per slide (IDs assigned by the driver) plus
     # one StepMaterial row, in the same transaction — one durable checkpoint.
     for n, html in enumerate(result["slides"], start=1):
-        db.add(SlideContent(slide_id=f"{step['id']}_slide_{n}",
+        db.add(SlideContent(slide_id=f"{session_id}_{step['id']}_slide_{n}",
                             session_id=session_id, step_id=step["id"], content=html))
     db.add(StepMaterial(
         session_id=session_id,
         step_id=step["id"],
-        slides=[f"{step['id']}_slide_{n}" for n in range(1, len(result["slides"]) + 1)],
+        slides=[f"{session_id}_{step['id']}_slide_{n}" for n in range(1, len(result["slides"]) + 1)],
         questions=result["questions"],
         summary=result["summary"],
     ))
