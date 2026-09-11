@@ -6,6 +6,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from llm import llm
 
 from .clarify import build_clarify_graph
+from .plan import build_plan_graph
 from .probe import build_probe_graph
 
 # One in-memory checkpoint store shared by every graph (MVP).
@@ -16,6 +17,7 @@ checkpointer = MemorySaver()
 
 clarify_graph = build_clarify_graph(llm, checkpointer=checkpointer)
 probe_graph = build_probe_graph(llm, checkpointer=checkpointer)
+plan_graph = build_plan_graph(llm, checkpointer=checkpointer)
 
 
 def graph_config(session_id: str, graph: str) -> RunnableConfig:
