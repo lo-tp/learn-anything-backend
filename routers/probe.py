@@ -1,5 +1,6 @@
 """Probing phase: single combined endpoint driving the Probe graph loop."""
 
+import uuid
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,7 +18,7 @@ router = APIRouter(tags=["probe"])
 
 
 class ProbeIn(BaseModel):
-    question_id: str | None = None
+    question_id: uuid.UUID | None = None
     selected_index: int | None = None
 
 

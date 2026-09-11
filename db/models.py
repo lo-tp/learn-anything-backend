@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from enum import Enum
@@ -15,6 +16,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    Uuid,
     create_engine,
 )
 from sqlalchemy.orm import (
@@ -97,7 +99,7 @@ class ProbeQuestion(Base):
     session_id: Mapped[str] = mapped_column(
         ForeignKey("sessions.session_id"), index=True
     )
-    question_id: Mapped[str] = mapped_column(String)
+    question_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     text: Mapped[str] = mapped_column(Text)
     options: Mapped[list[str]] = mapped_column(JSON)
     correct_index: Mapped[int] = mapped_column(Integer)
