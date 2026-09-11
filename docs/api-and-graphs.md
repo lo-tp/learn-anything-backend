@@ -608,8 +608,8 @@ result = clarify_graph.invoke(Command(resume={"answer": "..."}), config)
 | Node | LLM task |
 |------|----------|
 | `decompose_strands` | *(once, at start)* Given the `narrowed_goal`, enumerate the **direct** prerequisite strands the learner must already understand to learn that specific goal — scoped tightly to the goal itself, not the course/subject it belongs to (no adjacent topics, follow-ups, or prerequisites-of-prerequisites). Seed `boundary_map` with every strand at `{floor: null, ceiling: null, gap_type: "unknown"}` and record the fixed `strands` list. |
-| `generate_question` | Given `goal` + `history` + `boundary_map`, produce the next MCQ/TF question targeting a strand that is **not yet fully bracketed**. Choose strand and difficulty to bracket the edge — escalate on all-correct, probe around a miss. |
-| `evaluate_answer` | Given the question, the learner's answer, and history: mark correct/incorrect, update the **full** `boundary_map` (all seeded strands) for the relevant strand (floor/ceiling/gap_type), append to `history`. |
+| `generate_question` | Given `goal` + `strands` + `strand_descriptions` + `history` + `boundary_map`, produce the next MCQ targeting a strand that is **not yet fully bracketed**. The question tests **only that strand's knowledge** — answerable with the strand's concepts + basic arithmetic alone: never the goal itself, never concepts beyond the strand (a confounded question would mislocate the edge). One question, one concept. Options are built by mutation: correct claim first, distractors = specific misconceptions stated in parallel form (bare claims, no reasoning inside options, no asymmetric emphasis). Binary-search the edge: jump sharply harder after a correct, narrow in after a miss. |
+| `evaluate_answer` | Given the question, the learner's answer, and history: mark correct/incorrect, update the **full** `boundary_map` (all seeded strands) for the relevant strand (floor/ceiling/gap_type), append to `history`. A wrong answer is classified `narrow` (isolated slip) vs `systematic` (confidently-held wrong model that must be probed around, not topped up). |
 | `decide_next` | Given updated boundary: are **all seeded strands** bracketed (non-null floor AND ceiling, or `gap_type == "none"`)? Have we hit 10 questions? → return `"continue"` or `"done"`. |
 
 **Control flow:**
@@ -648,6 +648,7 @@ result = probe_graph.invoke(
 
 **State persisted across the loop (in the checkpointer, keyed by `thread_id = f"{session_id}:probe"`):**
 - `strands` — the fixed prerequisite-strand set produced by `decompose_strands`
+- `strand_descriptions` — one-line description per strand, so `generate_question` knows exactly what each strand covers
 - `boundary_map` — seeded with every strand; updated per answer
 - `history` — the Q&A transcript so far
 - `question_count` — how many questions have been asked (drives the safety cap)
