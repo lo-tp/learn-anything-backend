@@ -103,6 +103,7 @@ def probe_session(
         result = probe_graph.invoke(
             {
                 "goal": session.narrowed_goal or session.goal,
+                "strands": [],
                 "history": [],
                 "boundary_map": {},
                 "question_count": 0,
