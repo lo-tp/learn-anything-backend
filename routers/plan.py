@@ -11,10 +11,11 @@ import logging
 import threading
 import time
 from collections import deque
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from langgraph.types import Command
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session as DBSession
 
 from db import Phase, Plan, Session, SessionFactory, SlideContent, StepMaterial, get_db
@@ -61,7 +62,19 @@ class ApproveOut(BaseModel):
     message: str
 
 
-class QuestionOut(BaseModel):
+class SummaryOut(BaseModel):
+    step_id: str
+    title: str
+    key_points: list[str]
+
+
+class SlideItem(BaseModel):
+    type: Literal["slide"]
+    slide_id: str
+
+
+class QuestionItem(BaseModel):
+    type: Literal["question"]
     id: str
     text: str
     options: list[str]
@@ -69,10 +82,16 @@ class QuestionOut(BaseModel):
     explanation: str
 
 
+MaterialItem = Annotated[
+    SlideItem | QuestionItem,
+    Field(discriminator="type"),
+]
+
+
 class MaterialOut(BaseModel):
     step_id: str
-    slides: list[str]
-    questions: list[QuestionOut]
+    summary: SummaryOut
+    items: list[MaterialItem]
 
 
 class MaterialsOut(BaseModel):
@@ -224,6 +243,28 @@ def _get_session_or_404(db: DBSession, session_id: str) -> Session:
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
     return session
+
+
+def _ordered_materials(session: Session) -> list[StepMaterial]:
+    """StepMaterial rows in plan step order (deterministic).
+
+    Rows whose step_id is not in the plan sort after the plan-ordered rows
+    (by row id); if the session has no plan, rows keep insertion (row-id)
+    order. Ordering is applied here, endpoint-side — the relationship has
+    no order_by.
+    """
+    materials = list(session.materials)
+    plan_steps = session.plan.steps if session.plan is not None else None
+    if plan_steps is None:
+        return sorted(materials, key=lambda m: m.id)
+    order = {s["id"]: i for i, s in enumerate(plan_steps)}
+    return sorted(
+        materials,
+        key=lambda m: (
+            order[m.step_id] if m.step_id in order else len(plan_steps),
+            m.id,
+        ),
+    )
 
 
 def _cleanup_thread(session_id: str) -> None:
@@ -512,13 +553,27 @@ def get_materials(
     """Poll material generation progress with full content."""
     session = _get_session_or_404(db, session_id)
 
-    materials = [
+    try:
+        phase = Phase(session.phase)
+    except ValueError:
+        logger.error(
+            "Session %s has unknown phase %r", session_id, session.phase
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Session {session_id} has unknown phase {session.phase!r}",
+        )
+
+    generated_steps = [
         MaterialOut(
             step_id=m.step_id,
-            slides=m.slides,
-            questions=[QuestionOut(**q) for q in m.questions],
+            summary=SummaryOut(**m.summary),
+            items=[
+                *[SlideItem(type="slide", slide_id=sid) for sid in m.slides],
+                *[QuestionItem(type="question", **q) for q in m.questions],
+            ],
         )
-        for m in session.materials
+        for m in _ordered_materials(session)
     ]
 
-    return MaterialsOut(phase=Phase(session.phase), generated_steps=materials)
+    return MaterialsOut(phase=phase, generated_steps=generated_steps)

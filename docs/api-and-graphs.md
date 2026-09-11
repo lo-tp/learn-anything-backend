@@ -448,7 +448,18 @@ Poll material generation progress. Each generated step carries its **summary** p
 ```
 
 - `items` is a discriminated union on `type`: `"slide"` (carries `slide_id` only) and `"question"` (`id`, `text`, `options`, `correct_index`, `explanation`).
-- During `generating`: partial list (steps generated so far). On `error`: partial list; the failure message is **not** exposed here (terminal — the client starts a new session). Unknown session: `404`.
+
+Behavior by session phase:
+
+| Session phase | Response |
+|---|---|
+| `clarifying` / `probing` / `planning` / `reviewing` | `200`, `generated_steps: []` |
+| `generating` | `200`, partial `generated_steps` (steps generated so far, plan order) |
+| `executing` / `complete` | `200`, full `generated_steps` (plan order) |
+| `error` | `200`, partial `generated_steps`; failure detail only in logs/DB |
+| unknown session | `404` |
+
+On `error` the failure message is **not** exposed here — the phase is terminal and the client starts a new session.
 
 #### `GET /sessions/{id}/steps/{step_id}`
 
