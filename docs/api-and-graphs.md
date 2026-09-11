@@ -224,7 +224,7 @@ material_graph = material_graph_fn()
 | `POST` | `/sessions/{id}/plan/generate` | Trigger plan generation (auto after probe or explicit) |
 | `POST` | `/sessions/{id}/plan/adjust` | Submit a free-text adjustment, get regenerated plan |
 | `POST` | `/sessions/{id}/plan/approve` | Approve plan, kick off background material generation (returns `202` immediately) |
-| `GET` | `/sessions/{id}/materials` | Poll material generation progress (phase + full content per generated step) |
+| `GET` | `/sessions/{id}/materials` | Poll material generation progress (phase + per-step summary and items) |
 
 ### Execution phase (no LLM — deterministic only)
 
@@ -424,6 +424,31 @@ This is the **combined** probe endpoint. First call has no answer (starts the pr
 ```
 
 If generation fails, the session lands in the `error` phase (terminal — the user starts a new session) with the failure message stored on `session.error`.
+
+#### `GET /sessions/{id}/materials`
+
+Poll material generation progress. Each generated step carries its **summary** plus an **items** array — slide items (`slide_id` only; the HTML lives in the domain DB / sandbox service) in slide order, then question items in question order. `generated_steps` is in plan step order (deterministic).
+
+```json
+// Response
+{
+  "phase": "executing",
+  "generated_steps": [
+    {
+      "step_id": "s0",
+      "summary": { "step_id": "s0", "title": "Truths", "key_points": ["kp1", "kp2"] },
+      "items": [
+        { "type": "slide", "slide_id": "s0_slide_1" },
+        { "type": "slide", "slide_id": "s0_slide_2" },
+        { "type": "question", "id": "s0_q1", "text": "...", "options": ["a", "b"], "correct_index": 0, "explanation": "..." }
+      ]
+    }
+  ]
+}
+```
+
+- `items` is a discriminated union on `type`: `"slide"` (carries `slide_id` only) and `"question"` (`id`, `text`, `options`, `correct_index`, `explanation`).
+- During `generating`: partial list (steps generated so far). On `error`: partial list; the failure message is **not** exposed here (terminal — the client starts a new session). Unknown session: `404`.
 
 #### `GET /sessions/{id}/steps/{step_id}`
 
