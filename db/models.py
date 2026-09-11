@@ -56,6 +56,7 @@ class Phase(str, Enum):
     GENERATING = "generating"
     EXECUTING = "executing"
     COMPLETE = "complete"
+    ERROR = "error"
 
 
 # --- Models ---
@@ -69,6 +70,7 @@ class Session(Base):
     goal: Mapped[str] = mapped_column(Text)
     narrowed_goal: Mapped[str | None] = mapped_column(Text, nullable=True)
     boundary_map: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(UTC)
     )
@@ -88,6 +90,9 @@ class Session(Base):
         back_populates="session", cascade="all, delete"
     )
     step_progress: Mapped[list[StepProgress]] = relationship(
+        back_populates="session", cascade="all, delete"
+    )
+    slide_contents: Mapped[list[SlideContent]] = relationship(
         back_populates="session", cascade="all, delete"
     )
 
@@ -143,6 +148,21 @@ class StepMaterial(Base):
     summary: Mapped[dict[str, Any]] = mapped_column(JSON)
 
     session: Mapped[Session] = relationship(back_populates="materials")
+
+
+class SlideContent(Base):
+    __tablename__ = "slide_contents"
+
+    # Composite PK: slide_id values ({step_id}_slide_{n}) are only unique
+    # within a session — step IDs are generated per session (s0, s1, ...).
+    slide_id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("sessions.session_id"), primary_key=True, index=True
+    )
+    step_id: Mapped[str] = mapped_column(String)
+    content: Mapped[str] = mapped_column(Text)
+
+    session: Mapped[Session] = relationship(back_populates="slide_contents")
 
 
 class StepProgress(Base):

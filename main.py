@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -9,6 +10,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from routers import clarify, plan, probe, sessions
 
 load_dotenv()
+
+# Log level is controlled by LOG_LEVEL in .env (default: INFO).
+# Set LOG_LEVEL=DEBUG for per-step / per-node material generation detail.
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 PORT = int(os.getenv("PORT", "8000"))
 

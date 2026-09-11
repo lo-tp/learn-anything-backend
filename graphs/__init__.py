@@ -6,6 +6,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from llm import llm
 
 from .clarify import build_clarify_graph
+from .material import build_material_graph
 from .plan import build_plan_graph
 from .probe import build_probe_graph
 
@@ -18,6 +19,11 @@ checkpointer = MemorySaver()
 clarify_graph = build_clarify_graph(llm, checkpointer=checkpointer)
 probe_graph = build_probe_graph(llm, checkpointer=checkpointer)
 plan_graph = build_plan_graph(llm, checkpointer=checkpointer)
+
+# The Material graph is one-shot per step with no interrupts, so it needs no
+# checkpointer — resume state lives in the domain DB (one StepMaterial row per
+# step), keeping the two stores independent.
+material_graph = build_material_graph(llm)
 
 
 def graph_config(session_id: str, graph: str) -> RunnableConfig:

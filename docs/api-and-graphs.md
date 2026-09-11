@@ -50,6 +50,7 @@ class Phase(str, Enum):
     GENERATING = "generating"
     EXECUTING = "executing"
     COMPLETE = "complete"
+    ERROR = "error"
 
 # --- Models ---
 
@@ -61,6 +62,7 @@ class Session(Base):
     goal: Mapped[str] = mapped_column(Text)
     narrowed_goal: Mapped[str | None] = mapped_column(Text, nullable=True)
     boundary_map: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # strand -> {floor, ceiling, gap_type}
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)           # failure message when phase == "error", null otherwise
     created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -69,6 +71,7 @@ class Session(Base):
     plan: Mapped["Plan | None"] = relationship(back_populates="session", uselist=False, cascade="all, delete")
     materials: Mapped[list["StepMaterial"]] = relationship(back_populates="session", cascade="all, delete")
     step_progress: Mapped[list["StepProgress"]] = relationship(back_populates="session", cascade="all, delete")
+    slide_contents: Mapped[list["SlideContent"]] = relationship(back_populates="session", cascade="all, delete")
 
 
 class ProbeQuestion(Base):
@@ -115,6 +118,17 @@ class StepMaterial(Base):
     summary: Mapped[dict] = mapped_column(JSON)                # ConceptSummary: {step_id, title, key_points: [str]}
 
     session: Mapped["Session"] = relationship(back_populates="materials")
+
+
+class SlideContent(Base):
+    __tablename__ = "slide_contents"
+
+    slide_id: Mapped[str] = mapped_column(String, primary_key=True)   # "{step_id}_slide_{n}" — unique per session (composite PK)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id"), primary_key=True, index=True)
+    step_id: Mapped[str] = mapped_column(String)
+    content: Mapped[str] = mapped_column(Text)                        # the slide HTML
+
+    session: Mapped["Session"] = relationship(back_populates="slide_contents")
 
 
 class StepProgress(Base):
@@ -168,7 +182,11 @@ Graphs are compiled with the checkpointer:
 clarify_graph  = clarify_graph_fn(checkpointer=checkpointer)
 probe_graph    = probe_graph_fn(checkpointer=checkpointer)
 plan_graph     = plan_graph_fn(checkpointer=checkpointer)
-material_graph = material_graph_fn(checkpointer=checkpointer)
+
+# The Material graph is one-shot per step with no interrupts, so it is
+# compiled WITHOUT a checkpointer — its resume state lives in the domain DB
+# (one StepMaterial row per step), keeping the two stores independent.
+material_graph = material_graph_fn()
 ```
 
 **What the checkpointer stores (per thread):**
@@ -206,7 +224,7 @@ material_graph = material_graph_fn(checkpointer=checkpointer)
 | `POST` | `/sessions/{id}/plan/generate` | Trigger plan generation (auto after probe or explicit) |
 | `POST` | `/sessions/{id}/plan/adjust` | Submit a free-text adjustment, get regenerated plan |
 | `POST` | `/sessions/{id}/plan/approve` | Approve plan, kick off background material generation (returns `202` immediately) |
-| `GET` | `/sessions/{id}/materials` | Poll material generation progress (step IDs generated so far) |
+| `GET` | `/sessions/{id}/materials` | Poll material generation progress (phase + full content per generated step) |
 
 ### Execution phase (no LLM — deterministic only)
 
@@ -398,14 +416,14 @@ This is the **combined** probe endpoint. First call has no answer (starts the pr
 // Request
 { }
 
-// Response (materials generated synchronously)
+// Response (202 — generation runs as a background task; poll GET /sessions/{id}/materials)
 {
-  "phase": "executing",
-  "current_step_id": "s0",
-  "total_steps": 5,
-  "message": "Plan approved. Materials generated. Start with step 's0'."
+  "phase": "generating",
+  "message": "Plan approved. Material generation started in the background."
 }
 ```
+
+If generation fails, the session lands in the `error` phase (terminal — the user starts a new session) with the failure message stored on `session.error`.
 
 #### `GET /sessions/{id}/steps/{step_id}`
 
@@ -821,11 +839,11 @@ These live in the `MemorySaver` checkpoint, so the graph resumes from its in-mem
 
 | Node | LLM task |
 |------|----------|
-| `write_slides` | Write HTML slides for this step. Follow teacher.md: motivate the concept, establish unconditional truths before building, show the dependency connection to prior steps (referenced via `established_concepts`). Use LaTeX for math. Multiple slides (3-7 typical). Generated HTML is pushed to the sandbox service; this node returns the assigned slide IDs. |
-| `write_questions` | Write 3-5 MCQ/TF questions testing that the step's concepts landed. Follow the option-construction procedure in teacher.md (bare claims, mutate correct → distractors, no asymmetric bolding, explanations separate). |
+| `write_slides` | Write 3-7 self-contained HTML slides for this step (no external assets; each renders standalone). Follow teacher.md: establish unconditional truths before building, motivate every step ("how could I have discovered this?"), show the dependency connection to prior steps (referenced via `established_concepts`). Use LaTeX for math. The node returns the HTML strings; the driver assigns IDs `{step_id}_slide_{n}` and stores one `SlideContent` row per slide. |
+| `write_questions` | Write 3-5 MCQ/TF questions testing that the step's concepts landed. Follow the option-construction procedure in teacher.md (bare claims, mutate correct → distractors, no asymmetric bolding, explanations separate). The node code assigns IDs `{step_id}_q{n}` (the LLM does not). |
 | `summarize_step` | Given the generated slides, extract 3-5 key points: definitions, formulas, core insights. Output is a compact `ConceptSummary` object stored for use by subsequent steps. |
 
-**Control flow:** Linear. Called once per step, sequentially through the plan (step 1 → step 2 → … → step N). Each call receives the **accumulated concept summaries** from all prior steps (not the full materials), so context stays small.
+**Control flow:** Linear. Compiled **without a checkpointer** — it is one-shot per step with no interrupts, so its resume state lives in the domain DB (one committed `StepMaterial` row per step), not in graph state. Called once per step, sequentially through the plan (step 1 → step 2 → … → step N). Each call receives the **accumulated concept summaries** from all prior steps (not the full materials), so context stays small.
 
 **ConceptSummary shape:**
 ```python
@@ -837,29 +855,33 @@ class ConceptSummary(TypedDict):
 
 **Invocation pattern from FastAPI:**
 ```python
-# Called during plan/approve, sequentially:
+# Called by the background driver (routers/plan.py) per step, sequentially:
 summaries: list[ConceptSummary] = []
 
-for step in plan["steps"]:
+for step in plan.steps:  # already in dependency order
     result = material_graph.invoke({
         "step": step,
         "established_concepts": summaries,  # compact, stays small
-        "learner_context": session["boundary_map"]
+        "learner_context": session.boundary_map,
     })
     # result = {
-    #   "slides": ["s0_slide_1", "s0_slide_2", "s0_slide_3"],  # IDs; HTML pushed to sandbox
-    #   "questions": [...],
-    #   "summary": {...}
+    #   "slides": ["<html>", "<html>", ...],  # HTML strings (no checkpointer, one-shot)
+    #   "questions": [{"id": "s0_q1", ...}],  # IDs assigned by the node code
+    #   "summary": {...},
     # }
-    # (The write_slides node pushes generated HTML to the sandbox service
-    #  and returns the assigned slide IDs.)
+    # Store one SlideContent row per slide (IDs assigned by the driver) plus
+    # one StepMaterial row, in the same transaction — one durable checkpoint.
+    for n, html in enumerate(result["slides"], start=1):
+        db.add(SlideContent(slide_id=f"{step['id']}_slide_{n}",
+                            session_id=session_id, step_id=step["id"], content=html))
     db.add(StepMaterial(
         session_id=session_id,
         step_id=step["id"],
-        slides=result["slides"],
+        slides=[f"{step['id']}_slide_{n}" for n in range(1, len(result["slides"]) + 1)],
         questions=result["questions"],
-        summary=result["summary"]
+        summary=result["summary"],
     ))
+    db.commit()
     summaries.append(result["summary"])
 ```
 
@@ -881,56 +903,20 @@ Generating slides + questions for every step can take minutes, so `POST /plan/ap
 ```
 POST /plan/approve
    │
-   ├─ write approved Plan row (request db)
-   ├─ background_tasks.add_task(generate_materials, session_id, steps, boundary_map)
+   ├─ resume plan graph (approve), re-persist Plan row, phase = generating (request db)
+   ├─ background_tasks.add_task(generate_materials, session_id)
    └─ return 202 { "phase": "generating", ... }
 
-generate_materials (background task, its OWN db session):
+generate_materials (background task, its OWN db session, per-session lock):
+   load session, plan.steps, boundary_map; return early if either is missing
    for step in steps (dependency order):
-        if StepMaterial(step) already exists: skip     # resume past it
-        result = material_graph.invoke(...)            # linear per-step graph
-        db.add(StepMaterial(...)); db.commit()         # one durable row per step
+        if StepMaterial(step) already exists:
+            skip generation, but append its stored summary   # resume past it
+        result = material_graph.invoke(...)                  # linear per-step graph
+        db.add(SlideContent rows) + db.add(StepMaterial(...)); db.commit()
         summaries.append(result["summary"])
-```
-
-**Driver code:**
-
-```python
-from fastapi import BackgroundTasks
-
-async def generate_materials(session_id: str, steps: list[dict], boundary_map: dict):
-    db = SessionFactory()          # its OWN session — never reuse the request's
-    try:
-        summaries: list[dict] = []
-        for step in steps:
-            if db.query(StepMaterial).filter_by(
-                session_id=session_id, step_id=step["id"]).first():
-                continue            # already generated — resume past it
-            result = material_graph.invoke(
-                {"step": step, "established_concepts": summaries,
-                 "learner_context": boundary_map},
-            )
-            db.add(StepMaterial(
-                session_id=session_id, step_id=step["id"],
-                slides=result["slides"], questions=result["questions"],
-                summary=result["summary"],
-            ))
-            db.commit()             # durable checkpoint, one step at a time
-            summaries.append(result["summary"])
-    finally:
-        db.close()
-
-@router.post("/sessions/{id}/plan/approve", status_code=202)
-async def approve(id: str, background_tasks: BackgroundTasks, db=Depends(get_db)):
-    # ... write approved Plan row via `db` ... (commit)
-    background_tasks.add_task(generate_materials, id, plan["steps"], boundary_map)
-    return {"phase": "generating", "message": "Material generation started."}
-
-@router.get("/sessions/{id}/materials")
-async def materials_status(id: str, db=Depends(get_db)):
-    session = db.get(Session, id)
-    done = db.query(StepMaterial).filter_by(session_id=id).all()
-    return {"phase": session.phase, "generated_steps": [m.step_id for m in done]}
+   phase = executing; commit
+   on any exception: rollback, log, phase = error + session.error; commit
 ```
 
 **Key points:**

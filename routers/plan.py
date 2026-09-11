@@ -1,16 +1,33 @@
-"""Plan phase endpoints: generate, adjust, approve, and material polling."""
+"""Plan phase endpoints: generate, adjust, approve, and material polling.
 
+Approving the plan schedules ``generate_materials`` as a FastAPI background
+task: a per-step driver that commits one ``StepMaterial`` row (plus one
+``SlideContent`` row per slide) per step. The domain DB is the resume point —
+a step with an existing row is skipped; a failure lands the session in the
+``error`` phase (terminal, per design).
+"""
+
+import logging
+import threading
+import time
 from collections import deque
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from langgraph.types import Command
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
 
-from db import Phase, Plan, Session, get_db
-from graphs import checkpointer, graph_config, plan_graph
+from db import Phase, Plan, Session, SessionFactory, SlideContent, StepMaterial, get_db
+from graphs import checkpointer, graph_config, material_graph, plan_graph
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["plan"])
+
+# One lock per session: a double-approve must not race check-then-insert on
+# the shared in-memory SQLite connection. The guard protects lock creation.
+_session_locks: dict[str, threading.Lock] = {}
+_locks_guard = threading.Lock()
 
 
 # --- Schemas ---
@@ -61,6 +78,142 @@ class MaterialOut(BaseModel):
 class MaterialsOut(BaseModel):
     phase: Phase
     generated_steps: list[MaterialOut]
+
+
+def _session_lock(session_id: str) -> threading.Lock:
+    """Get (or create) the per-session generation lock."""
+    with _locks_guard:
+        lock = _session_locks.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            _session_locks[session_id] = lock
+        return lock
+
+
+# --- Background material generation driver ---
+
+
+def generate_materials(session_id: str) -> None:
+    """Generate material for every plan step, one committed row per step.
+
+    Plain ``def`` so FastAPI runs it in the thread pool after the approve
+    response is sent. Opens its OWN db session (the request's is closed by
+    then). The DB is the resume point: a ``StepMaterial`` row for a step means
+    it is done — skip it (but keep its summary in the accumulated context).
+    """
+    with _session_lock(session_id):
+        started = time.monotonic()
+        db = SessionFactory()
+        try:
+            session = db.get(Session, session_id)
+            if session is None:
+                logger.warning(
+                    "Material generation: session %s not found, aborting",
+                    session_id,
+                )
+                return
+            steps = session.plan.steps if session.plan is not None else None
+            boundary_map = session.boundary_map
+            if not steps or boundary_map is None:
+                logger.warning(
+                    "Material generation: session %s has no plan or "
+                    "boundary map, aborting",
+                    session_id,
+                )
+                return
+
+            logger.info(
+                "Material generation started: session=%s, steps=%d",
+                session_id, len(steps),
+            )
+            summaries: list[dict] = []
+            for step in steps:  # already in dependency order
+                existing = (
+                    db.query(StepMaterial)
+                    .filter_by(session_id=session_id, step_id=step["id"])
+                    .first()
+                )
+                if existing is not None:
+                    # Already generated — resume past it, but keep its summary.
+                    logger.debug(
+                        "Material generation: step %s already generated, skipping",
+                        step["id"],
+                    )
+                    summaries.append(existing.summary)
+                    continue
+
+                step_started = time.monotonic()
+                logger.debug(
+                    "Material generation: generating step %s "
+                    "(established concepts: %d)",
+                    step["id"], len(summaries),
+                )
+                result = material_graph.invoke(
+                    {
+                        "step": step,
+                        "established_concepts": summaries,
+                        "learner_context": boundary_map,
+                    }
+                )
+
+                # One SlideContent row per slide + one StepMaterial row, in the
+                # same transaction — one durable checkpoint per step.
+                slide_ids: list[str] = []
+                for n, html in enumerate(result["slides"], start=1):
+                    slide_id = f"{step['id']}_slide_{n}"
+                    slide_ids.append(slide_id)
+                    db.add(
+                        SlideContent(
+                            slide_id=slide_id,
+                            session_id=session_id,
+                            step_id=step["id"],
+                            content=html,
+                        )
+                    )
+                db.add(
+                    StepMaterial(
+                        session_id=session_id,
+                        step_id=step["id"],
+                        slides=slide_ids,
+                        questions=result["questions"],
+                        summary=result["summary"],
+                    )
+                )
+                db.commit()
+                summaries.append(result["summary"])
+                logger.info(
+                    "Material generation: step %s done (%d slides, %d questions, %.1fs)",
+                    step["id"],
+                    len(slide_ids),
+                    len(result["questions"]),
+                    time.monotonic() - step_started,
+                )
+
+            session.phase = Phase.EXECUTING.value
+            db.commit()
+            logger.info(
+                "Material generation complete: session=%s, %.1fs total",
+                session_id, time.monotonic() - started,
+            )
+        except Exception as exc:
+            db.rollback()
+            logger.exception(
+                "Material generation failed for session %s after %.1fs",
+                session_id, time.monotonic() - started,
+            )
+            try:
+                # Re-fetch: the rollback expired the objects loaded above.
+                errored = db.get(Session, session_id)
+                if errored is not None:
+                    errored.phase = Phase.ERROR.value
+                    errored.error = f"Material generation failed: {exc}"
+                    db.commit()
+            except Exception:
+                logger.exception(
+                    "Failed to record error state for session %s", session_id
+                )
+        finally:
+            db.close()
 
 
 # --- Helpers ---
@@ -297,9 +450,11 @@ def adjust_plan(
     status_code=202,
 )
 def approve_plan(
-    session_id: str, db: DBSession = Depends(get_db)
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    db: DBSession = Depends(get_db),
 ) -> ApproveOut:
-    """Approve the plan and transition to generating."""
+    """Approve the plan, then start material generation in the background."""
     session = _get_session_or_404(db, session_id)
     if session.phase != Phase.REVIEWING.value:
         raise HTTPException(
@@ -336,7 +491,15 @@ def approve_plan(
     session.phase = Phase.GENERATING.value
     db.commit()
 
-    return ApproveOut(phase=Phase.GENERATING, message="Plan approved.")
+    # Runs in the thread pool after the 202 is sent; opens its own db session.
+    background_tasks.add_task(generate_materials, session_id)
+
+    return ApproveOut(
+        phase=Phase.GENERATING,
+        message=(
+            "Plan approved. Material generation started in the background."
+        ),
+    )
 
 
 @router.get(
