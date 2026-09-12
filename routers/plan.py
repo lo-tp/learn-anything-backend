@@ -8,11 +8,13 @@ a step with an existing row is skipped; a failure lands the session in the
 """
 
 import logging
+import os
 import threading
 import time
 from collections import deque
 from typing import Annotated, Literal
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from langgraph.types import Command
 from pydantic import BaseModel, Field
@@ -24,6 +26,12 @@ from graphs import checkpointer, graph_config, material_graph, plan_graph
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["plan"])
+
+# Base URL of the sandbox service, which compiles slide JSX. See .env.example.
+SANDBOX_URL = os.getenv("SANDBOX_URL", "http://localhost:8080")
+
+# Per-request budget for a slide compile call (seconds).
+_COMPILE_TIMEOUT_S = 30.0
 
 # One lock per session: a double-approve must not race check-then-insert on
 # the shared in-memory SQLite connection. The guard protects lock creation.
@@ -112,6 +120,37 @@ def _session_lock(session_id: str) -> threading.Lock:
 # --- Background material generation driver ---
 
 
+def _compile_slide(code: str) -> str:
+    """Compile a slide's JSX via the sandbox service before persisting it.
+
+    POSTs ``{"code": <jsx>}`` to ``{SANDBOX_URL}/api/compile``. Per the
+    contract, the response is ``{"code": <compiled tsx>, "error": <str>}``:
+    when ``error`` is falsy the compiled ``code`` is returned (and saved);
+    otherwise the original JSX is returned. Any transport/HTTP failure also
+    falls back to the original JSX so a sandbox outage never blocks material
+    generation.
+    """
+    url = f"{SANDBOX_URL.rstrip('/')}/api/compile"
+    try:
+        with httpx.Client(timeout=_COMPILE_TIMEOUT_S) as client:
+            resp = client.post(url, json={"code": code})
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception:
+        logger.warning(
+            "Slide compile failed (sandbox=%s); saving original JSX", url,
+            exc_info=True,
+        )
+        return code
+    if data.get("error"):
+        logger.warning(
+            "Slide compile returned error; saving original JSX: %s",
+            data.get("error"),
+        )
+        return code
+    return data.get("code") or code
+
+
 def generate_materials(session_id: str) -> None:
     """Generate material for every plan step, one committed row per step.
 
@@ -187,7 +226,7 @@ def generate_materials(session_id: str) -> None:
                             slide_id=slide_id,
                             session_id=session_id,
                             step_id=step["id"],
-                            content=slide,
+                            content=_compile_slide(slide),
                         )
                     )
                 db.add(

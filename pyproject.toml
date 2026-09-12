@@ -9,6 +9,7 @@ dependencies = [
     "langgraph>=0.4.0",
     "langchain-openai>=1.6.0",
     "sqlalchemy>=2.0",
+    "httpx>=0.28.1",
 ]
 
 [tool.ruff.lint.flake8-bugbear]
