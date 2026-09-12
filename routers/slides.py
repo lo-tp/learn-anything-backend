@@ -1,8 +1,8 @@
-"""Internal slide content route: raw HTML fetch by slide ID.
+"""Internal slide content route: raw JSX fetch by slide ID.
 
 Not public — only the **sandbox service** calls this to fetch the raw slide
-HTML it renders/serves to the client. The client never calls this endpoint
-directly (see docs/api-and-graphs.md).
+JSX (React component source) it compiles and mounts to serve the client. The
+client never calls this endpoint directly (see docs/api-and-graphs.md).
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,7 +21,7 @@ class SlideOut(BaseModel):
 
 @router.get("/slides/{slide_id}", response_model=SlideOut)
 def get_slide(slide_id: str, db: DBSession = Depends(get_db)) -> SlideOut:
-    """Fetch raw slide HTML by globally-unique slide ID (internal)."""
+    """Fetch raw slide JSX (component source) by globally-unique slide ID (internal)."""
     slide = db.get(SlideContent, slide_id)
     if slide is None:
         raise HTTPException(status_code=404, detail="Slide not found")

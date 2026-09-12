@@ -113,7 +113,7 @@ class StepMaterial(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id"), index=True)
     step_id: Mapped[str] = mapped_column(String)
-    slides: Mapped[list] = mapped_column(JSON)                 # list of globally-unique slide IDs (sandbox fetches HTML via GET /slides/{id})
+    slides: Mapped[list] = mapped_column(JSON)                 # list of globally-unique slide IDs (sandbox fetches JSX via GET /slides/{id})
     questions: Mapped[list] = mapped_column(JSON)              # list of {id, text, options, correct_index, explanation}
     summary: Mapped[dict] = mapped_column(JSON)                # ConceptSummary: {step_id, title, key_points: [str]}
 
@@ -126,7 +126,7 @@ class SlideContent(Base):
     slide_id: Mapped[str] = mapped_column(String, primary_key=True)   # "{session_id}_{step_id}_slide_{n}" — globally unique (sole PK)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id"), index=True)
     step_id: Mapped[str] = mapped_column(String)
-    content: Mapped[str] = mapped_column(Text)                        # the slide HTML
+    content: Mapped[str] = mapped_column(Text)                        # the slide JSX component source
 
     session: Mapped["Session"] = relationship(back_populates="slide_contents")
 
@@ -233,13 +233,13 @@ material_graph = material_graph_fn()
 | `GET` | `/sessions/{id}/steps/{step_id}` | Fetch step manifest: slide IDs + questions |
 | `POST` | `/sessions/{id}/steps/{step_id}/answers` | Submit all answers → get results, score, pass/fail, next step |
 
-> **Note:** Slide HTML content is served to the client by a separate sandbox service. The `slides` array in the step manifest contains globally-unique slide IDs; the sandbox fetches the raw HTML from this backend via the internal `GET /slides/{slide_id}` endpoint.
+> **Note:** Slide JSX content is served to the client by a separate sandbox service. The `slides` array in the step manifest contains globally-unique slide IDs; the sandbox fetches the raw JSX from this backend via the internal `GET /slides/{slide_id}` endpoint.
 
 ### Slides (internal — sandbox service only)
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET` | `/slides/{slide_id}` | Fetch raw slide HTML by globally-unique ID (internal — the client never calls this) |
+| `GET` | `/slides/{slide_id}` | Fetch raw slide JSX by globally-unique ID (internal — the client never calls this) |
 
 ### Endpoint details
 
@@ -433,7 +433,7 @@ If generation fails, the session lands in the `error` phase (terminal — the us
 
 #### `GET /sessions/{id}/materials`
 
-Poll material generation progress. Each generated step carries its **summary** plus an **items** array — slide items (`slide_id` only; the HTML lives in the domain DB / sandbox service) in slide order, then question items in question order. `generated_steps` is in plan step order (deterministic).
+Poll material generation progress. Each generated step carries its **summary** plus an **items** array — slide items (`slide_id` only; the JSX lives in the domain DB / sandbox service) in slide order, then question items in question order. `generated_steps` is in plan step order (deterministic).
 
 ```json
 // Response
@@ -496,17 +496,17 @@ Returns the step manifest: globally-unique slide IDs and questions.
 }
 ```
 
-The client uses the `slides` IDs to fetch individual slide HTML from the sandbox service (separate system); the sandbox fetches the raw HTML from this backend via `GET /slides/{slide_id}` (internal).
+The client uses the `slides` IDs to fetch individual slide JSX from the sandbox service (separate system); the sandbox fetches the raw JSX from this backend via `GET /slides/{slide_id}` (internal).
 
 #### `GET /slides/{slide_id}` (internal — sandbox service only)
 
-Not part of the client API: only the **sandbox service** calls this to fetch the raw slide HTML it renders/serves to the client. Slide IDs are globally unique (`{session_id}_{step_id}_slide_{n}`).
+Not part of the client API: only the **sandbox service** calls this to fetch the raw slide JSX it compiles/mounts to serve the client. Slide IDs are globally unique (`{session_id}_{step_id}_slide_{n}`).
 
 ```json
 // Response
 {
   "slide_id": "abc123_s0_slide_1",
-  "content": "<html>…</html>"
+  "content": "export default function Slide() { return (<div>…</div>); }"
 }
 ```
 
@@ -865,12 +865,12 @@ These live in the `MemorySaver` checkpoint, so the graph resumes from its in-mem
 
 ### Graph 4: Material Generation Graph
 
-**Purpose:** For a single approved plan step, generate the HTML slides, quiz questions, and a compact summary of established concepts (for use by subsequent steps).
+**Purpose:** For a single approved plan step, generate the React JSX slides, quiz questions, and a compact summary of established concepts (for use by subsequent steps).
 
 **Entry:** `(step, established_concepts, learner_context)`  
 **Exit:** `StepMaterial` (slides + questions) + `ConceptSummary` (key points for downstream steps)
 
-**Context strategy:** To avoid unbounded context growth, each step receives only a **cumulative concept summary** (a few key points per prior step), not the full HTML slides. This keeps input size O(n × small_constant) regardless of plan length.
+**Context strategy:** To avoid unbounded context growth, each step receives only a **cumulative concept summary** (a few key points per prior step), not the full JSX slides. This keeps input size O(n × small_constant) regardless of plan length.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
@@ -881,7 +881,7 @@ These live in the `MemorySaver` checkpoint, so the graph resumes from its in-mem
 │  │              │    │ questions    │    │ step         │       │
 │  └──────────────┘    └──────────────┘    └──────────────┘       │
 │                                                                  │
-│  (HTML slides        (MCQ/TF questions   (3-5 key points:       │
+│  (JSX  slides        (MCQ/TF questions   (3-5 key points:       │
 │   following           with explanations,  definitions,          │
 │   teacher.md          following         formulas, key           │
 │   principles)         teacher.md        insights — used         │
@@ -895,7 +895,7 @@ These live in the `MemorySaver` checkpoint, so the graph resumes from its in-mem
 
 | Node | LLM task |
 |------|----------|
-| `write_slides` | Write 3-7 self-contained HTML slides for this step (no external assets; each renders standalone). Follow teacher.md: establish unconditional truths before building, motivate every step ("how could I have discovered this?"), show the dependency connection to prior steps (referenced via `established_concepts`). Use LaTeX for math. The node returns the HTML strings; the driver assigns globally-unique IDs `{session_id}_{step_id}_slide_{n}` and stores one `SlideContent` row per slide. |
+| `write_slides` | Write 3-7 self-contained React JSX slide components for this step (standalone `export default` components; inline styles; no external assets). Follow teacher.md: establish unconditional truths before building, motivate every step ("how could I have discovered this?"), show the dependency connection to prior steps (referenced via `established_concepts`). Use LaTeX for math. The node returns the JSX component source strings; the driver assigns globally-unique IDs `{session_id}_{step_id}_slide_{n}` and stores one `SlideContent` row per slide. |
 | `write_questions` | Write 3-5 MCQ/TF questions testing that the step's concepts landed. Follow the option-construction procedure in teacher.md (bare claims, mutate correct → distractors, no asymmetric bolding, explanations separate). The node code assigns IDs `{step_id}_q{n}` (the LLM does not). |
 | `summarize_step` | Given the generated slides, extract 3-5 key points: definitions, formulas, core insights. Output is a compact `ConceptSummary` object stored for use by subsequent steps. |
 
@@ -921,15 +921,15 @@ for step in plan.steps:  # already in dependency order
         "learner_context": session.boundary_map,
     })
     # result = {
-    #   "slides": ["<html>", "<html>", ...],  # HTML strings (no checkpointer, one-shot)
+    #   "slides": ["export default function Slide1() { return (<div>…</div>); }", ...],  # JSX component source strings (no checkpointer, one-shot)
     #   "questions": [{"id": "s0_q1", ...}],  # IDs assigned by the node code
     #   "summary": {...},
     # }
     # Store one SlideContent row per slide (IDs assigned by the driver) plus
     # one StepMaterial row, in the same transaction — one durable checkpoint.
-    for n, html in enumerate(result["slides"], start=1):
+    for n, slide in enumerate(result["slides"], start=1):
         db.add(SlideContent(slide_id=f"{session_id}_{step['id']}_slide_{n}",
-                            session_id=session_id, step_id=step["id"], content=html))
+                            session_id=session_id, step_id=step["id"], content=slide))
     db.add(StepMaterial(
         session_id=session_id,
         step_id=step["id"],
@@ -945,7 +945,7 @@ for step in plan.steps:  # already in dependency order
 
 | Approach | Context at step 8 (est.) | Scales? |
 |----------|--------------------------|--------|
-| Full prior materials (HTML + questions) | ~30-40k tokens | No — grows linearly with plan length |
+| Full prior materials (JSX + questions) | ~30-40k tokens | No — grows linearly with plan length |
 | Cumulative concept summaries | ~1-2k tokens | Yes — a few lines per step, bounded |
 
 ---

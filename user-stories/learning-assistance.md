@@ -51,7 +51,7 @@ description: End-to-end assisted learning flow. The user states a goal, the syst
 
 For each step in the approved plan, the system generates:
 
-- **A set of learning slides**, formatted as **HTML**, that teach the step's content. Each step contains several slides (the exact count is determined by the depth of the material). The slides follow the pedagogical principles in `ref/teacher.md`:
+- **A set of learning slides**, formatted as **React JSX**, that teach the step's content. Each step contains several slides (the exact count is determined by the depth of the material). The slides follow the pedagogical principles in `ref/teacher.md`:
   - Unconditional truths are established first and confirmed before building on them.
   - Every concept is motivated — the learner is shown *why* it exists and *how* it could have been discovered, not just *what* it is.
   - Dependencies are made explicit: each new concept is connected to what came before it.
@@ -66,7 +66,7 @@ For each step in the approved plan, the system generates:
 
 - The learner works through the plan **step by step, in order**.
 - For each step:
-  1. **Learn** — read/study the HTML slides.
+  1. **Learn** — read/study the JSX slides.
   2. **Assess** — answer the ensuing self-assessment questions.
 - A step is considered **complete** when the learner has finished all its slides **and** all its questions.
 - The system tracks progress: which steps are done, in-progress, or pending.
@@ -105,7 +105,7 @@ For each step in the approved plan, the system generates:
 - [ ] Execution does not start until the learner explicitly approves.
 
 ### Material generation
-- [ ] Each step has a set of HTML-formatted learning slides.
+- [ ] Each step has a set of React JSX learning slides.
 - [ ] Each step has a set of multiple-choice / true-false self-assessment questions.
 - [ ] Questions include correct answers and explanations (explanations shown post-answer).
 - [ ] Slides follow the pedagogical principles: unconditional truths first, motivated discovery, explicit dependency connections.
