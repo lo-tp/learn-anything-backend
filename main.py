@@ -7,9 +7,9 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from routers import clarify, plan, probe, sessions, slides
-
 load_dotenv()
+
+from routers import clarify, plan, probe, sessions, slides
 
 # Log level is controlled by LOG_LEVEL in .env (default: INFO).
 # Set LOG_LEVEL=DEBUG for per-step / per-node material generation detail.

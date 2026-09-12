@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -27,15 +28,17 @@ from sqlalchemy.orm import (
     sessionmaker,
 )
 from sqlalchemy.orm import Session as DBSession
-from sqlalchemy.pool import StaticPool
 
-# --- Engine (in-memory, single connection) ---
+# --- Engine (PostgreSQL) ---
 
-engine = create_engine(
-    "sqlite:///:memory:",
-    connect_args={"check_same_thread": False},
-    poolclass=StaticPool,  # required for in-memory SQLite with multiple connections
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL is not set. "
+        "Expected e.g. postgresql+psycopg://user:pass@host:5432/db"
+    )
+
+engine = create_engine(DATABASE_URL)
 
 
 class Base(DeclarativeBase):
@@ -180,11 +183,6 @@ class StepProgress(Base):
     complete: Mapped[bool] = mapped_column(Boolean, default=False)
 
     session: Mapped[Session] = relationship(back_populates="step_progress")
-
-
-# --- Init ---
-
-Base.metadata.create_all(engine)
 
 
 # --- FastAPI dependency ---
