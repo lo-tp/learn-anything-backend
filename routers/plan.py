@@ -120,15 +120,14 @@ def _session_lock(session_id: str) -> threading.Lock:
 # --- Background material generation driver ---
 
 
-def _compile_slide(code: str) -> str:
+def _compile_slide(code: str) -> str | None:
     """Compile a slide's JSX via the sandbox service before persisting it.
 
     POSTs ``{"code": <jsx>}`` to ``{SANDBOX_URL}/api/compile``. Per the
-    contract, the response is ``{"code": <compiled tsx>, "error": <str>}``:
-    when ``error`` is falsy the compiled ``code`` is returned (and saved);
-    otherwise the original JSX is returned. Any transport/HTTP failure also
-    falls back to the original JSX so a sandbox outage never blocks material
-    generation.
+    contract, the response is ``{"code": <compiled tsx>, "error": <str>}``.
+    The slide is saved ONLY when compilation succeeds (``error`` falsy), in
+    which case the compiled ``code`` is returned. On a compile error or any
+    transport/HTTP failure ``None`` is returned and the slide is NOT saved.
     """
     url = f"{SANDBOX_URL.rstrip('/')}/api/compile"
     try:
@@ -138,16 +137,16 @@ def _compile_slide(code: str) -> str:
             data = resp.json()
     except Exception:
         logger.warning(
-            "Slide compile failed (sandbox=%s); saving original JSX", url,
+            "Slide compile failed (sandbox=%s); skipping slide", url,
             exc_info=True,
         )
-        return code
+        return None
     if data.get("error"):
         logger.warning(
-            "Slide compile returned error; saving original JSX: %s",
+            "Slide compile returned error; skipping slide: %s",
             data.get("error"),
         )
-        return code
+        return None
     return data.get("code") or code
 
 
@@ -219,6 +218,11 @@ def generate_materials(session_id: str) -> None:
                 # Slide IDs are globally unique: prefixed with the session ID.
                 slide_ids: list[str] = []
                 for n, slide in enumerate(result["slides"], start=1):
+                    content = _compile_slide(slide)
+                    if content is None:
+                        # Compile failed — do not persist this slide (and do
+                        # not list its ID in the step manifest).
+                        continue
                     slide_id = f"{session_id}_{step['id']}_slide_{n}"
                     slide_ids.append(slide_id)
                     db.add(
@@ -226,7 +230,7 @@ def generate_materials(session_id: str) -> None:
                             slide_id=slide_id,
                             session_id=session_id,
                             step_id=step["id"],
-                            content=_compile_slide(slide),
+                            content=content,
                         )
                     )
                 db.add(
