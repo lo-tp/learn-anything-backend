@@ -915,25 +915,39 @@ class ConceptSummary(TypedDict):
 summaries: list[ConceptSummary] = []
 
 for step in plan.steps:  # already in dependency order
-    result = material_graph.invoke({
-        "step": step,
-        "established_concepts": summaries,  # compact, stays small
-        "learner_context": session.boundary_map,
-    })
+    # Regenerate the whole material until EVERY slide compiles cleanly in the
+    # sandbox (bounded by MAX_MATERIAL_ATTEMPTS). A step is committed only once
+    # all its slides are valid, so it never ships with a broken slide.
     # result = {
-    #   "slides": ["export default function Slide1() { return (<div>…</div>); }", ...],  # JSX component source strings (no checkpointer, one-shot)
+    #   "slides": ["export default function Slide1() { return (<div>…</div>); }", ...],  # JSX source (one-shot, no checkpointer)
     #   "questions": [{"id": "s0_q1", ...}],  # IDs assigned by the node code
     #   "summary": {...},
     # }
-    # Store one SlideContent row per slide (IDs assigned by the driver) plus
-    # one StepMaterial row, in the same transaction — one durable checkpoint.
-    for n, slide in enumerate(result["slides"], start=1):
-        db.add(SlideContent(slide_id=f"{session_id}_{step['id']}_slide_{n}",
-                            session_id=session_id, step_id=step["id"], content=slide))
+    compiled = []
+    for attempt in 1..MAX_MATERIAL_ATTEMPTS:
+        result = material_graph.invoke({
+            "step": step,
+            "established_concepts": summaries,  # compact, stays small
+            "learner_context": session.boundary_map,
+        })
+        compiled = [_compile_slide(s) for s in result["slides"]]  # sandbox compile
+        if all(c is not None for c in compiled):
+            break  # every slide is valid — done
+        # else: a slide failed validation → regenerate (re-invoke)
+    # Store one SlideContent row per VALID slide (IDs assigned by the driver)
+    # plus one StepMaterial row, in the same transaction — one durable checkpoint.
+    slide_ids = []
+    for n, content in enumerate(compiled, start=1):
+        if content is None:
+            continue  # only reachable if every attempt still left a broken slide
+        slide_id = f"{session_id}_{step['id']}_slide_{n}"
+        slide_ids.append(slide_id)
+        db.add(SlideContent(slide_id=slide_id, session_id=session_id,
+                            step_id=step["id"], content=content))
     db.add(StepMaterial(
         session_id=session_id,
         step_id=step["id"],
-        slides=[f"{session_id}_{step['id']}_slide_{n}" for n in range(1, len(result["slides"]) + 1)],
+        slides=slide_ids,
         questions=result["questions"],
         summary=result["summary"],
     ))
@@ -968,7 +982,11 @@ generate_materials (background task, its OWN db session, per-session lock):
    for step in steps (dependency order):
         if StepMaterial(step) already exists:
             skip generation, but append its stored summary   # resume past it
-        result = material_graph.invoke(...)                  # linear per-step graph
+        for attempt in 1..MAX_MATERIAL_ATTEMPTS:             # regenerate the step's
+            result = material_graph.invoke(...)              # material whenever ANY slide
+            compile every slide in the sandbox                # fails to compile
+            if all slides compile cleanly: break             #
+            else: log + regenerate (re-invoke)               #
         db.add(SlideContent rows) + db.add(StepMaterial(...)); db.commit()
         summaries.append(result["summary"])
    phase = executing; commit
@@ -981,6 +999,7 @@ generate_materials (background task, its OWN db session, per-session lock):
 |---------|----------|
 | Don't block the request | `POST /plan/approve` returns `202` before generation starts |
 | Resume across restarts | Each step is a committed `StepMaterial` row; on retry, skip steps that already exist |
+| Don't ship broken slides | Every slide is compiled in the sandbox before persisting; if any slide's JSX fails validation, the step's material is **regenerated** (up to `MAX_MATERIAL_ATTEMPTS`), and the step is committed only once all its slides are valid |
 | Don't corrupt the request session | The task opens its **own** DB session (the request's is closed by the time it runs) |
 | Keep stores independent | Resume state lives in the **DB**, not the graph checkpointer — no double-stored state |
 | Client visibility | Poll `GET /sessions/{id}/materials` until phase flips to `executing` |

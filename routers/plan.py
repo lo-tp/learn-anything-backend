@@ -2,9 +2,12 @@
 
 Approving the plan schedules ``generate_materials`` as a FastAPI background
 task: a per-step driver that commits one ``StepMaterial`` row (plus one
-``SlideContent`` row per slide) per step. The domain DB is the resume point —
-a step with an existing row is skipped; a failure lands the session in the
-``error`` phase (terminal, per design).
+``SlideContent`` row per slide) per step. Each step's material is regenerated
+(re-running the material graph) whenever any of its slide JSX fails to compile
+in the sandbox, up to ``MAX_MATERIAL_ATTEMPTS`` times; a step is committed only
+once all of its slides are valid. The domain DB is the resume point — a step
+with an existing row is skipped; a failure lands the session in the ``error``
+phase (terminal, per design).
 """
 
 import logging
@@ -32,6 +35,11 @@ SANDBOX_URL = os.getenv("SANDBOX_URL", "http://localhost:8080")
 
 # Per-request budget for a slide compile call (seconds).
 _COMPILE_TIMEOUT_S = 30.0
+
+# How many times to generate a step's material before accepting whatever slides
+# do compile (the first attempt + this many regenerations when any slide fails
+# validation in the sandbox).
+MAX_MATERIAL_ATTEMPTS = max(1, int(os.getenv("MAX_MATERIAL_ATTEMPTS", "3")))
 
 # One lock per session: a double-approve must not race check-then-insert on
 # the shared in-memory SQLite connection. The guard protects lock creation.
@@ -205,23 +213,42 @@ def generate_materials(session_id: str) -> None:
                     "(established concepts: %d)",
                     step["id"], len(summaries),
                 )
-                result = material_graph.invoke(
-                    {
-                        "step": step,
-                        "established_concepts": summaries,
-                        "learner_context": boundary_map,
-                    }
-                )
+                # Generate the step's material, REGENERATING it (re-running the
+                # whole material graph) whenever ANY slide fails to compile — a
+                # slide is valid only once the sandbox compiles it cleanly. The
+                # step is committed with its full slide set as soon as every
+                # slide is valid, so a step never ships with a broken slide.
+                result: dict = {}
+                compiled: list[str | None] = []
+                all_slides_valid = False
+                for attempt in range(1, MAX_MATERIAL_ATTEMPTS + 1):
+                    result = material_graph.invoke(
+                        {
+                            "step": step,
+                            "established_concepts": summaries,
+                            "learner_context": boundary_map,
+                        }
+                    )
+                    compiled = [_compile_slide(s) for s in result["slides"]]
+                    failed = sum(1 for c in compiled if c is None)
+                    if failed == 0:
+                        all_slides_valid = True
+                        break
+                    logger.warning(
+                        "Material generation: step %s attempt %d/%d: %d slide(s) "
+                        "failed validation, regenerating",
+                        step["id"], attempt, MAX_MATERIAL_ATTEMPTS, failed,
+                    )
 
                 # One SlideContent row per slide + one StepMaterial row, in the
                 # same transaction — one durable checkpoint per step.
                 # Slide IDs are globally unique: prefixed with the session ID.
+                # A None entry is only possible if every attempt still left a
+                # broken slide: degrade gracefully by keeping the slides that
+                # DID compile so the step is not lost.
                 slide_ids: list[str] = []
-                for n, slide in enumerate(result["slides"], start=1):
-                    content = _compile_slide(slide)
+                for n, content in enumerate(compiled, start=1):
                     if content is None:
-                        # Compile failed — do not persist this slide (and do
-                        # not list its ID in the step manifest).
                         continue
                     slide_id = f"{session_id}_{step['id']}_slide_{n}"
                     slide_ids.append(slide_id)
@@ -245,10 +272,13 @@ def generate_materials(session_id: str) -> None:
                 db.commit()
                 summaries.append(result["summary"])
                 logger.info(
-                    "Material generation: step %s done (%d slides, %d questions, %.1fs)",
+                    "Material generation: step %s done (%d slides, %d questions, "
+                    "%s, %.1fs)",
                     step["id"],
                     len(slide_ids),
                     len(result["questions"]),
+                    "all slides valid" if all_slides_valid
+                    else "degraded: some slides still failed validation",
                     time.monotonic() - step_started,
                 )
 
