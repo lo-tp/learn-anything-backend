@@ -15,6 +15,26 @@ State lives in **two stores** with distinct responsibilities:
 
 LangGraph graphs are invoked from FastAPI handlers to drive the LLM interactions within each phase.  **Both stores are in-memory for the MVP and will later migrate to Postgres together** — the domain DB via a connection-string change, and the checkpointer via `PostgresSaver` (a drop-in replacement for `MemorySaver`).
 
+## Language detection & localization
+
+The system detects the language the learner is using and produces **every user-facing reply and all generated materials in that language**.
+
+**Detection.** `language.detect_language()` uses `langid` (a fast n-gram classifier) for text long enough to be reliable, falls back to a small constrained LLM call for short/low-signal text, and defaults to English when detection is unavailable. It runs:
+
+- on the **goal** at session creation (`POST /sessions`), and
+- on each **clarify answer** and **plan adjustment** — but only when the text is long enough to carry reliable signal (`has_meaningful_signal`), so a one-word reply like "yes" never flips the session language.
+
+The result (a human-readable name, e.g. `"Spanish"`) is stored on `Session.language` and threaded through every graph.
+
+**Localization.** Each graph carries `language` in its state. Nodes that produce learner-facing text append `language.language_instruction(language)` to their system prompt, telling the LLM to write all human-readable copy in that language while leaving code, identifiers, JSX/TSX, math, and machine IDs untouched:
+
+- **Clarify** — clarifying questions and the narrowed goal.
+- **Probe** — probe questions, options, and explanations (strand IDs stay as-is); the boundary map's floor/ceiling text and gap summary.
+- **Plan** — step titles/descriptions, the prose summary, and DAG labels. (Topic research stays in English — it feeds internal reasoning, not the learner.)
+- **Material** — slide teaching copy, quiz questions/options/explanations, and key-point summaries.
+
+The one user-facing status message produced outside a graph (the approve acknowledgement) is localized via `language.localize_status()`, which translates it with a graceful English fallback.
+
 ---
 
 ## State Schema (SQLAlchemy Models)
@@ -60,6 +80,7 @@ class Session(Base):
     session_id: Mapped[str] = mapped_column(String, primary_key=True)
     phase: Mapped[str] = mapped_column(String, default=Phase.CLARIFYING.value)
     goal: Mapped[str] = mapped_column(Text)
+    language: Mapped[str | None] = mapped_column(String, nullable=True)   # detected learner language (e.g. "Spanish"); null for legacy rows
     narrowed_goal: Mapped[str | None] = mapped_column(Text, nullable=True)
     boundary_map: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # strand -> {floor, ceiling, gap_type}
     error: Mapped[str | None] = mapped_column(Text, nullable=True)           # failure message when phase == "error", null otherwise

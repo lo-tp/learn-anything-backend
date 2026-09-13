@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from db import Phase, ProbeQuestion, Session, get_db
 from graphs import graph_config, probe_graph
+from language import DEFAULT_LANGUAGE
 
 router = APIRouter(tags=["probe"])
 
@@ -104,6 +105,7 @@ def probe_session(
         result = probe_graph.invoke(
             {
                 "goal": session.narrowed_goal or session.goal,
+                "language": session.language or DEFAULT_LANGUAGE,
                 "strands": [],
                 "history": [],
                 "boundary_map": {},

@@ -71,6 +71,11 @@ class Session(Base):
     session_id: Mapped[str] = mapped_column(String, primary_key=True)
     phase: Mapped[str] = mapped_column(String, default=Phase.CLARIFYING.value)
     goal: Mapped[str] = mapped_column(Text)
+    # Human-readable language name detected from the learner's text (e.g.
+    # "Spanish"). Drives the language of every user-facing reply and the
+    # generated materials. Nullable for legacy rows; readers fall back to
+    # language.DEFAULT_LANGUAGE.
+    language: Mapped[str | None] = mapped_column(String, nullable=True)
     narrowed_goal: Mapped[str | None] = mapped_column(Text, nullable=True)
     boundary_map: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session as DBSession
 from db import Phase, Session, get_db
 from graphs import clarify_graph, graph_config
 from graphs.clarify import ClarifyState
+from language import DEFAULT_LANGUAGE, detect_language, has_meaningful_signal
+from llm import llm
 
 router = APIRouter(tags=["clarify"])
 
@@ -38,9 +40,10 @@ class ClarifyResult(BaseModel):
 # --- Helpers ---
 
 
-def initial_clarify_state(goal: str) -> ClarifyState:
+def initial_clarify_state(goal: str, language: str) -> ClarifyState:
     return {
         "goal": goal,
+        "language": language,
         "working_goal": goal,
         "open_dimensions": [],
         "round_count": 0,
@@ -84,13 +87,19 @@ def interpret_clarify(
 )
 def create_session(body: GoalIn, db: DBSession = Depends(get_db)) -> ClarifyResult:
     """Create a session and make the first Clarify graph call."""
+    # Detect the learner's language from the goal and store it on the session;
+    # every reply and the generated materials are produced in this language.
+    language = detect_language(body.goal, llm)
     session = Session(
-        session_id=uuid.uuid4().hex, goal=body.goal, phase=Phase.CLARIFYING.value
+        session_id=uuid.uuid4().hex,
+        goal=body.goal,
+        phase=Phase.CLARIFYING.value,
+        language=language,
     )
     db.add(session)
     db.commit()
     result = clarify_graph.invoke(
-        initial_clarify_state(body.goal),
+        initial_clarify_state(body.goal, language),
         graph_config(session.session_id, "clarify"),
     )
     return interpret_clarify(result, session, db)
@@ -113,8 +122,16 @@ def clarify_session(
             status_code=409,
             detail=f"Session is in phase '{session.phase}', not 'clarifying'",
         )
+    # Follow the learner's language if their answer carries enough signal to
+    # detect it reliably (a one-word answer must not flip the session language).
+    if has_meaningful_signal(body.answer):
+        session.language = detect_language(body.answer, llm)
+        db.commit()
     result = clarify_graph.invoke(
-        Command(resume={"answer": body.answer}),
+        Command(
+            resume={"answer": body.answer},
+            update={"language": session.language or DEFAULT_LANGUAGE},
+        ),
         graph_config(session_id, "clarify"),
     )
     return interpret_clarify(result, session, db)

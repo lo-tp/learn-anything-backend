@@ -25,6 +25,13 @@ from sqlalchemy.orm import Session as DBSession
 
 from db import Phase, Plan, Session, SessionFactory, SlideContent, StepMaterial, get_db
 from graphs import checkpointer, graph_config, material_graph, plan_graph
+from language import (
+    DEFAULT_LANGUAGE,
+    detect_language,
+    has_meaningful_signal,
+    localize_status,
+)
+from llm import llm
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +194,8 @@ def generate_materials(session_id: str) -> None:
                 )
                 return
 
+            # All materials are generated in the learner's language.
+            language = session.language or DEFAULT_LANGUAGE
             logger.info(
                 "Material generation started: session=%s, steps=%d",
                 session_id, len(steps),
@@ -227,6 +236,7 @@ def generate_materials(session_id: str) -> None:
                             "step": step,
                             "established_concepts": summaries,
                             "learner_context": boundary_map,
+                            "language": language,
                         }
                     )
                     compiled = [_compile_slide(s) for s in result["slides"]]
@@ -449,6 +459,7 @@ def generate_plan(
         result = plan_graph.invoke(
             {
                 "goal": session.narrowed_goal or session.goal,
+                "language": session.language or DEFAULT_LANGUAGE,
                 "boundary_map": session.boundary_map or {},
                 "research": None,
                 "current_plan": None,
@@ -513,9 +524,16 @@ def adjust_plan(
 
     config = graph_config(session_id, "plan")
 
+    # Follow the learner's language if the adjustment carries enough signal.
+    if has_meaningful_signal(body.adjustment):
+        session.language = detect_language(body.adjustment, llm)
+        db.commit()
     try:
         result = plan_graph.invoke(
-            Command(resume={"action": "adjust", "text": body.adjustment}),
+            Command(
+                resume={"action": "adjust", "text": body.adjustment},
+                update={"language": session.language or DEFAULT_LANGUAGE},
+            ),
             config,
         )
     except Exception:  # noqa: BLE001 — catch all to clean up thread
@@ -611,8 +629,12 @@ def approve_plan(
 
     return ApproveOut(
         phase=Phase.GENERATING,
-        message=(
-            "Plan approved. Material generation started in the background."
+        # The confirmation is a user-facing reply, so it is in the learner's
+        # language (falls back to the English text if translation fails).
+        message=localize_status(
+            llm,
+            session.language or DEFAULT_LANGUAGE,
+            "Plan approved. Material generation started in the background.",
         ),
     )
 
