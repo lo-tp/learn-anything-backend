@@ -8,6 +8,8 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 
+from language import DEFAULT_LANGUAGE, localize_status
+
 
 def structured_invoke[Schema: BaseModel](
     llm: BaseChatModel, schema: type[Schema], system: str, human: str
@@ -19,3 +21,28 @@ def structured_invoke[Schema: BaseModel](
             [SystemMessage(content=system), HumanMessage(content=human)]
         ),
     )
+
+
+def unknown_option(llm: BaseChatModel | None, language: str | None = None) -> str:
+    """The localized "I don't know" option appended to question options.
+
+    English fallback on translation failure is built into ``localize_status``.
+    """
+    return localize_status(llm, language or DEFAULT_LANGUAGE, "I don't know")
+
+
+def with_unknown_option(
+    llm: BaseChatModel | None, language: str | None, options: list[str]
+) -> list[str]:
+    """Return ``options`` with the "I don't know" option appended last.
+
+    Appending last means it never collides with ``correct_index`` (which always
+    points at one of the LLM-generated options), so the learner can never
+    score correctly by picking it. If an identical option already exists
+    (case-insensitive), no duplicate is appended. The input list is not
+    mutated.
+    """
+    unknown = unknown_option(llm, language)
+    if any(o.strip().casefold() == unknown.strip().casefold() for o in options):
+        return list(options)
+    return [*options, unknown]
