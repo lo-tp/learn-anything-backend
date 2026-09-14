@@ -1,6 +1,7 @@
 from .models import (
     Base,
     DBSession,
+    FailedSlide,
     Phase,
     Plan,
     ProbeQuestion,
@@ -16,6 +17,7 @@ from .models import (
 __all__ = [
     "Base",
     "DBSession",
+    "FailedSlide",
     "Phase",
     "Plan",
     "ProbeQuestion",

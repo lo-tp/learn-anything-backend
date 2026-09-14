@@ -174,6 +174,22 @@ class SlideContent(Base):
     session: Mapped[Session] = relationship(back_populates="slide_contents")
 
 
+class FailedSlide(Base):
+    __tablename__ = "failed_slides"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("sessions.session_id"), index=True
+    )
+    step_id: Mapped[str] = mapped_column(String)
+    slide_index: Mapped[int] = mapped_column(Integer)
+    jsx: Mapped[str] = mapped_column(Text)
+    error: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(UTC)
+    )
+
+
 class StepProgress(Base):
     __tablename__ = "step_progress"
 

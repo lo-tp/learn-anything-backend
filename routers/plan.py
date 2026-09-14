@@ -23,7 +23,16 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session as DBSession
 
-from db import Phase, Plan, Session, SessionFactory, SlideContent, StepMaterial, get_db
+from db import (
+    FailedSlide,
+    Phase,
+    Plan,
+    Session,
+    SessionFactory,
+    SlideContent,
+    StepMaterial,
+    get_db,
+)
 from graphs import checkpointer, graph_config, material_graph, plan_graph
 from language import (
     DEFAULT_LANGUAGE,
@@ -135,14 +144,15 @@ def _session_lock(session_id: str) -> threading.Lock:
 # --- Background material generation driver ---
 
 
-def _compile_slide(code: str) -> str | None:
+def _compile_slide(code: str) -> tuple[str | None, str]:
     """Compile a slide's JSX via the sandbox service before persisting it.
 
     POSTs ``{"code": <jsx>}`` to ``{SANDBOX_URL}/api/compile``. Per the
     contract, the response is ``{"code": <compiled tsx>, "error": <str>}``.
-    The slide is saved ONLY when compilation succeeds (``error`` falsy), in
-    which case the compiled ``code`` is returned. On a compile error or any
-    transport/HTTP failure ``None`` is returned and the slide is NOT saved.
+
+    Returns a tuple ``(compiled_code, error)``:
+    - On success: ``(compiled_code, "")``
+    - On failure: ``(None, error_message)``
     """
     url = f"{SANDBOX_URL.rstrip('/')}/api/compile"
     try:
@@ -150,19 +160,20 @@ def _compile_slide(code: str) -> str | None:
             resp = client.post(url, json={"code": code})
             resp.raise_for_status()
             data = resp.json()
-    except Exception:
+    except Exception as exc:
+        msg = f"Transport/HTTP error: {exc}"
         logger.warning(
-            "Slide compile failed (sandbox=%s); skipping slide", url,
+            "Slide compile failed (sandbox=%s); skipping slide: %s", url, msg,
             exc_info=True,
         )
-        return None
+        return None, msg
     if data.get("error"):
         logger.warning(
             "Slide compile returned error; skipping slide: %s",
             data.get("error"),
         )
-        return None
-    return data.get("code") or code
+        return None, data["error"]
+    return (data.get("code") or code), ""
 
 
 def generate_materials(session_id: str) -> None:
@@ -246,7 +257,7 @@ def generate_materials(session_id: str) -> None:
                                 step["id"], i, raw_jsx,
                             )
                     compiled = [_compile_slide(s) for s in result["slides"]]
-                    failed = sum(1 for c in compiled if c is None)
+                    failed = sum(1 for c, err in compiled if c is None)
                     if failed == 0:
                         all_slides_valid = True
                         break
@@ -256,6 +267,22 @@ def generate_materials(session_id: str) -> None:
                         step["id"], attempt, MAX_MATERIAL_ATTEMPTS, failed,
                     )
 
+                    # Save failed JSX from this attempt for debugging.
+                    for i, (raw_jsx, (compiled_code, error)) in enumerate(
+                        zip(result["slides"], compiled), start=1
+                    ):
+                        if compiled_code is None:
+                            db.add(
+                                FailedSlide(
+                                    session_id=session_id,
+                                    step_id=step["id"],
+                                    slide_index=i,
+                                    jsx=raw_jsx,
+                                    error=error,
+                                )
+                            )
+                    db.commit()
+
                 # One SlideContent row per slide + one StepMaterial row, in the
                 # same transaction — one durable checkpoint per step.
                 # Slide IDs are globally unique: prefixed with the session ID.
@@ -263,7 +290,7 @@ def generate_materials(session_id: str) -> None:
                 # broken slide: degrade gracefully by keeping the slides that
                 # DID compile so the step is not lost.
                 slide_ids: list[str] = []
-                for n, content in enumerate(compiled, start=1):
+                for n, (content, _) in enumerate(compiled, start=1):
                     if content is None:
                         continue
                     slide_id = f"{session_id}_{step['id']}_slide_{n}"
