@@ -239,6 +239,12 @@ def generate_materials(session_id: str) -> None:
                             "language": language,
                         }
                     )
+                    if os.getenv("DEV_MODE") == "1":
+                        for i, raw_jsx in enumerate(result["slides"], start=1):
+                            logger.info(
+                                "DEV raw JSX — step=%s slide=%d:\n%s",
+                                step["id"], i, raw_jsx,
+                            )
                     compiled = [_compile_slide(s) for s in result["slides"]]
                     failed = sum(1 for c in compiled if c is None)
                     if failed == 0:
@@ -636,6 +642,48 @@ def approve_plan(
             session.language or DEFAULT_LANGUAGE,
             "Plan approved. Material generation started in the background.",
         ),
+    )
+
+
+@router.post(
+    "/dev/sessions/{session_id}/regenerate",
+    response_model=ApproveOut,
+    status_code=202,
+)
+def dev_regenerate(
+    session_id: str,
+    background_tasks: BackgroundTasks,
+    db: DBSession = Depends(get_db),
+) -> ApproveOut:
+    """Dev-only: wipe existing materials and re-run generation.
+
+    Requires the session to already have a plan and boundary_map
+    (i.e. it has passed the planning phase). Skips all upstream phases.
+    """
+    if os.getenv("DEV_MODE") != "1":
+        raise HTTPException(status_code=404, detail="Not found")
+
+    session = _get_session_or_404(db, session_id)
+    if session.plan is None or session.boundary_map is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Session has no plan or boundary_map — cannot regenerate",
+        )
+
+    # Wipe existing materials so generation starts fresh.
+    for m in list(session.materials):
+        db.delete(m)
+    for s in list(session.slide_contents):
+        db.delete(s)
+
+    session.phase = Phase.GENERATING.value
+    session.error = None
+    db.commit()
+
+    background_tasks.add_task(generate_materials, session_id)
+    return ApproveOut(
+        phase=Phase.GENERATING,
+        message="Material generation restarted (dev).",
     )
 
 
