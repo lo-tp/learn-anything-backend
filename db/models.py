@@ -154,6 +154,13 @@ class StepMaterial(Base):
     slides: Mapped[list[str]] = mapped_column(JSON)
     questions: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
     summary: Mapped[dict[str, Any]] = mapped_column(JSON)
+    # A row is provisional while its step is still generating (empty
+    # questions/summary, partial slides) and is flipped to True when the step
+    # completes. The driver skips only complete rows, so a provisional row is
+    # re-run (cleaned up) on a fresh generation, not skipped.
+    is_complete: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
 
     session: Mapped[Session] = relationship(back_populates="materials")
 

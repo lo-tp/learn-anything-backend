@@ -141,7 +141,10 @@ def generate_materials(session_id: str) -> None:
     it is done — skip it (but keep its summary in the accumulated context).
 
     The per-slide retry loop lives inside the material graph; the driver
-    invokes the graph once per step and persists the final state.
+    streams the graph per step and persists each slide to the DB immediately
+    after it compiles, so a crash mid-step loses at most the in-flight
+    slide. Orphan SlideContent/FailedSlide rows from a previous partial run
+    are cleaned up before re-invoking.
     """
     with _session_lock(session_id):
         started = time.monotonic()
@@ -177,7 +180,7 @@ def generate_materials(session_id: str) -> None:
                     .filter_by(session_id=session_id, step_id=step["id"])
                     .first()
                 )
-                if existing is not None:
+                if existing is not None and existing.is_complete:
                     # Already generated — resume past it, but keep its summary.
                     logger.debug(
                         "Material generation: step %s already generated, skipping",
@@ -192,10 +195,45 @@ def generate_materials(session_id: str) -> None:
                     "(established concepts: %d)",
                     step["id"], len(summaries),
                 )
-                # One invoke per step — the per-slide retry loop is inside
-                # the graph. One checkpoint thread per step.
+                # Clean up from a previous partial run of this step: a
+                # provisional StepMaterial row (crashed before completing)
+                # plus its orphan slide/failed rows. The step is re-run from
+                # scratch.
+                if existing is not None:
+                    db.delete(existing)
+                db.query(SlideContent).filter_by(
+                    session_id=session_id, step_id=step["id"],
+                ).delete()
+                db.query(FailedSlide).filter_by(
+                    session_id=session_id, step_id=step["id"],
+                ).delete()
+                db.commit()
+
+                # Create a provisional StepMaterial row up front so the FE can
+                # see this step appear and its slides land one by one. It is
+                # filled in as slides compile and finalized (questions, summary,
+                # is_complete=True) when the step finishes.
+                provisional = StepMaterial(
+                    session_id=session_id,
+                    step_id=step["id"],
+                    slides=[],
+                    questions=[],
+                    summary={
+                        "step_id": step["id"],
+                        "title": step.get("title", ""),
+                        "key_points": [],
+                    },
+                    is_complete=False,
+                )
+                db.add(provisional)
+                db.commit()
+
+                # Run the graph with interrupt/resume: the graph pauses after
+                # each successful compile (pause_after_compile); the driver
+                # saves the slide to the DB and resumes. Each compiled slide is
+                # also appended to the provisional row so the FE sees it.
                 config = graph_config(session_id, f"material:{step['id']}")
-                result: dict = material_graph.invoke(
+                state: dict = material_graph.invoke(
                     {
                         "step": step,
                         "established_concepts": summaries,
@@ -204,12 +242,32 @@ def generate_materials(session_id: str) -> None:
                     },
                     config,
                 )
+                slide_ids: list[str] = []
+                while state.get("__interrupt__"):
+                    slides = state.get("slides") or []
+                    n = len(slides)
+                    slide_id = f"{session_id}_{step['id']}_slide_{n}"
+                    slide_ids.append(slide_id)
+                    db.add(
+                        SlideContent(
+                            slide_id=slide_id,
+                            session_id=session_id,
+                            step_id=step["id"],
+                            content=slides[-1],
+                        )
+                    )
+                    # Publish the new slide on the provisional row (reassign a
+                    # fresh list so SQLAlchemy's JSON column detects the change).
+                    provisional.slides = provisional.slides + [slide_id]
+                    db.commit()
+                    state = material_graph.invoke(
+                        Command(resume=True), config
+                    )
+                result = state
 
-                # Persist from the final state in one transaction.
-                compiled_slides = result.get("slides") or []
+                # Finalize the provisional row and persist failed attempts in
+                # one transaction (the slides are already committed above).
                 failed = result.get("failed_attempts") or []
-
-                # FailedSlide rows for every failed attempt.
                 for fa in failed:
                     db.add(
                         FailedSlide(
@@ -220,31 +278,10 @@ def generate_materials(session_id: str) -> None:
                             error=fa["error"],
                         )
                     )
-
-                # One SlideContent row per surviving slide (sequential IDs).
-                slide_ids: list[str] = []
-                for n, content in enumerate(compiled_slides, start=1):
-                    slide_id = f"{session_id}_{step['id']}_slide_{n}"
-                    slide_ids.append(slide_id)
-                    db.add(
-                        SlideContent(
-                            slide_id=slide_id,
-                            session_id=session_id,
-                            step_id=step["id"],
-                            content=content,
-                        )
-                    )
-
-                # One StepMaterial row.
-                db.add(
-                    StepMaterial(
-                        session_id=session_id,
-                        step_id=step["id"],
-                        slides=slide_ids,
-                        questions=result["questions"],
-                        summary=result["summary"],
-                    )
-                )
+                provisional.slides = slide_ids
+                provisional.questions = result["questions"]
+                provisional.summary = result["summary"]
+                provisional.is_complete = True
                 db.commit()
                 summaries.append(result["summary"])
                 logger.info(
