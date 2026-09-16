@@ -143,7 +143,7 @@ class TestWriteSlide:
             result = node(self._state(attempts_by_slide=[2]))
         assert result["attempts_by_slide"] == [3]
 
-    def test_includes_compile_error_in_retry_prompt(self):
+    def test_no_compile_error_in_prompt(self):
         llm = _make_llm()
         mock_out = SlideOut(slide="export default function S() {}")
         with patch(
@@ -156,22 +156,11 @@ class TestWriteSlide:
                     last_compile_error="undefined variable 'x'",
                 )
             )
-        # The messages passed to the LLM should mention the compile error
-        messages = mock_invoke.call_args[0][2]
-        human_content = messages[-1].content
-        assert "undefined variable 'x'" in human_content
-
-    def test_no_error_mention_on_first_attempt(self):
-        llm = _make_llm()
-        mock_out = SlideOut(slide="export default function S() {}")
-        with patch(
-            "graphs.material.nodes.structured_invoke_messages", return_value=mock_out
-        ) as mock_invoke:
-            node = make_write_slide(llm)
-            node(self._state())
+        # The retry prompt no longer includes the previous compile error
         messages = mock_invoke.call_args[0][2]
         human_content = messages[-1].content
         assert "failed to compile" not in human_content
+        assert "undefined variable 'x'" not in human_content
 
 
 # --- make_compile_slide ---
