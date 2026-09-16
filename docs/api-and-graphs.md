@@ -236,7 +236,7 @@ material_graph = material_graph_fn()
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `POST` | `/sessions/{id}/probe` | Start probe / submit next answer (combined) |
+| `POST` | `/sessions/{id}/probe` | Start probe / submit batch answers (combined) |
 
 ### Plan phase
 
@@ -343,41 +343,60 @@ Drives the **Clarify Graph** loop (`thread_id = f"{session_id}:clarify"`). Each 
 
 #### `POST /sessions/{id}/probe`
 
-This is the **combined** probe endpoint. First call has no answer (starts the probe); subsequent calls submit the answer to the last question.
+This is the **combined** probe endpoint. First call has no answers (starts the probe); subsequent calls submit the answers for the **entire current batch** at once (no partial submissions — every question in the batch must be answered).
 
 ```json
 // Request (first call — start probe)
 { }
 
-// Response
+// Response (first batch — one question per unbracketed strand,
+// batch size = min(PROBE_BATCH_SIZE, unbracketed strand count))
 {
   "phase": "probing",
-  "question": {
-    "id": "q1",
-    "text": "A 2 kg object experiences a net force of 10 N. What is its acceleration?",
-    "options": ["2 m/s²", "5 m/s²", "10 m/s²", "20 m/s²"],
-    "correct_index": 1,
-    "explanation": "a = F/m = 10/2 = 5 m/s². Acceleration is force divided by mass.",
-    "strand": "newton_second_law_basic",
-    "difficulty": 2
-  }
+  "questions": [
+    {
+      "id": "q1",
+      "text": "A 2 kg object experiences a net force of 10 N. What is its acceleration?",
+      "options": ["2 m/s²", "5 m/s²", "10 m/s²", "20 m/s²"],
+      "correct_index": 1,
+      "explanation": "a = F/m = 10/2 = 5 m/s². Acceleration is force divided by mass.",
+      "strand": "force_concept",
+      "difficulty": 2
+    },
+    {
+      "id": "q2",
+      "text": "If the mass of an object doubles while the net force stays the same, what happens to its acceleration?",
+      "options": ["It doubles", "It halves", "It stays the same", "It quadruples"],
+      "correct_index": 1,
+      "explanation": "F = ma, so a = F/m. If m doubles and F stays the same, a halves.",
+      "strand": "f_ma_relation",
+      "difficulty": 3
+    },
+    {
+      "id": "q3",
+      "text": "...",
+      "options": ["...", "...", "...", "..."],
+      "correct_index": 0,
+      "explanation": "...",
+      "strand": "acceleration_concept",
+      "difficulty": 2
+    }
+  ]
 }
 
-// Request (subsequent call — submit answer)
-{ "question_id": "q1", "selected_index": 1 }
+// Request (subsequent call — submit answers for the whole batch)
+{
+  "answers": [
+    { "question_id": "q1", "selected_index": 1 },
+    { "question_id": "q2", "selected_index": 1 },
+    { "question_id": "q3", "selected_index": 2 }
+  ]
+}
 
-// Response (next question)
+// Response (next batch — if strands remain unbracketed)
 {
   "phase": "probing",
-  "question": {
-    "id": "q2",
-    "text": "If the mass of an object doubles while the net force stays the same, what happens to its acceleration?",
-    "options": ["It doubles", "It halves", "It stays the same", "It quadruples"],
-    "correct_index": 1,
-    "explanation": "F = ma, so a = F/m. If m doubles and F stays the same, a halves.",
-    "strand": "newton_second_law_proportionality",
-    "difficulty": 3
-  }
+  "questions": [ ... ]
 }
 
 // Response (probe complete — edge bracketed on all strands)
@@ -686,10 +705,10 @@ result = clarify_graph.invoke(Command(resume={"answer": "..."}), config)
 
 ### Graph 2: Probe Graph
 
-**Purpose:** Adaptive questioning loop that brackets the learner's knowledge boundary. Before the loop, the graph decomposes the narrowed goal into its prerequisite strands and seeds the boundary map with them, so the loop works against a **fixed strand set** (rather than inventing strands per question and collapsing to one).
+**Purpose:** Adaptive batched-questioning loop that brackets the learner's knowledge boundary. Before the loop, the graph decomposes the narrowed goal into its prerequisite strands and seeds the boundary map with them, so the loop works against a **fixed strand set** (rather than inventing strands per question and collapsing to one).
 
-**Entry:** `(narrowed_goal)` — first call; subsequent calls resume with the learner's answer  
-**Exit:** `boundary_map` (when done) or `next_question` (when continuing)
+**Entry:** `(narrowed_goal)` — first call; subsequent calls resume with the learner's batch of answers  
+**Exit:** `boundary_map` (when done) or `next_batch` (when continuing)
 
 ```
 ┌────────────────────────────────────────────┐
@@ -701,14 +720,14 @@ result = clarify_graph.invoke(Command(resume={"answer": "..."}), config)
 │            │                               │
 │            ▼                               │
 │  ┌─────────────────────┐                   │
-│  │ generate_question     │                 │
+│  │ generate_batch        │                 │
 │  └──────────┬──────────┘                   │
 │            ▼                               │
 │       [interrupt]                          │
-│            │  next_question                │
+│            │  next_batch                   │
 │            ▼                               │
 │  ┌─────────────────────┐                   │
-│  │ evaluate_answer       │                 │
+│  │ evaluate_batch        │                 │
 │  └──────────┬──────────┘                   │
 │            ▼                               │
 │  ┌─────────────────────┐                   │
@@ -730,15 +749,15 @@ result = clarify_graph.invoke(Command(resume={"answer": "..."}), config)
 | Node | LLM task |
 |------|----------|
 | `decompose_strands` | *(once, at start)* Given the `narrowed_goal`, enumerate the **direct** prerequisite strands the learner must already understand to learn that specific goal — scoped tightly to the goal itself, not the course/subject it belongs to (no adjacent topics, follow-ups, or prerequisites-of-prerequisites). Seed `boundary_map` with every strand at `{floor: null, ceiling: null, gap_type: "unknown"}` and record the fixed `strands` list. |
-| `generate_question` | Given `goal` + `strands` + `strand_descriptions` + `history` + `boundary_map`, produce the next MCQ targeting a strand that is **not yet fully bracketed**. The question tests **only that strand's knowledge** — answerable with the strand's concepts + basic arithmetic alone: never the goal itself, never concepts beyond the strand (a confounded question would mislocate the edge). One question, one concept. Options are built by mutation: correct claim first, distractors = specific misconceptions stated in parallel form (bare claims, no reasoning inside options, no asymmetric emphasis). Binary-search the edge: jump sharply harder after a correct, narrow in after a miss. |
-| `evaluate_answer` | Given the question, the learner's answer, and history: mark correct/incorrect, update the **full** `boundary_map` (all seeded strands) for the relevant strand (floor/ceiling/gap_type), append to `history`. A wrong answer is classified `narrow` (isolated slip) vs `systematic` (confidently-held wrong model that must be probed around, not topped up). |
+| `generate_batch` | Given `goal` + `strands` + `strand_descriptions` + `history` + `boundary_map`, produce a **batch** of MCQs in one structured call — size = `min(PROBE_BATCH_SIZE, unbracketed strand count)` (default 3) — targeting only strands that are **not yet fully bracketed**. Multiple questions may target the same strand with escalating difficulty. Each question tests **only its strand's knowledge** — answerable with the strand's concepts + basic arithmetic alone: never the goal itself, never concepts beyond the strand (a confounded question would mislocate the edge). One question, one concept. Options are built by mutation: correct claim first, distractors = specific misconceptions stated in parallel form (bare claims, no reasoning inside options, no asymmetric emphasis). Binary-search the edge: jump sharply harder after a correct, narrow in after a miss. |
+| `evaluate_batch` | Given the batch of questions, the learner's answers, and history: mark each answer correct/incorrect in one structured call, update the **full** `boundary_map` (all seeded strands) for every strand touched by the batch (floor/ceiling/gap_type), append one `history` entry per question. A wrong answer is classified `narrow` (isolated slip) vs `systematic` (confidently-held wrong model that must be probed around, not topped up). Picking "I don't know" counts as incorrect but is never classified `systematic`. |
 | `decide_next` | Given updated boundary: are **all seeded strands** bracketed (non-null floor AND ceiling, or `gap_type == "none"`)? Have we hit 10 questions? → return `"continue"` or `"done"`. |
 
 **Control flow:**
-- `decompose_strands` *(once)* seeds the `strands` set and the `boundary_map`, then flows to `generate_question`
-- `generate_question` → **interrupt** (return question to FastAPI handler, which returns it to the client)
-- On next call with answer: `evaluate_answer` → `decide_next` → conditional edge:
-  - `"continue"` → `generate_question` → interrupt
+- `decompose_strands` *(once)* seeds the `strands` set and the `boundary_map`, then flows to `generate_batch`
+- `generate_batch` → **interrupt** (return the batch of questions to FastAPI handler, which returns it to the client)
+- On next call with the batch of answers: `evaluate_batch` → `decide_next` → conditional edge:
+  - `"continue"` → `generate_batch` → interrupt
   - `"done"` → END (output `boundary_map`)
 
 **Invocation pattern from FastAPI:**
@@ -749,32 +768,32 @@ The graph is paused/resumed by the **checkpointer** keyed on `thread_id = f"{ses
 from langgraph.types import Command
 config = graph_config(session_id, "probe")   # thread_id = f"{session_id}:probe"
 
-# First call (no answer) — decompose_strands enumerates the goal's
-# prerequisite strands (seeding the boundary map), then generate_question
-# emits question 1, then the graph pauses at the interrupt.
+# First call (no answers) — decompose_strands enumerates the goal's
+# prerequisite strands (seeding the boundary map), then generate_batch
+# emits questions 1..N, then the graph pauses at the interrupt.
 result = probe_graph.invoke(
     {"goal": session["narrowed_goal"], "history": [], "boundary_map": {},
      "question_count": 0},
     config,
 )
-# result = {"next_question": {...}}   (graph is now paused; boundary_map is seeded)
+# result = {"next_batch": [{...}, ...]}   (graph is now paused; boundary_map is seeded)
 
-# Subsequent calls — resume with the learner's answer. The checkpointer
-# restores the paused state and continues from the pending node.
+# Subsequent calls — resume with the learner's batch of answers. The
+# checkpointer restores the paused state and continues from the pending node.
 result = probe_graph.invoke(
-    Command(resume={"question_id": ..., "selected_index": ...}),
+    Command(resume={"answers": [{"question_id": ..., "selected_index": ...}, ...]}),
     config,
 )
-# result = {"next_question": {...}} (paused again) or {"boundary_map": {...}} (done)
+# result = {"next_batch": [...]} (paused again) or {"boundary_map": {...}} (done)
 ```
 
 **State persisted across the loop (in the checkpointer, keyed by `thread_id = f"{session_id}:probe"`):**
 - `strands` — the fixed prerequisite-strand set produced by `decompose_strands`
-- `strand_descriptions` — one-line description per strand, so `generate_question` knows exactly what each strand covers
-- `boundary_map` — seeded with every strand; updated per answer
+- `strand_descriptions` — one-line description per strand, so `generate_batch` knows exactly what each strand covers
+- `boundary_map` — seeded with every strand; updated per batch
 - `history` — the Q&A transcript so far
 - `question_count` — how many questions have been asked (drives the safety cap)
-- `next_question` — the current question (output at the interrupt)
+- `next_batch` — the current batch of questions (output at the interrupt)
 
 > **Why a fixed strand set?** `decide_next` only ends the probe when *every* seeded strand is bracketed. If strands were invented per question (as before), the map would collapse to the single strand just answered and the probe would stop after one question. Seeding the full prerequisite set up front is what makes the loop actually bracket the whole boundary.
 
@@ -1041,11 +1060,11 @@ Client                    FastAPI Handler              LangGraph
   │── POST /clarify {ans} ───►│── resume ───────────────►│  [Clarify Graph: refine → assess]
   │◄── narrowed_goal ────────│   (or more questions)     │
   │                           │                           │
-  │── POST /probe ───────────►│── invoke ───────────────►│  [Probe Graph: generate_question]
-  │◄── question 1 ───────────│                           │
+  │── POST /probe ───────────►│── invoke ───────────────►│  [Probe Graph: generate_batch]
+  │◄── questions 1..N ───────│                           │
   │                           │                           │
   │── POST /probe {ans} ────►│── invoke ───────────────►│  [Probe Graph: evaluate → decide]
-  │◄── question 2 ───────────│                           │
+  │◄── questions N+1..M ─────│                           │
   │         ...              │         ...               │
   │◄── boundary_map ─────────│◄── END ──────────────────│  [Probe Graph: done]
   │                           │                           │
@@ -1078,7 +1097,7 @@ Client                    FastAPI Handler              LangGraph
 | # | Graph | Phases served | LLM calls per invocation | Loop? |
 |---|-------|---------------|--------------------------|-------|
 | 1 | **Clarify** | Clarifying | 1-2 (assess + optional questions) per round | Yes — interrupt/resume loop until specific (capped) |
-| 2 | **Probe** | Probing | 2 first turn (`decompose_strands` + `generate_question`); 1-2 after (`evaluate_answer` [+ `generate_question`]; `decide_next` is deterministic) | Yes — interrupt/resume loop |
+| 2 | **Probe** | Probing | 2 first turn (`decompose_strands` + `generate_batch`); 1-2 after (`evaluate_batch` [+ `generate_batch`]; `decide_next` is deterministic) | Yes — interrupt/resume loop |
 | 3 | **Plan** | Planning, Reviewing | 2-3 (research once + design + render per pass) | Yes — interrupt/resume loop until approved |
 | 4 | **Material** | Generating (on approve) | 3 (slides + questions + summary) per step | No — linear, called N times |
 
@@ -1090,7 +1109,7 @@ Execution (step 6) requires **no graph and no LLM** — it's a DB read + index c
 
 1. **Clarify graph uses LangGraph interrupts, held by an in-memory checkpointer.** `POST /sessions` makes the first call (`assess_goal`); if the goal is too broad the graph interrupts with clarifying questions, and each `POST /sessions/{id}/clarify` resumes with `Command(resume={"answer": ...})`. The `working_goal`, `open_dimensions`, and `round_count` live in the checkpointer (`thread_id = f"{session_id}:clarify"`) across rounds. A safety cap (e.g. 3 rounds) forces a best-effort `narrowed_goal` so the user is never stuck. On exit, `narrowed_goal` is written to the `Session` row and the phase advances to `probing`.
 
-2. **Probe graph uses LangGraph interrupts, held by an in-memory checkpointer.** On the first call the `decompose_strands` node enumerates the goal's prerequisite strands and seeds `boundary_map` (each at `{floor: null, ceiling: null, gap_type: "unknown"}`), giving the loop a fixed strand set; `decide_next` ends only when *all seeded* strands are bracketed (or the 10-question cap is hit). The `generate_question` node emits the question and the graph pauses; the pause (pending node + accumulated state) is written to the `MemorySaver` checkpointer under `thread_id = f"{session_id}:probe"`. The next `POST /probe` call resumes by invoking with `Command(resume=answer)` and the same config — the checkpointer restores the paused state, so the handler never re-derives it.
+2. **Probe graph uses LangGraph interrupts, held by an in-memory checkpointer.** On the first call the `decompose_strands` node enumerates the goal's prerequisite strands and seeds `boundary_map` (each at `{floor: null, ceiling: null, gap_type: "unknown"}`), giving the loop a fixed strand set; `decide_next` ends only when *all seeded* strands are bracketed (or the 10-question cap is hit). The `generate_batch` node emits a batch of questions (size = `min(PROBE_BATCH_SIZE, unbracketed strand count)`, default 3) and the graph pauses; the pause (pending node + accumulated state) is written to the `MemorySaver` checkpointer under `thread_id = f"{session_id}:probe"`. The next `POST /probe` call resumes by invoking with `Command(resume={"answers": [...]})` and the same config — the checkpointer restores the paused state, so the handler never re-derives it.
 
 3. **Plan graph uses LangGraph interrupts (same pattern as Probe), held by the in-memory checkpointer.** The graph pauses after `render_plan` (checkpoint saved in memory) and resumes via `Command(resume=...)` when the user's next response arrives (adjust or approve). The `current_plan` and `research` baselines live in the checkpointer (keyed by `thread_id = f"{session_id}:plan"`) across the loop, not in the domain DB. On approval, the final plan is written to the `Plan` row (same `session_id`, incremented `version` on each pass).
 
