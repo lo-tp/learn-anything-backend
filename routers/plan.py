@@ -4,7 +4,7 @@ Approving the plan schedules ``generate_materials`` as a FastAPI background
 task: a per-step driver that commits one ``StepMaterial`` row (plus one
 ``SlideContent`` row per slide and ``FailedSlide`` rows for failed attempts)
 per step. The per-slide retry loop lives inside the material graph
-(``graphs/material.py``); the driver simply invokes the graph once per step
+(``graphs/material/``); the driver simply invokes the graph once per step
 and persists the results. The domain DB is the resume point — a step with an
 existing ``StepMaterial`` row is skipped; a failure lands the session in the
 ``error`` phase (terminal, per design).
