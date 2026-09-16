@@ -1,4 +1,4 @@
-.PHONY: check lint format typecheck test coverage db-up db-down db-clean migrate revision
+.PHONY: check lint format typecheck test coverage db-up db-down db-clean migrate revision install-hooks
 VENV := .venv/bin
 
 check: lint typecheck
@@ -34,3 +34,7 @@ db-clean:
 
 revision:
 	$(VENV)/alembic revision --autogenerate -m "$(m)"
+
+install-hooks:
+	@ln -sf ../../scripts/pre-push .git/hooks/pre-push
+	@echo "✓ pre-push hook installed (symlink → scripts/pre-push)"

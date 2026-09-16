@@ -1,0 +1,37 @@
+#!/bin/bash
+# Pre-push hook: run ruff, pyright, and unit tests before allowing a push.
+# Install: make install-hooks (or copy/symlink to .git/hooks/pre-push)
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+VENV_PY="$REPO_ROOT/.venv/bin/python"
+
+if [ ! -x "$VENV_PY" ]; then
+    echo "⚠️  pre-push: venv not found at $VENV_PY, skipping checks."
+    exit 0
+fi
+
+cd "$REPO_ROOT"
+
+echo "🔍 pre-push: running ruff..."
+"$VENV_PY" -m ruff check .
+if [ $? -ne 0 ]; then
+    echo "❌ pre-push: ruff failed — push blocked."
+    exit 1
+fi
+
+echo "🔍 pre-push: running pyright..."
+"$VENV_PY" -m pyright
+if [ $? -ne 0 ]; then
+    echo "❌ pre-push: pyright failed — push blocked."
+    exit 1
+fi
+
+echo "🧪 pre-push: running unit tests..."
+"$VENV_PY" -m pytest tests/ -x -q
+if [ $? -ne 0 ]; then
+    echo "❌ pre-push: tests failed — push blocked."
+    exit 1
+fi
+
+echo "✅ pre-push: all checks passed."
+exit 0
