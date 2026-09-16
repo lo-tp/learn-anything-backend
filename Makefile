@@ -1,4 +1,4 @@
-.PHONY: check lint format typecheck db-up db-down db-clean migrate revision
+.PHONY: check lint format typecheck test coverage db-up db-down db-clean migrate revision
 VENV := .venv/bin
 
 check: lint typecheck
@@ -12,6 +12,13 @@ format:
 
 typecheck:
 	$(VENV)/pyright .
+
+test:
+	$(VENV)/python -m pytest tests/ -q
+
+coverage:
+	$(VENV)/python -m pytest tests/ --cov=graphs --cov-report=term-missing -q
+	@echo "✓ Coverage report above"
 
 db-up:
 	podman compose up db
