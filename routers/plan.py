@@ -250,12 +250,6 @@ def generate_materials(session_id: str) -> None:
                             "language": language,
                         }
                     )
-                    if os.getenv("DEV_MODE") == "1":
-                        for i, raw_jsx in enumerate(result["slides"], start=1):
-                            logger.info(
-                                "DEV raw JSX — step=%s slide=%d:\n%s",
-                                step["id"], i, raw_jsx,
-                            )
                     compiled = [_compile_slide(s) for s in result["slides"]]
                     failed = sum(1 for c, err in compiled if c is None)
                     if failed == 0:
