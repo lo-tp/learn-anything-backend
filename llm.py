@@ -12,5 +12,5 @@ llm = ChatOpenAI(
     api_key=SecretStr(os.getenv("OPENAI_API_KEY", "")),
     base_url=os.getenv("OPENAI_BASE_URL"),
     model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
-    max_tokens=65536,
+    max_tokens=65536,  # type: ignore[call-arg]
 )

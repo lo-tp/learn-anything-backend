@@ -239,7 +239,7 @@ def generate_materials(session_id: str) -> None:
                 # step is committed with its full slide set as soon as every
                 # slide is valid, so a step never ships with a broken slide.
                 result: dict = {}
-                compiled: list[str | None] = []
+                compiled: list[tuple[str | None, str]] = []
                 all_slides_valid = False
                 for attempt in range(1, MAX_MATERIAL_ATTEMPTS + 1):
                     result = material_graph.invoke(
