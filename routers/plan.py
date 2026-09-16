@@ -2,12 +2,12 @@
 
 Approving the plan schedules ``generate_materials`` as a FastAPI background
 task: a per-step driver that commits one ``StepMaterial`` row (plus one
-``SlideContent`` row per slide) per step. Each step's material is regenerated
-(re-running the material graph) whenever any of its slide JSX fails to compile
-in the sandbox, up to ``MAX_MATERIAL_ATTEMPTS`` times; a step is committed only
-once all of its slides are valid. The domain DB is the resume point — a step
-with an existing row is skipped; a failure lands the session in the ``error``
-phase (terminal, per design).
+``SlideContent`` row per slide and ``FailedSlide`` rows for failed attempts)
+per step. The per-slide retry loop lives inside the material graph
+(``graphs/material.py``); the driver simply invokes the graph once per step
+and persists the results. The domain DB is the resume point — a step with an
+existing ``StepMaterial`` row is skipped; a failure lands the session in the
+``error`` phase (terminal, per design).
 """
 
 import logging
@@ -17,7 +17,6 @@ import time
 from collections import deque
 from typing import Annotated, Literal
 
-import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from langgraph.types import Command
 from pydantic import BaseModel, Field
@@ -45,17 +44,6 @@ from llm import llm
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["plan"])
-
-# Base URL of the sandbox service, which compiles slide JSX. See .env.example.
-SANDBOX_URL = os.getenv("SANDBOX_URL", "http://localhost:8080")
-
-# Per-request budget for a slide compile call (seconds).
-_COMPILE_TIMEOUT_S = 30.0
-
-# How many times to generate a step's material before accepting whatever slides
-# do compile (the first attempt + this many regenerations when any slide fails
-# validation in the sandbox).
-MAX_MATERIAL_ATTEMPTS = max(1, int(os.getenv("MAX_MATERIAL_ATTEMPTS", "3")))
 
 # One lock per session: a double-approve must not race check-then-insert on
 # the shared in-memory SQLite connection. The guard protects lock creation.
@@ -144,38 +132,6 @@ def _session_lock(session_id: str) -> threading.Lock:
 # --- Background material generation driver ---
 
 
-def _compile_slide(code: str) -> tuple[str | None, str]:
-    """Compile a slide's JSX via the sandbox service before persisting it.
-
-    POSTs ``{"code": <jsx>}`` to ``{SANDBOX_URL}/api/compile``. Per the
-    contract, the response is ``{"code": <compiled tsx>, "error": <str>}``.
-
-    Returns a tuple ``(compiled_code, error)``:
-    - On success: ``(compiled_code, "")``
-    - On failure: ``(None, error_message)``
-    """
-    url = f"{SANDBOX_URL.rstrip('/')}/api/compile"
-    try:
-        with httpx.Client(timeout=_COMPILE_TIMEOUT_S) as client:
-            resp = client.post(url, json={"code": code})
-            resp.raise_for_status()
-            data = resp.json()
-    except Exception as exc:
-        msg = f"Transport/HTTP error: {exc}"
-        logger.warning(
-            "Slide compile failed (sandbox=%s); skipping slide: %s", url, msg,
-            exc_info=True,
-        )
-        return None, msg
-    if data.get("error"):
-        logger.warning(
-            "Slide compile returned error; skipping slide: %s",
-            data.get("error"),
-        )
-        return None, data["error"]
-    return (data.get("code") or code), ""
-
-
 def generate_materials(session_id: str) -> None:
     """Generate material for every plan step, one committed row per step.
 
@@ -183,6 +139,9 @@ def generate_materials(session_id: str) -> None:
     response is sent. Opens its OWN db session (the request's is closed by
     then). The DB is the resume point: a ``StepMaterial`` row for a step means
     it is done — skip it (but keep its summary in the accumulated context).
+
+    The per-slide retry loop lives inside the material graph; the driver
+    invokes the graph once per step and persists the final state.
     """
     with _session_lock(session_id):
         started = time.monotonic()
@@ -233,60 +192,38 @@ def generate_materials(session_id: str) -> None:
                     "(established concepts: %d)",
                     step["id"], len(summaries),
                 )
-                # Generate the step's material, REGENERATING it (re-running the
-                # whole material graph) whenever ANY slide fails to compile — a
-                # slide is valid only once the sandbox compiles it cleanly. The
-                # step is committed with its full slide set as soon as every
-                # slide is valid, so a step never ships with a broken slide.
-                result: dict = {}
-                compiled: list[tuple[str | None, str]] = []
-                all_slides_valid = False
-                for attempt in range(1, MAX_MATERIAL_ATTEMPTS + 1):
-                    result = material_graph.invoke(
-                        {
-                            "step": step,
-                            "established_concepts": summaries,
-                            "learner_context": boundary_map,
-                            "language": language,
-                        }
-                    )
-                    compiled = [_compile_slide(s) for s in result["slides"]]
-                    failed = sum(1 for c, err in compiled if c is None)
-                    if failed == 0:
-                        all_slides_valid = True
-                        break
-                    logger.warning(
-                        "Material generation: step %s attempt %d/%d: %d slide(s) "
-                        "failed validation, regenerating",
-                        step["id"], attempt, MAX_MATERIAL_ATTEMPTS, failed,
+                # One invoke per step — the per-slide retry loop is inside
+                # the graph. One checkpoint thread per step.
+                config = graph_config(session_id, f"material:{step['id']}")
+                result: dict = material_graph.invoke(
+                    {
+                        "step": step,
+                        "established_concepts": summaries,
+                        "learner_context": boundary_map,
+                        "language": language,
+                    },
+                    config,
+                )
+
+                # Persist from the final state in one transaction.
+                compiled_slides = result.get("slides") or []
+                failed = result.get("failed_attempts") or []
+
+                # FailedSlide rows for every failed attempt.
+                for fa in failed:
+                    db.add(
+                        FailedSlide(
+                            session_id=session_id,
+                            step_id=step["id"],
+                            slide_index=fa["index"] + 1,  # 1-based for DB
+                            jsx=fa["jsx"],
+                            error=fa["error"],
+                        )
                     )
 
-                    # Save failed JSX from this attempt for debugging.
-                    for i, (raw_jsx, (compiled_code, error)) in enumerate(
-                        zip(result["slides"], compiled), start=1
-                    ):
-                        if compiled_code is None:
-                            db.add(
-                                FailedSlide(
-                                    session_id=session_id,
-                                    step_id=step["id"],
-                                    slide_index=i,
-                                    jsx=raw_jsx,
-                                    error=error,
-                                )
-                            )
-                    db.commit()
-
-                # One SlideContent row per slide + one StepMaterial row, in the
-                # same transaction — one durable checkpoint per step.
-                # Slide IDs are globally unique: prefixed with the session ID.
-                # A None entry is only possible if every attempt still left a
-                # broken slide: degrade gracefully by keeping the slides that
-                # DID compile so the step is not lost.
+                # One SlideContent row per surviving slide (sequential IDs).
                 slide_ids: list[str] = []
-                for n, (content, _) in enumerate(compiled, start=1):
-                    if content is None:
-                        continue
+                for n, content in enumerate(compiled_slides, start=1):
                     slide_id = f"{session_id}_{step['id']}_slide_{n}"
                     slide_ids.append(slide_id)
                     db.add(
@@ -297,6 +234,8 @@ def generate_materials(session_id: str) -> None:
                             content=content,
                         )
                     )
+
+                # One StepMaterial row.
                 db.add(
                     StepMaterial(
                         session_id=session_id,
@@ -309,13 +248,12 @@ def generate_materials(session_id: str) -> None:
                 db.commit()
                 summaries.append(result["summary"])
                 logger.info(
-                    "Material generation: step %s done (%d slides, %d questions, "
-                    "%s, %.1fs)",
+                    "Material generation: step %s done (%d slides, %d failed "
+                    "attempts, %d questions, %.1fs)",
                     step["id"],
                     len(slide_ids),
+                    len(failed),
                     len(result["questions"]),
-                    "all slides valid" if all_slides_valid
-                    else "degraded: some slides still failed validation",
                     time.monotonic() - step_started,
                 )
 
@@ -696,6 +634,18 @@ def dev_regenerate(
         db.delete(m)
     for s in list(session.slide_contents):
         db.delete(s)
+
+    # Delete material checkpoint threads so stale in-memory state
+    # (e.g. old slide_contents/slides) does not resume into the fresh run.
+    steps = session.plan.steps
+    for step in steps:
+        try:
+            checkpointer.delete_thread(f"{session_id}:material:{step['id']}")
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            logger.warning(
+                "Failed to delete material checkpoint thread for step %s",
+                step["id"],
+            )
 
     session.phase = Phase.GENERATING.value
     session.error = None
