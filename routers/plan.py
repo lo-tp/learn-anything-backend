@@ -274,6 +274,7 @@ def generate_materials(session_id: str) -> None:
                             session_id=session_id,
                             step_id=step["id"],
                             slide_index=fa["index"] + 1,  # 1-based for DB
+                            prompt=fa.get("prompt", ""),
                             jsx=fa["jsx"],
                             error=fa["error"],
                         )

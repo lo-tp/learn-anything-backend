@@ -182,6 +182,15 @@ class SlideContent(Base):
 
 
 class FailedSlide(Base):
+    """Per-attempt debug record for a slide that failed to compile.
+
+    One row is written per failed attempt, so a slide that fails more than
+    once has multiple rows (same ``slide_index``, distinct ``prompt``/``jsx``/
+    ``error``). Captures the three things needed to debug a failure:
+    ``prompt`` (what we sent the LLM), ``jsx`` (what the LLM returned) and
+    ``error`` (the sandbox compile error).
+    """
+
     __tablename__ = "failed_slides"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -190,7 +199,12 @@ class FailedSlide(Base):
     )
     step_id: Mapped[str] = mapped_column(String)
     slide_index: Mapped[int] = mapped_column(Integer)
+    # The exact prompt sent to the LLM for this attempt: a JSON list of
+    # messages ({"role": "system"|"human", "content": ...}) as sent.
+    prompt: Mapped[str] = mapped_column(Text)
+    # The JSX returned by the LLM for this attempt.
     jsx: Mapped[str] = mapped_column(Text)
+    # The error returned by the sandbox compile for this attempt.
     error: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(UTC)

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import cast
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 from language import DEFAULT_LANGUAGE, localize_status
@@ -15,11 +15,22 @@ def structured_invoke[Schema: BaseModel](
     llm: BaseChatModel, schema: type[Schema], system: str, human: str
 ) -> Schema:
     """Run the LLM with structured output and return a validated schema instance."""
+    return structured_invoke_messages(
+        llm, schema, [SystemMessage(content=system), HumanMessage(content=human)]
+    )
+
+
+def structured_invoke_messages[Schema: BaseModel](
+    llm: BaseChatModel, schema: type[Schema], messages: list[BaseMessage]
+) -> Schema:
+    """Run the LLM with structured output over an explicit message list.
+
+    Lets the caller build the messages once and reuse the exact same objects
+    for both the call and persistence (e.g. saving the real prompt sent).
+    """
     return cast(
         Schema,
-        llm.with_structured_output(schema).invoke(
-            [SystemMessage(content=system), HumanMessage(content=human)]
-        ),
+        llm.with_structured_output(schema).invoke(messages),
     )
 
 
