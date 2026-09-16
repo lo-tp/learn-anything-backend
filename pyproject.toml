@@ -26,3 +26,16 @@ dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.16.7",
 ]
+
+# Coverage is scoped to the two application layers under test. The gate
+# fails the run unless overall coverage is at least 95%; every module in
+# graphs/ and routers/ must stay above that line.
+[tool.coverage.run]
+source = ["graphs", "routers"]
+
+[tool.coverage.report]
+fail_under = 95
+show_missing = true
+
+[tool.pytest.ini_options]
+addopts = "--cov=graphs --cov=routers --cov-report=term-missing --cov-fail-under=95"
