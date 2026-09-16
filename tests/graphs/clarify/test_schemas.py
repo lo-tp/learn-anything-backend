@@ -29,7 +29,7 @@ class TestAssessOut:
 
     def test_reject_invalid_verdict(self):
         with pytest.raises(ValidationError):
-            AssessOut(verdict="maybe", narrowed_goal="x")
+            AssessOut(verdict="maybe", narrowed_goal="x")  # type: ignore[type-arg]
 
     def test_open_dimensions_defaults_to_empty(self):
         out = AssessOut(verdict="specific", narrowed_goal="x")

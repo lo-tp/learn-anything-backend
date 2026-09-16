@@ -17,6 +17,7 @@ from graphs.plan.schemas import (
     ResearchOut,
     StepDraft,
 )
+from graphs.plan.state import PlanState
 
 
 def _make_llm() -> MagicMock:
@@ -63,8 +64,8 @@ class TestResearchTopic:
 
 
 class TestDesignPlan:
-    def _state(self, **overrides) -> dict:
-        base = {
+    def _state(self, **overrides) -> PlanState:
+        base: PlanState = {
             "goal": "Learn calculus",
             "boundary_map": {"algebra": {"floor": "x", "ceiling": None, "gap_type": "narrow"}},
             "research": {
@@ -75,7 +76,7 @@ class TestDesignPlan:
             },
             "language": "English",
         }
-        base.update(overrides)
+        base.update(overrides)  # type: ignore[arg-type]
         return base
 
     def _mock_design_out(self) -> DesignOut:
@@ -135,8 +136,8 @@ class TestDesignPlan:
 
 
 class TestRenderPlan:
-    def _state(self, **overrides) -> dict:
-        base = {
+    def _state(self, **overrides) -> PlanState:
+        base: PlanState = {
             "goal": "Learn calculus",
             "boundary_map": {},
             "design_steps": [
@@ -144,7 +145,7 @@ class TestRenderPlan:
             ],
             "language": "English",
         }
-        base.update(overrides)
+        base.update(overrides)  # type: ignore[arg-type]
         return base
 
     def test_returns_current_plan(self):

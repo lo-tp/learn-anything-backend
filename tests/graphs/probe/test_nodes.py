@@ -20,6 +20,7 @@ from graphs.probe.schemas import (
     StrandItem,
     StrandsOut,
 )
+from graphs.probe.state import ProbeState
 
 
 def _make_llm() -> MagicMock:
@@ -74,8 +75,8 @@ class TestDecomposeStrands:
 
 
 class TestGenerateBatch:
-    def _state(self, **overrides) -> dict:
-        base = {
+    def _state(self, **overrides) -> ProbeState:
+        base: ProbeState = {
             "goal": "Learn calculus",
             "strands": ["algebra", "geometry"],
             "strand_descriptions": {"algebra": "d1", "geometry": "d2"},
@@ -87,7 +88,7 @@ class TestGenerateBatch:
             "history": [],
             "language": "English",
         }
-        base.update(overrides)
+        base.update(overrides)  # type: ignore[arg-type]
         return base
 
     def test_returns_batch_of_questions(self):
@@ -191,8 +192,8 @@ class TestWaitForAnswers:
 
 
 class TestEvaluateBatch:
-    def _state(self, **overrides) -> dict:
-        base = {
+    def _state(self, **overrides) -> ProbeState:
+        base: ProbeState = {
             "goal": "Learn calculus",
             "strands": ["algebra", "geometry"],
             "boundary_map": {
@@ -228,7 +229,7 @@ class TestEvaluateBatch:
             },
             "language": "English",
         }
-        base.update(overrides)
+        base.update(overrides)  # type: ignore[arg-type]
         return base
 
     def test_updates_boundary_map_and_history(self):

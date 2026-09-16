@@ -19,6 +19,7 @@ from graphs.material.schemas import (
     SlideOut,
     SummaryOut,
 )
+from graphs.material.state import MaterialState
 
 
 def _make_llm() -> MagicMock:
@@ -103,8 +104,8 @@ class TestPlanSlideContents:
 
 
 class TestWriteSlide:
-    def _state(self, **overrides) -> dict:
-        base = {
+    def _state(self, **overrides) -> MaterialState:
+        base: MaterialState = {
             "step": {"id": "s1", "title": "Step 1", "description": "d"},
             "slide_contents": [
                 {"title": "Slide 1", "key_points": ["kp1"], "visual_hint": "v"}
@@ -115,7 +116,7 @@ class TestWriteSlide:
             "learner_context": {},
             "language": "English",
         }
-        base.update(overrides)
+        base.update(overrides)  # type: ignore[arg-type]
         return base
 
     def test_returns_jsx_and_resets_error(self):
@@ -177,8 +178,8 @@ class TestWriteSlide:
 
 
 class TestCompileSlide:
-    def _state(self, **overrides) -> dict:
-        base = {
+    def _state(self, **overrides) -> MaterialState:
+        base: MaterialState = {
             "step": {"id": "s1", "title": "Step 1"},
             "slide_contents": [
                 {"title": "Slide 1", "key_points": [], "visual_hint": ""},
@@ -189,7 +190,7 @@ class TestCompileSlide:
             "current_slide_prompt": "[]",
             "attempts_by_slide": [1],
         }
-        base.update(overrides)
+        base.update(overrides)  # type: ignore[arg-type]
         return base
 
     @patch("graphs.material.nodes._compile_slide")
