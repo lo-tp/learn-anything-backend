@@ -18,6 +18,45 @@ SANDBOX_URL = os.getenv("SANDBOX_URL", "http://localhost:8080")
 _COMPILE_TIMEOUT_S = 30.0
 MAX_MATERIAL_ATTEMPTS = max(1, int(os.getenv("MAX_MATERIAL_ATTEMPTS", "3")))
 
+# --- Slide-generation sampling profiles ---
+# One profile per write attempt: attempt 1 is the most creative (higher
+# temp/top_p/top_k, lower min_p) to maximize the chance of a good first
+# draft; each retry steps down toward the most deterministic profile so a
+# slide that keeps failing to compile gets progressively stable samples.
+SLIDE_SAMPLING_PROFILES: tuple[dict[str, float], ...] = (
+    {  # Attempt 1 — most creative
+        "temperature": 0.6,
+        "top_p": 0.8,
+        "top_k": 40,
+        "min_p": 0.05,
+        "repeat_penalty": 1.05,
+    },
+    {  # Attempt 2 — middle
+        "temperature": 0.35,
+        "top_p": 0.7,
+        "top_k": 25,
+        "min_p": 0.08,
+        "repeat_penalty": 1.05,
+    },
+    {  # Attempt 3 — most reliable
+        "temperature": 0.1,
+        "top_p": 0.5,
+        "top_k": 10,
+        "min_p": 0.1,
+        "repeat_penalty": 1.05,
+    },
+)
+
+
+def slide_sampling_for_attempt(attempt: int) -> dict[str, float]:
+    """Sampling params for the given 1-based write attempt.
+
+    Attempts beyond the number of profiles reuse the last (most
+    deterministic) profile; attempts below 1 reuse the first.
+    """
+    idx = max(0, min(attempt - 1, len(SLIDE_SAMPLING_PROFILES) - 1))
+    return dict(SLIDE_SAMPLING_PROFILES[idx])
+
 
 # --- Sandbox compile ---
 

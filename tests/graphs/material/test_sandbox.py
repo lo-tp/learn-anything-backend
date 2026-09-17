@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from itertools import pairwise
 from unittest.mock import MagicMock, patch
 
 import httpx
 
 from graphs.material.sandbox import (
     MAX_MATERIAL_ATTEMPTS,
+    SLIDE_SAMPLING_PROFILES,
     _compile_slide,
     _placeholder_slide_jsx,
+    slide_sampling_for_attempt,
 )
 
 
@@ -40,6 +43,44 @@ class TestPlaceholderSlideJsx:
         jsx = _placeholder_slide_jsx("Test")
         assert jsx.startswith("export default function SlidePlaceholder()")
         assert jsx.endswith("}")
+
+
+class TestSlideSamplingForAttempt:
+    def test_first_attempt_is_most_creative(self):
+        p1 = slide_sampling_for_attempt(1)
+        assert p1 == SLIDE_SAMPLING_PROFILES[0]
+        assert p1["temperature"] == max(
+            p["temperature"] for p in SLIDE_SAMPLING_PROFILES
+        )
+        assert p1["top_p"] == max(p["top_p"] for p in SLIDE_SAMPLING_PROFILES)
+        assert p1["top_k"] == max(p["top_k"] for p in SLIDE_SAMPLING_PROFILES)
+
+    def test_last_attempt_is_most_deterministic(self):
+        n = len(SLIDE_SAMPLING_PROFILES)
+        p_last = slide_sampling_for_attempt(n)
+        assert p_last == SLIDE_SAMPLING_PROFILES[-1]
+        assert p_last["temperature"] == min(
+            p["temperature"] for p in SLIDE_SAMPLING_PROFILES
+        )
+
+    def test_profiles_step_down_monotonically(self):
+        temps = [
+            slide_sampling_for_attempt(i)["temperature"]
+            for i in range(1, len(SLIDE_SAMPLING_PROFILES) + 1)
+        ]
+        assert all(a > b for a, b in pairwise(temps))
+
+    def test_clamps_beyond_profile_count(self):
+        n = len(SLIDE_SAMPLING_PROFILES)
+        assert slide_sampling_for_attempt(n + 5) == slide_sampling_for_attempt(n)
+
+    def test_clamps_below_one(self):
+        assert slide_sampling_for_attempt(0) == slide_sampling_for_attempt(1)
+
+    def test_returns_copy(self):
+        a = slide_sampling_for_attempt(1)
+        a["temperature"] = 99.0
+        assert slide_sampling_for_attempt(1)["temperature"] != 99.0
 
 
 class TestCompileSlide:

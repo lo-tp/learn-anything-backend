@@ -170,16 +170,39 @@ class TestWriteSlide:
             result = node(self._state(attempts_by_slide=[2]))
         assert result["attempts_by_slide"] == [3]
 
-    def test_uses_low_temperature(self):
+    def _kwargs_for_attempt(self, attempts_by_slide: list[int]):
         llm = _make_llm()
         mock_out = SlideOut(slide="export default function S() {}")
         with patch(
             "graphs.material.nodes.structured_invoke_messages", return_value=mock_out
         ) as mock_invoke:
             node = make_write_slide(llm)
-            node(self._state())
-        # Slide generation runs at a low temperature for stable JSX.
-        assert mock_invoke.call_args.kwargs == {"temperature": 0.1}
+            node(self._state(attempts_by_slide=attempts_by_slide))
+        return mock_invoke.call_args.kwargs
+
+    def test_first_attempt_uses_creative_profile(self):
+        from graphs.material.sandbox import slide_sampling_for_attempt
+
+        assert self._kwargs_for_attempt([0]) == slide_sampling_for_attempt(1)
+
+    def test_second_attempt_uses_middle_profile(self):
+        from graphs.material.sandbox import slide_sampling_for_attempt
+
+        assert self._kwargs_for_attempt([1]) == slide_sampling_for_attempt(2)
+
+    def test_third_attempt_uses_reliable_profile(self):
+        from graphs.material.sandbox import slide_sampling_for_attempt
+
+        assert self._kwargs_for_attempt([2]) == slide_sampling_for_attempt(3)
+
+    def test_attempt_beyond_profiles_uses_last_profile(self):
+        from graphs.material.sandbox import (
+            SLIDE_SAMPLING_PROFILES,
+            slide_sampling_for_attempt,
+        )
+
+        n = len(SLIDE_SAMPLING_PROFILES)
+        assert self._kwargs_for_attempt([n]) == slide_sampling_for_attempt(n + 1)
 
     def test_no_compile_error_in_prompt(self):
         llm = _make_llm()
