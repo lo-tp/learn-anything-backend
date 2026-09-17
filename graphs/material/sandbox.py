@@ -20,30 +20,22 @@ MAX_MATERIAL_ATTEMPTS = max(1, int(os.getenv("MAX_MATERIAL_ATTEMPTS", "3")))
 
 # --- Slide-generation sampling profiles ---
 # One profile per write attempt: attempt 1 is the most creative (higher
-# temp/top_p/top_k, lower min_p) to maximize the chance of a good first
-# draft; each retry steps down toward the most deterministic profile so a
-# slide that keeps failing to compile gets progressively stable samples.
+# temp/top_p) to maximize the chance of a good first draft; each retry steps
+# down toward the most deterministic profile so a slide that keeps failing to
+# compile gets progressively stable samples. Only OpenAI-supported params are
+# used (top_k/min_p/repeat_penalty are rejected by the OpenAI API).
 SLIDE_SAMPLING_PROFILES: tuple[dict[str, float], ...] = (
     {  # Attempt 1 — most creative
         "temperature": 0.6,
         "top_p": 0.8,
-        "top_k": 40,
-        "min_p": 0.05,
-        "repeat_penalty": 1.05,
     },
     {  # Attempt 2 — middle
         "temperature": 0.35,
         "top_p": 0.7,
-        "top_k": 25,
-        "min_p": 0.08,
-        "repeat_penalty": 1.05,
     },
     {  # Attempt 3 — most reliable
         "temperature": 0.1,
         "top_p": 0.5,
-        "top_k": 10,
-        "min_p": 0.1,
-        "repeat_penalty": 1.05,
     },
 )
 

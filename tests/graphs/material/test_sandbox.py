@@ -53,7 +53,6 @@ class TestSlideSamplingForAttempt:
             p["temperature"] for p in SLIDE_SAMPLING_PROFILES
         )
         assert p1["top_p"] == max(p["top_p"] for p in SLIDE_SAMPLING_PROFILES)
-        assert p1["top_k"] == max(p["top_k"] for p in SLIDE_SAMPLING_PROFILES)
 
     def test_last_attempt_is_most_deterministic(self):
         n = len(SLIDE_SAMPLING_PROFILES)
