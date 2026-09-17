@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Any, cast
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
@@ -21,17 +21,21 @@ def structured_invoke[Schema: BaseModel](
 
 
 def structured_invoke_messages[Schema: BaseModel](
-    llm: BaseChatModel, schema: type[Schema], messages: list[BaseMessage]
+    llm: BaseChatModel, schema: type[Schema], messages: list[BaseMessage],
+    **bind_kwargs: Any,
 ) -> Schema:
     """Run the LLM with structured output over an explicit message list.
 
     Lets the caller build the messages once and reuse the exact same objects
     for both the call and persistence (e.g. saving the real prompt sent).
+
+    ``bind_kwargs`` (e.g. ``temperature=0.1``) are applied via ``bind`` AFTER
+    ``with_structured_output`` — binding before it silently drops the params.
     """
-    return cast(
-        Schema,
-        llm.with_structured_output(schema).invoke(messages),
-    )
+    model = llm.with_structured_output(schema)
+    if bind_kwargs:
+        model = model.bind(**bind_kwargs)
+    return cast(Schema, model.invoke(messages))
 
 
 def unknown_option(llm: BaseChatModel | None, language: str | None = None) -> str:

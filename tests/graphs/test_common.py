@@ -66,6 +66,24 @@ class TestStructuredInvokeMessages:
         llm.with_structured_output.assert_called_once_with(_DummySchema)
         mock_structured.invoke.assert_called_once()
 
+    def test_bind_kwargs_applied_after_structured_output(self):
+        llm = MagicMock()
+        mock_structured = MagicMock()
+        mock_bound = MagicMock()
+        mock_bound.invoke.return_value = _DummySchema(value="ok")
+        mock_structured.bind.return_value = mock_bound
+        llm.with_structured_output.return_value = mock_structured
+
+        result = structured_invoke_messages(
+            llm, _DummySchema, [HumanMessage(content="hi")], temperature=0.1
+        )
+        assert result.value == "ok"
+        # bind must wrap the structured-output model (i.e. run AFTER
+        # with_structured_output) and invoke must hit the bound model.
+        mock_structured.bind.assert_called_once_with(temperature=0.1)
+        mock_bound.invoke.assert_called_once()
+        mock_structured.invoke.assert_not_called()
+
 
 # --- unknown_option ---
 

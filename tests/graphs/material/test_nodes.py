@@ -170,6 +170,17 @@ class TestWriteSlide:
             result = node(self._state(attempts_by_slide=[2]))
         assert result["attempts_by_slide"] == [3]
 
+    def test_uses_low_temperature(self):
+        llm = _make_llm()
+        mock_out = SlideOut(slide="export default function S() {}")
+        with patch(
+            "graphs.material.nodes.structured_invoke_messages", return_value=mock_out
+        ) as mock_invoke:
+            node = make_write_slide(llm)
+            node(self._state())
+        # Slide generation runs at a low temperature for stable JSX.
+        assert mock_invoke.call_args.kwargs == {"temperature": 0.1}
+
     def test_no_compile_error_in_prompt(self):
         llm = _make_llm()
         mock_out = SlideOut(slide="export default function S() {}")
