@@ -83,7 +83,6 @@ class Session(Base):
     language: Mapped[str | None] = mapped_column(String, nullable=True)   # detected learner language (e.g. "Spanish"); null for legacy rows
     narrowed_goal: Mapped[str | None] = mapped_column(Text, nullable=True)
     boundary_map: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # strand -> {floor, ceiling, gap_type}
-    error: Mapped[str | None] = mapped_column(Text, nullable=True)           # failure message when phase == "error", null otherwise
     created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
@@ -481,7 +480,7 @@ This is the **combined** probe endpoint. First call has no answers (starts the p
 }
 ```
 
-If generation fails, the session lands in the `error` phase (terminal — the user starts a new session) with the failure message stored on `session.error`.
+If generation fails, the session lands in the `error` phase (terminal — the user starts a new session); the failure detail is logged.
 
 #### `GET /sessions/{id}/materials`
 
@@ -514,7 +513,7 @@ Behavior by session phase:
 | `clarifying` / `probing` / `planning` / `reviewing` | `200`, `generated_steps: []` |
 | `generating` | `200`, partial `generated_steps` (steps generated so far, plan order) |
 | `executing` / `complete` | `200`, full `generated_steps` (plan order) |
-| `error` | `200`, partial `generated_steps`; failure detail only in logs/DB |
+| `error` | `200`, partial `generated_steps`; failure detail only in logs |
 | unknown session | `404` |
 
 On `error` the failure message is **not** exposed here — the phase is terminal and the client starts a new session.
@@ -1042,7 +1041,7 @@ generate_materials (background task, its OWN db session, per-session lock):
         db.add(SlideContent rows) + db.add(StepMaterial(...)); db.commit()
         summaries.append(result["summary"])
    phase = executing; commit
-   on any exception: rollback, log, phase = error + session.error; commit
+   on any exception: rollback, log, phase = error; commit
 ```
 
 **Key points:**

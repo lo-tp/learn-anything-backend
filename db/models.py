@@ -79,7 +79,6 @@ class Session(Base):
     language: Mapped[str | None] = mapped_column(String, nullable=True)
     narrowed_goal: Mapped[str | None] = mapped_column(Text, nullable=True)
     boundary_map: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Timezone-aware (UTC) so values read back carry an explicit offset and
     # serialize as RFC 3339 date-times. A bare wall-clock string is ambiguous
     # and clients parse it as local time.

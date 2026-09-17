@@ -901,7 +901,6 @@ class TestGenerateMaterials:
         db.expire_all()
         session = db.get(Session, sid)
         assert session.phase == Phase.ERROR.value
-        assert "sandbox down" in session.error
 
     def test_error_recording_failure_is_swallowed(self, db, db_engine, make_session):
         """If persisting the error state also fails, the inner best-effort

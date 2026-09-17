@@ -334,7 +334,7 @@ def generate_materials(session_id: str) -> None:
                 "Material generation complete: session=%s, %.1fs total",
                 session_id, time.monotonic() - started,
             )
-        except Exception as exc:
+        except Exception:
             db.rollback()
             logger.exception(
                 "Material generation failed for session %s after %.1fs",
@@ -345,7 +345,6 @@ def generate_materials(session_id: str) -> None:
                 errored = db.get(Session, session_id)
                 if errored is not None:
                     errored.phase = Phase.ERROR.value
-                    errored.error = f"Material generation failed: {exc}"
                     db.commit()
             except Exception:
                 logger.exception(
@@ -719,7 +718,6 @@ def dev_regenerate(
             )
 
     session.phase = Phase.GENERATING.value
-    session.error = None
     db.commit()
 
     background_tasks.add_task(generate_materials, session_id)
