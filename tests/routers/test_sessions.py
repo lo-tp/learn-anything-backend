@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 
 from db import Phase, Plan, StepProgress
+
+# RFC 3339 date-time with an explicit UTC designator (pydantic emits "Z"
+# for UTC; "+00:00" is also acceptable).
+UTC_OFFSET_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|\+00:00)$")
 
 
 class TestListSessions:
@@ -35,6 +40,25 @@ class TestListSessions:
         first = resp.json()["sessions"][0]
         assert first["goal"] == "goal B"
         assert first["phase"] == "probing"
+        # created_at must carry an explicit UTC offset (RFC 3339), otherwise
+        # clients parse it as local time.
+        assert UTC_OFFSET_RE.match(first["created_at"]), first["created_at"]
+
+    def test_naive_legacy_created_at_serialized_as_utc(self, client, db, make_session):
+        # Rows written before the timestamptz migration (or via a driver that
+        # strips the offset) come back naive; the response must still carry
+        # an explicit UTC offset so the instant is unambiguous.
+        make_session(
+            session_id="a",
+            # Naive UTC wall-clock: what legacy rows look like when read back.
+            created_at=datetime(2026, 9, 17, 1, 2, 49, tzinfo=UTC).replace(
+                tzinfo=None
+            ),
+        )
+        resp = client.get("/sessions")
+        created_at = resp.json()["sessions"][0]["created_at"]
+        assert UTC_OFFSET_RE.match(created_at), created_at
+        assert created_at.startswith("2026-09-17T01:02:49")
 
     def test_filter_by_single_phase(self, client, db, make_session):
         make_session(session_id="a", phase=Phase.CLARIFYING)

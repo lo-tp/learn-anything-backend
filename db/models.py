@@ -12,6 +12,7 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     Boolean,
+    DateTime,
     Float,
     ForeignKey,
     Integer,
@@ -79,10 +80,14 @@ class Session(Base):
     narrowed_goal: Mapped[str | None] = mapped_column(Text, nullable=True)
     boundary_map: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Timezone-aware (UTC) so values read back carry an explicit offset and
+    # serialize as RFC 3339 date-times. A bare wall-clock string is ambiguous
+    # and clients parse it as local time.
     created_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(UTC)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
     updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
     )
@@ -110,7 +115,7 @@ class ProbeQuestion(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.session_id"), index=True
+        ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True
     )
     question_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     text: Mapped[str] = mapped_column(Text)
@@ -122,7 +127,9 @@ class ProbeQuestion(Base):
     # Answer (null until answered)
     selected_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_correct: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    answered_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    answered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     session: Mapped[Session] = relationship(back_populates="probe_questions")
 
@@ -132,7 +139,7 @@ class Plan(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.session_id"), unique=True
+        ForeignKey("sessions.session_id", ondelete="CASCADE"), unique=True
     )
     version: Mapped[int] = mapped_column(Integer, default=1)
     prose_summary: Mapped[str] = mapped_column(Text)
@@ -148,7 +155,7 @@ class StepMaterial(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.session_id"), index=True
+        ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True
     )
     step_id: Mapped[str] = mapped_column(String)
     slides: Mapped[list[str]] = mapped_column(JSON)
@@ -173,7 +180,7 @@ class SlideContent(Base):
     # Served to the sandbox service via GET /slides/{slide_id} (internal).
     slide_id: Mapped[str] = mapped_column(String, primary_key=True)
     session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.session_id"), index=True
+        ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True
     )
     step_id: Mapped[str] = mapped_column(String)
     content: Mapped[str] = mapped_column(Text)
@@ -195,7 +202,7 @@ class FailedSlide(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.session_id"), index=True
+        ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True
     )
     step_id: Mapped[str] = mapped_column(String)
     slide_index: Mapped[int] = mapped_column(Integer)
@@ -207,7 +214,7 @@ class FailedSlide(Base):
     # The error returned by the sandbox compile for this attempt.
     error: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(UTC)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
 
 
@@ -228,7 +235,7 @@ class GraphStageTiming(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.session_id"), index=True
+        ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True
     )
     # Which graph produced this row: "material" for now;
     # "plan" / "probe" / "clarify" possible later.
@@ -239,7 +246,7 @@ class GraphStageTiming(Base):
     context: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     duration_seconds: Mapped[float] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(
-        default=lambda: datetime.now(UTC)
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
 
 
@@ -248,7 +255,7 @@ class StepProgress(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(
-        ForeignKey("sessions.session_id"), index=True
+        ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True
     )
     step_id: Mapped[str] = mapped_column(String)
     slides_done: Mapped[bool] = mapped_column(Boolean, default=False)

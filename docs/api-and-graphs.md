@@ -99,7 +99,7 @@ class ProbeQuestion(Base):
     __tablename__ = "probe_questions"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id"), index=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True)
     question_id: Mapped[str] = mapped_column(String)          # stable ID within the probe sequence
     text: Mapped[str] = mapped_column(Text)
     options: Mapped[list] = mapped_column(JSON)               # list[str]
@@ -118,7 +118,7 @@ class Plan(Base):
     __tablename__ = "plans"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id"), unique=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id", ondelete="CASCADE"), unique=True)
     version: Mapped[int] = mapped_column(Integer, default=1)  # increments on each adjustment
     prose_summary: Mapped[str] = mapped_column(Text)
     dependency_dag: Mapped[str] = mapped_column(Text)          # mermaid source
@@ -132,7 +132,7 @@ class StepMaterial(Base):
     __tablename__ = "step_materials"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id"), index=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True)
     step_id: Mapped[str] = mapped_column(String)
     slides: Mapped[list] = mapped_column(JSON)                 # list of globally-unique slide IDs (sandbox fetches JSX via GET /slides/{id})
     questions: Mapped[list] = mapped_column(JSON)              # list of {id, text, options, correct_index, explanation}
@@ -145,7 +145,7 @@ class SlideContent(Base):
     __tablename__ = "slide_contents"
 
     slide_id: Mapped[str] = mapped_column(String, primary_key=True)   # "{session_id}_{step_id}_slide_{n}" — globally unique (sole PK)
-    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id"), index=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True)
     step_id: Mapped[str] = mapped_column(String)
     content: Mapped[str] = mapped_column(Text)                        # the slide JSX component source
 
@@ -156,7 +156,7 @@ class StepProgress(Base):
     __tablename__ = "step_progress"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id"), index=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True)
     step_id: Mapped[str] = mapped_column(String)
     slides_done: Mapped[bool] = mapped_column(Boolean, default=False)
     answers: Mapped[list] = mapped_column(JSON, default=list)  # list of {question_id, selected_index, is_correct, explanation}
@@ -170,7 +170,7 @@ class GraphStageTiming(Base):
     __tablename__ = "graph_stage_timings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id"), index=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True)
     graph: Mapped[str] = mapped_column(String)                   # which graph produced the row ("material" for now; "plan"/"probe"/"clarify" later)
     stage: Mapped[str] = mapped_column(String)                  # node name within the graph (e.g. "write_slide")
     context: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # stage-specific detail; material rows: {step_id, slide_index (1-based|null), attempt (1-based|null)}

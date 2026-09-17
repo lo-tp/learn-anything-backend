@@ -1,9 +1,9 @@
 """Session status routes: state & progress read-back."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session as DBSession
 
 from db import Phase, Session, get_db
@@ -34,6 +34,17 @@ class SessionListItem(BaseModel):
     goal: str
     narrowed_goal: str | None
     created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def _ensure_utc(cls, v: datetime) -> datetime:
+        # The OpenAPI contract declares created_at as RFC 3339 date-time,
+        # which requires an explicit offset. Normalize to UTC so clients
+        # never parse a bare wall-clock string as local time (this also
+        # covers legacy rows written before the timestamptz migration).
+        if v.tzinfo is None:
+            return v.replace(tzinfo=UTC)
+        return v.astimezone(UTC)
 
 
 class SessionList(BaseModel):
