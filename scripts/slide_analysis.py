@@ -6,7 +6,9 @@ Reads ``graph_stage_timings`` (per-stage wall-clock durations) and
   1. Duration stats per stage (count / min / mean / p50 / p90 / max).
   2. write_slide duration by attempt number (1st = most creative, ...).
   3. Retry/failure stats: how many slides needed 1, 2, 3+ attempts,
-     overall failure rate, and the most common compile errors.
+     overall failure rate, and exhausted slides.
+  4. Total time per step's material (generate_step rows).
+  5. Most common compile errors. 6. Failed attempts over time.
 
 Usage:
     .venv/bin/python scripts/slide_analysis.py
@@ -84,6 +86,9 @@ def analyze(session_id: str | None, graph: str, since: datetime | None) -> None:
             q = q.where(GraphStageTiming.session_id == session_id)
         if since:
             q = q.where(GraphStageTiming.created_at >= since)
+        # Row (id) order = execution order, so per-step "latest row wins"
+        # for re-run history is well-defined.
+        q = q.order_by(GraphStageTiming.id)
         timings: list[GraphStageTiming] = list(db.scalars(q))
 
         qf = select(FailedSlide)
@@ -190,9 +195,31 @@ def analyze(session_id: str | None, graph: str, since: datetime | None) -> None:
             print(f"    {label}: {count}")
     print()
 
-    # --- 4. Most common compile errors ---
+    # --- 4. Total time per step's material ---
+    # One generate_step row per completed step, written by the driver with
+    # the wall time from first graph invoke to finalization.
+    step_totals: dict[tuple[str, str], float] = {}
+    for t in timings:
+        if t.stage != "generate_step":
+            continue
+        ctx = t.context or {}
+        key = (t.session_id, str(ctx.get("step_id", "")))
+        # A re-run appends a fresh row; show the latest one per step.
+        step_totals[key] = t.duration_seconds
+
+    if step_totals:
+        print("4. Total time per step's material (generate_step)")
+        total = sum(step_totals.values())
+        for (sid, step_id), dur in sorted(
+            step_totals.items(), key=lambda kv: -kv[1]
+        ):
+            print(f"  session={sid[:8]}  step={step_id:<20} {_fmt_duration(dur)}")
+        print(f"  {'':<13} {len(step_totals)} steps, {_fmt_duration(total)} total")
+        print()
+
+    # --- 5. Most common compile errors ---
     if failures:
-        print("4. Top compile errors (truncated to 100 chars)")
+        print("5. Top compile errors (truncated to 100 chars)")
         errors = Counter(
             " ".join(f.error.split())[:100] for f in failures
         )
@@ -200,9 +227,9 @@ def analyze(session_id: str | None, graph: str, since: datetime | None) -> None:
             print(f"  {count:>3}x  {error}")
         print()
 
-    # --- 5. Failures over time ---
+    # --- 6. Failures over time ---
     if failures:
-        print("5. Failed attempts over time (newest first)")
+        print("6. Failed attempts over time (newest first)")
         latest = max(f.created_at for f in failures)
         span = latest - min(f.created_at for f in failures)
         print(f"  span: {min(f.created_at for f in failures):%Y-%m-%d %H:%M} → "

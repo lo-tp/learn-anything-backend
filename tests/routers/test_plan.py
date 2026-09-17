@@ -705,19 +705,20 @@ class TestGenerateMaterials:
         assert failed.error == "e"
 
         # One GraphStageTiming row per stage execution (7 for this 2-slide
-        # run), all attributed to the material graph, in execution order.
+        # run) plus a final generate_step row with the step's total time.
+        # All attributed to the material graph, in execution order.
         timings = (
             db.query(GraphStageTiming)
             .filter_by(session_id=sid)
             .order_by(GraphStageTiming.id)
             .all()
         )
-        assert len(timings) == 7
+        assert len(timings) == 8
         assert all(t.graph == "material" for t in timings)
         assert [t.stage for t in timings] == [
             "plan_slide_contents", "write_slide", "compile_slide",
             "write_slide", "compile_slide", "write_questions",
-            "summarize_step",
+            "summarize_step", "generate_step",
         ]
         # Context carries the step and 1-based slide position/attempt.
         assert timings[0].context == {
@@ -729,6 +730,11 @@ class TestGenerateMaterials:
         assert timings[3].context == {
             "step_id": "s1", "slide_index": 2, "attempt": 1,
         }
+        # The generate_step row carries the total material time for the step.
+        assert timings[-1].context == {
+            "step_id": "s1", "slide_index": None, "attempt": None,
+        }
+        assert timings[-1].duration_seconds > 0
         assert all(t.duration_seconds >= 0 for t in timings)
 
     def test_skips_already_complete_step(self, db, db_engine, make_session,
@@ -872,14 +878,15 @@ class TestGenerateMaterials:
             .order_by(GraphStageTiming.id)
             .all()
         )
-        # The old row (0.9s) survives; 7 fresh rows are appended after it.
-        assert len(timings) == 8
+        # The old row (0.9s) survives; 8 fresh rows are appended after it
+        # (7 stage rows + the generate_step total).
+        assert len(timings) == 9
         assert timings[0].stage == "plan_slide_contents"
         assert timings[0].duration_seconds == 0.9
         assert [t.stage for t in timings[1:]] == [
             "plan_slide_contents", "write_slide", "compile_slide",
             "write_slide", "compile_slide", "write_questions",
-            "summarize_step",
+            "summarize_step", "generate_step",
         ]
 
     def test_failure_sets_error_phase(self, db, db_engine, make_session,

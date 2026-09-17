@@ -316,6 +316,22 @@ def generate_materials(session_id: str) -> None:
                 provisional.questions = result["questions"]
                 provisional.summary = result["summary"]
                 provisional.is_complete = True
+                # Total wall time to generate this step's material: from the
+                # first graph invoke to finalization, including the slide
+                # commits between interrupts. Persisted as a generate_step
+                # timing row alongside the per-stage rows (same append-only
+                # history policy — a re-run appends a fresh row).
+                step_total = time.monotonic() - step_started
+                db.add(
+                    GraphStageTiming(
+                        session_id=session_id,
+                        graph="material",
+                        stage="generate_step",
+                        context={"step_id": step["id"], "slide_index": None,
+                                 "attempt": None},
+                        duration_seconds=step_total,
+                    )
+                )
                 db.commit()
                 summaries.append(result["summary"])
                 logger.info(
@@ -325,7 +341,7 @@ def generate_materials(session_id: str) -> None:
                     len(slide_ids),
                     len(failed),
                     len(result["questions"]),
-                    time.monotonic() - step_started,
+                    step_total,
                 )
 
             session.phase = Phase.EXECUTING.value
