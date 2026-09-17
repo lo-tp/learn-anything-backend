@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session as DBSession
 
 from db import (
     FailedSlide,
+    GraphStageTiming,
     Phase,
     Plan,
     Session,
@@ -232,6 +233,10 @@ def generate_materials(session_id: str) -> None:
                 # each successful compile (pause_after_compile); the driver
                 # saves the slide to the DB and resumes. Each compiled slide is
                 # also appended to the provisional row so the FE sees it.
+                # Stage timings from state are persisted the same way: each
+                # not-yet-saved entry becomes a GraphStageTiming row in the
+                # same transaction as the slide commit (append-only — prior
+                # attempt rows from a re-run are kept).
                 config = graph_config(session_id, f"material:{step['id']}")
                 state: dict = material_graph.invoke(
                     {
@@ -243,6 +248,7 @@ def generate_materials(session_id: str) -> None:
                     config,
                 )
                 slide_ids: list[str] = []
+                timings_persisted = 0
                 while state.get("__interrupt__"):
                     slides = state.get("slides") or []
                     n = len(slides)
@@ -256,6 +262,20 @@ def generate_materials(session_id: str) -> None:
                             content=slides[-1],
                         )
                     )
+                    # Persist any stage timings that have accumulated since the
+                    # last commit (one row per stage execution, append-only).
+                    timings = state.get("stage_timings") or []
+                    for t in timings[timings_persisted:]:
+                        db.add(
+                            GraphStageTiming(
+                                session_id=session_id,
+                                graph="material",
+                                stage=t["stage"],
+                                context=t.get("context"),
+                                duration_seconds=t["duration_seconds"],
+                            )
+                        )
+                    timings_persisted = len(timings)
                     # Publish the new slide on the provisional row (reassign a
                     # fresh list so SQLAlchemy's JSON column detects the change).
                     provisional.slides = provisional.slides + [slide_id]
@@ -265,8 +285,9 @@ def generate_materials(session_id: str) -> None:
                     )
                 result = state
 
-                # Finalize the provisional row and persist failed attempts in
-                # one transaction (the slides are already committed above).
+                # Finalize the provisional row and persist failed attempts and
+                # any remaining stage timings in one transaction (the slides
+                # are already committed above).
                 failed = result.get("failed_attempts") or []
                 for fa in failed:
                     db.add(
@@ -277,6 +298,17 @@ def generate_materials(session_id: str) -> None:
                             prompt=fa.get("prompt", ""),
                             jsx=fa["jsx"],
                             error=fa["error"],
+                        )
+                    )
+                timings = result.get("stage_timings") or []
+                for t in timings[timings_persisted:]:
+                    db.add(
+                        GraphStageTiming(
+                            session_id=session_id,
+                            graph="material",
+                            stage=t["stage"],
+                            context=t.get("context"),
+                            duration_seconds=t["duration_seconds"],
                         )
                     )
                 provisional.slides = slide_ids

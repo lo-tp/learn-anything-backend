@@ -8,7 +8,15 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy.orm import sessionmaker
 
-from db import FailedSlide, Phase, Plan, Session, SlideContent, StepMaterial
+from db import (
+    FailedSlide,
+    GraphStageTiming,
+    Phase,
+    Plan,
+    Session,
+    SlideContent,
+    StepMaterial,
+)
 from routers.plan import _ordered_materials, generate_materials, validate_plan
 
 
@@ -560,18 +568,47 @@ class TestDevRegenerate:
 # --- generate_materials background driver (called directly) ---
 
 
+def _timing(
+    stage: str,
+    slide_index: int | None = None,
+    attempt: int | None = None,
+    seconds: float = 0.1,
+) -> dict:
+    """One stage_timings entry as the material graph nodes would produce it."""
+    return {
+        "stage": stage,
+        "context": {
+            "step_id": "s1", "slide_index": slide_index, "attempt": attempt,
+        },
+        "duration_seconds": seconds,
+    }
+
+
 def _two_slide_results() -> list[dict]:
-    """A 3-call interrupt/resume sequence: two slides, then the final state."""
+    """A 3-call interrupt/resume sequence: two slides, then the final state.
+
+    Each state carries the ACCUMULATING ``stage_timings`` list (3 / 5 / 7
+    entries), exactly as the real material graph would."""
     question = {"id": "q1", "text": "?", "options": ["A", "B"],
                 "correct_index": 0, "explanation": "e"}
+    t_plan = _timing("plan_slide_contents", seconds=0.5)
+    t_w1 = _timing("write_slide", 1, 1, 0.2)
+    t_c1 = _timing("compile_slide", 1, 1, 0.3)
+    t_w2 = _timing("write_slide", 2, 1, 0.2)
+    t_c2 = _timing("compile_slide", 2, 1, 0.3)
+    t_q = _timing("write_questions", seconds=0.4)
+    t_s = _timing("summarize_step", seconds=0.1)
     return [
-        {"__interrupt__": object(), "slides": ["<div>1</div>"]},
-        {"__interrupt__": object(), "slides": ["<div>1</div>", "<div>2</div>"]},
+        {"__interrupt__": object(), "slides": ["<div>1</div>"],
+         "stage_timings": [t_plan, t_w1, t_c1]},
+        {"__interrupt__": object(), "slides": ["<div>1</div>", "<div>2</div>"],
+         "stage_timings": [t_plan, t_w1, t_c1, t_w2, t_c2]},
         {"slides": ["<div>1</div>", "<div>2</div>"],
          "questions": [question],
          "summary": {"step_id": "s1", "title": "T1", "key_points": ["k"]},
          "failed_attempts": [{"index": 0, "prompt": "p", "jsx": "j",
-                              "error": "e"}]},
+                              "error": "e"}],
+         "stage_timings": [t_plan, t_w1, t_c1, t_w2, t_c2, t_q, t_s]},
     ]
 
 
@@ -649,6 +686,33 @@ class TestGenerateMaterials:
         assert failed.slide_index == 1
         assert failed.error == "e"
 
+        # One GraphStageTiming row per stage execution (7 for this 2-slide
+        # run), all attributed to the material graph, in execution order.
+        timings = (
+            db.query(GraphStageTiming)
+            .filter_by(session_id=sid)
+            .order_by(GraphStageTiming.id)
+            .all()
+        )
+        assert len(timings) == 7
+        assert all(t.graph == "material" for t in timings)
+        assert [t.stage for t in timings] == [
+            "plan_slide_contents", "write_slide", "compile_slide",
+            "write_slide", "compile_slide", "write_questions",
+            "summarize_step",
+        ]
+        # Context carries the step and 1-based slide position/attempt.
+        assert timings[0].context == {
+            "step_id": "s1", "slide_index": None, "attempt": None,
+        }
+        assert timings[1].context == {
+            "step_id": "s1", "slide_index": 1, "attempt": 1,
+        }
+        assert timings[3].context == {
+            "step_id": "s1", "slide_index": 2, "attempt": 1,
+        }
+        assert all(t.duration_seconds >= 0 for t in timings)
+
     def test_skips_already_complete_step(self, db, db_engine, make_session,
                                          fake_session_factory):
         sid = make_session(
@@ -711,6 +775,94 @@ class TestGenerateMaterials:
             session_id=sid, step_id="s1").one()
         assert step_row.is_complete is True
         assert db.get(Session, sid).phase == Phase.EXECUTING.value
+
+    def test_partial_timings_survive_mid_step_failure(
+        self, db, db_engine, make_session, fake_session_factory
+    ):
+        """Stage timings committed at each slide interrupt survive even when
+        the step later fails — the failure is recorded as the error phase."""
+        sid = make_session(
+            session_id="a", phase=Phase.GENERATING, boundary_map={"a": {}}
+        ).session_id
+        db.add(Plan(session_id=sid, version=1, prose_summary="ps",
+                    dependency_dag="dag",
+                    steps=[{"id": "s1", "title": "T1", "description": "d",
+                            "depends_on": [], "depth": 0}],
+                    adjustments=[]))
+        db.commit()
+
+        first_state = {
+            "__interrupt__": object(), "slides": ["<div>1</div>"],
+            "stage_timings": _two_slide_results()[0]["stage_timings"],
+        }
+        with patch("routers.plan.material_graph") as graph:
+            graph.invoke.side_effect = [first_state,
+                                        Exception("sandbox down")]
+            generate_materials(sid)
+
+        db.expire_all()
+        session = db.get(Session, sid)
+        assert session.phase == Phase.ERROR.value
+        # The 3 stage timings committed at the first interrupt are kept.
+        timings = (
+            db.query(GraphStageTiming)
+            .filter_by(session_id=sid)
+            .order_by(GraphStageTiming.id)
+            .all()
+        )
+        assert len(timings) == 3
+        assert [t.stage for t in timings] == [
+            "plan_slide_contents", "write_slide", "compile_slide",
+        ]
+
+    def test_rerun_appends_timing_history(
+        self, db, db_engine, make_session, fake_session_factory
+    ):
+        """A re-run of a step keeps the prior attempt's timing rows and
+        appends a fresh set (append-only history, like failed_slides)."""
+        sid = make_session(
+            session_id="a", phase=Phase.GENERATING, boundary_map={"a": {}}
+        ).session_id
+        db.add(Plan(session_id=sid, version=1, prose_summary="ps",
+                    dependency_dag="dag",
+                    steps=[{"id": "s1", "title": "T1", "description": "d",
+                            "depends_on": [], "depth": 0}],
+                    adjustments=[]))
+        # A provisional (incomplete) row from a crashed run plus one timing
+        # row from that prior attempt.
+        db.add(StepMaterial(
+            session_id=sid, step_id="s1", slides=[], questions=[],
+            summary={"step_id": "s1", "title": "T1", "key_points": []},
+            is_complete=False,
+        ))
+        db.add(GraphStageTiming(
+            session_id=sid, graph="material",
+            stage="plan_slide_contents",
+            context={"step_id": "s1", "slide_index": None, "attempt": None},
+            duration_seconds=0.9,
+        ))
+        db.commit()
+
+        with patch("routers.plan.material_graph") as graph:
+            graph.invoke.side_effect = _two_slide_results()
+            generate_materials(sid)
+
+        db.expire_all()
+        timings = (
+            db.query(GraphStageTiming)
+            .filter_by(session_id=sid)
+            .order_by(GraphStageTiming.id)
+            .all()
+        )
+        # The old row (0.9s) survives; 7 fresh rows are appended after it.
+        assert len(timings) == 8
+        assert timings[0].stage == "plan_slide_contents"
+        assert timings[0].duration_seconds == 0.9
+        assert [t.stage for t in timings[1:]] == [
+            "plan_slide_contents", "write_slide", "compile_slide",
+            "write_slide", "compile_slide", "write_questions",
+            "summarize_step",
+        ]
 
     def test_failure_sets_error_phase(self, db, db_engine, make_session,
                                       fake_session_factory):

@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+from langchain_core.runnables import RunnableConfig
+from langgraph.types import Command
 
 from graphs.material.graph import build_material_graph
+from graphs.material.schemas import (
+    QuestionDraft,
+    QuestionsOut,
+    SlideContentsOut,
+    SlideContentSpec,
+    SlideOut,
+    SummaryOut,
+)
 from graphs.material.state import MaterialState
 
 
@@ -91,9 +102,102 @@ class TestMaterialState:
             "current_slide_prompt": "[]",
             "last_compile_error": None,
             "failed_attempts": [],
+            "stage_timings": [],
             "compile_result": "success",
             "questions": [],
             "summary": {},
         }
         assert state["compile_result"] == "success"
         assert state["slide_index"] == 1
+
+
+# --- End-to-end stage timing accumulation ---
+
+
+class TestStageTimingAccumulation:
+    def test_full_run_accumulates_one_timing_per_stage(self):
+        """A 3-slide step run (schema requires >= 3 slides) produces 9
+        stage_timings entries in execution order: plan, then
+        write/compile per slide, then questions, summary."""
+        from langgraph.checkpoint.memory import MemorySaver
+
+        llm = _make_llm()
+        graph = build_material_graph(llm, checkpointer=MemorySaver())
+
+        with (
+            patch(
+                "graphs.material.nodes.structured_invoke",
+                side_effect=[
+                    SlideContentsOut(
+                        slide_contents=[
+                            SlideContentSpec(
+                                title=t, key_points=["k"], visual_hint="v"
+                            )
+                            for t in ("A", "B", "C")
+                        ]
+                    ),
+                    QuestionsOut(
+                        questions=[
+                            QuestionDraft(
+                                text=f"Q{i}?",
+                                options=["A", "B"],
+                                correct_index=0,
+                                explanation="e",
+                            )
+                            for i in range(3)
+                        ]
+                    ),
+                    SummaryOut(key_points=["kp1"]),
+                ],
+            ),
+            patch(
+                "graphs.material.nodes.structured_invoke_messages",
+                side_effect=[
+                    SlideOut(slide=f"export default function {t}() {{}}")
+                    for t in ("A", "B", "C")
+                ],
+            ),
+            patch(
+                "graphs.material.nodes.with_unknown_option",
+                side_effect=lambda llm, lang, opts: opts,
+            ),
+            patch("graphs.material.nodes._compile_slide", return_value=("code", "")),
+        ):
+            config: RunnableConfig = {
+                "configurable": {"thread_id": "timing-e2e"},
+            }
+            state = graph.invoke(
+                {
+                    "step": {"id": "s1", "title": "T1", "description": "d"},
+                    "established_concepts": [],
+                    "learner_context": {},
+                    "language": "English",
+                },
+                config,
+            )
+            while state.get("__interrupt__"):
+                state = graph.invoke(Command(resume=True), config)
+
+        timings = state["stage_timings"]
+        assert [t["stage"] for t in timings] == [
+            "plan_slide_contents",
+            "write_slide",
+            "compile_slide",
+            "write_slide",
+            "compile_slide",
+            "write_slide",
+            "compile_slide",
+            "write_questions",
+            "summarize_step",
+        ]
+        assert all(t["duration_seconds"] >= 0 for t in timings)
+        # Context carries the step, 1-based slide position, and attempt.
+        assert timings[0]["context"] == {
+            "step_id": "s1", "slide_index": None, "attempt": None,
+        }
+        assert timings[1]["context"] == {
+            "step_id": "s1", "slide_index": 1, "attempt": 1,
+        }
+        assert timings[5]["context"] == {
+            "step_id": "s1", "slide_index": 3, "attempt": 1,
+        }

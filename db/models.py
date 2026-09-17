@@ -211,6 +211,38 @@ class FailedSlide(Base):
     )
 
 
+class GraphStageTiming(Base):
+    """Per-stage wall-clock timing for a graph execution.
+
+    One row per node/stage execution of ANY graph. Currently written by
+    the material graph (plan_slide_contents, each write_slide /
+    compile_slide attempt, write_questions, summarize_step); the ``graph``
+    column identifies the producing graph and ``context`` carries
+    stage-specific detail (material rows:
+    ``{"step_id": ..., "slide_index": ... | null, "attempt": ... | null}``).
+    Append-only — a regenerated step appends a fresh set of rows; prior
+    attempt rows are kept as history (same policy as failed_slides).
+    """
+
+    __tablename__ = "graph_stage_timings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("sessions.session_id"), index=True
+    )
+    # Which graph produced this row: "material" for now;
+    # "plan" / "probe" / "clarify" possible later.
+    graph: Mapped[str] = mapped_column(String)
+    # Node name within the graph (e.g. "write_slide", "design_plan").
+    stage: Mapped[str] = mapped_column(String)
+    # Stage-specific detail; NULL for stages without extra context.
+    context: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    duration_seconds: Mapped[float] = mapped_column(Float)
+    created_at: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(UTC)
+    )
+
+
 class StepProgress(Base):
     __tablename__ = "step_progress"
 

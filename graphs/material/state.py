@@ -21,6 +21,10 @@ class MaterialState(TypedDict, total=False):
     current_slide_prompt: str | None
     last_compile_error: str | None
     failed_attempts: Annotated[list[dict], operator.add]
+    # Per-stage wall-clock timings accumulated by the nodes (one entry per
+    # stage execution); the driver persists them to graph_stage_timings.
+    # Entry shape: {"stage": str, "context": dict, "duration_seconds": float}.
+    stage_timings: Annotated[list[dict], operator.add]
     compile_result: str  # "success" | "retry" | "exhausted"
     questions: list[dict]
     summary: dict

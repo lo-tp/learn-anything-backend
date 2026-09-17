@@ -30,7 +30,7 @@ migrate:
 	$(VENV)/alembic upgrade head
 
 db-clean:
-	podman exec learn-anything-backend-db-1 psql -U postgres -d learn_anything -c "TRUNCATE step_progress, step_materials, slide_contents, probe_questions, plans, sessions CASCADE;"
+	podman exec learn-anything-backend-db-1 psql -U postgres -d learn_anything -c "TRUNCATE step_progress, step_materials, slide_contents, graph_stage_timings, probe_questions, plans, sessions CASCADE;"
 
 revision:
 	$(VENV)/alembic revision --autogenerate -m "$(m)"

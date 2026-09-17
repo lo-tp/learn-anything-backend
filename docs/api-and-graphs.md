@@ -166,6 +166,18 @@ class StepProgress(Base):
     session: Mapped["Session"] = relationship(back_populates="step_progress")
 
 
+class GraphStageTiming(Base):
+    __tablename__ = "graph_stage_timings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id"), index=True)
+    graph: Mapped[str] = mapped_column(String)                   # which graph produced the row ("material" for now; "plan"/"probe"/"clarify" later)
+    stage: Mapped[str] = mapped_column(String)                  # node name within the graph (e.g. "write_slide")
+    context: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # stage-specific detail; material rows: {step_id, slide_index (1-based|null), attempt (1-based|null)}
+    duration_seconds: Mapped[float] = mapped_column(Float)      # wall-clock time for that stage execution
+    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
+
+
 # --- Init ---
 
 Base.metadata.create_all(engine)
@@ -1042,6 +1054,7 @@ generate_materials (background task, its OWN db session, per-session lock):
 | Don't ship broken slides | Every slide is compiled in the sandbox before persisting; if any slide's JSX fails validation, the step's material is **regenerated** (up to `MAX_MATERIAL_ATTEMPTS`), and the step is committed only once all its slides are valid |
 | Don't corrupt the request session | The task opens its **own** DB session (the request's is closed by the time it runs) |
 | Keep stores independent | Resume state lives in the **DB**, not the graph checkpointer — no double-stored state |
+| Stage timings | Every material stage records its wall-clock duration into graph state (`stage_timings`); the driver persists one `GraphStageTiming` row per stage execution (`graph="material"`), incrementally at each slide commit and the remainder at step finalization — append-only, so a re-run appends a fresh set of rows |
 | Client visibility | Poll `GET /sessions/{id}/materials` until phase flips to `executing` |
 
 **Durability / migration:** `BackgroundTasks` runs **in-process** — no retry, lost on crash/restart. That matches the in-memory MVP (everything is lost on restart anyway). When you move to Postgres and want generation to survive restarts, **swap `add_task` for a queue job** (ARQ / RQ / Celery / Dramatiq / SQS) with a worker — the `generate_materials` body stays identical, only the enqueue call changes.

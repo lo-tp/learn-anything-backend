@@ -99,6 +99,33 @@ class TestPlanSlideContents:
             result = node({})
         assert result["slide_index"] == 0
 
+    def test_records_stage_timing(self):
+        llm = _make_llm()
+        mock_out = SlideContentsOut(
+            slide_contents=[
+                SlideContentSpec(title="A", key_points=["k1"], visual_hint="v1"),
+                SlideContentSpec(title="B", key_points=["k2"], visual_hint="v2"),
+                SlideContentSpec(title="C", key_points=["k3"], visual_hint="v3"),
+            ]
+        )
+        with patch("graphs.material.nodes.structured_invoke", return_value=mock_out):
+            node = make_plan_slide_contents(llm)
+            result = node(
+                {
+                    "step": {"id": "s1", "title": "Step 1", "description": "desc"},
+                    "established_concepts": [],
+                    "learner_context": {},
+                    "language": "English",
+                }
+            )
+
+        (timing,) = result["stage_timings"]
+        assert timing["stage"] == "plan_slide_contents"
+        assert timing["context"] == {
+            "step_id": "s1", "slide_index": None, "attempt": None,
+        }
+        assert timing["duration_seconds"] >= 0
+
 
 # --- make_write_slide ---
 
@@ -161,6 +188,22 @@ class TestWriteSlide:
         human_content = messages[-1].content
         assert "failed to compile" not in human_content
         assert "undefined variable 'x'" not in human_content
+
+    def test_records_stage_timing(self):
+        llm = _make_llm()
+        mock_out = SlideOut(slide="export default function S() {}")
+        with patch(
+            "graphs.material.nodes.structured_invoke_messages", return_value=mock_out
+        ):
+            node = make_write_slide(llm)
+            result = node(self._state())
+
+        (timing,) = result["stage_timings"]
+        assert timing["stage"] == "write_slide"
+        assert timing["context"] == {
+            "step_id": "s1", "slide_index": 1, "attempt": 1,
+        }
+        assert timing["duration_seconds"] >= 0
 
 
 # --- make_compile_slide ---
@@ -248,6 +291,33 @@ class TestCompileSlide:
         assert result["compile_result"] == "success"
         assert result["slides"] == ["placeholder_code"]
 
+    @patch("graphs.material.nodes._compile_slide")
+    def test_records_stage_timing(self, mock_compile):
+        mock_compile.return_value = ("compiled_code", "")
+        node = make_compile_slide(MagicMock())
+        result = node(self._state())
+
+        (timing,) = result["stage_timings"]
+        assert timing["stage"] == "compile_slide"
+        assert timing["context"] == {
+            "step_id": "s1", "slide_index": 1, "attempt": 1,
+        }
+        assert timing["duration_seconds"] >= 0
+
+    @patch("graphs.material.nodes._compile_slide")
+    def test_records_stage_timing_on_retry(self, mock_compile):
+        mock_compile.return_value = (None, "syntax error")
+        node = make_compile_slide(MagicMock())
+        result = node(self._state(attempts_by_slide=[2]))
+
+        (timing,) = result["stage_timings"]
+        assert timing["stage"] == "compile_slide"
+        # The retry attempt number is the one just taken (attempts[i] = 2).
+        assert timing["context"] == {
+            "step_id": "s1", "slide_index": 1, "attempt": 2,
+        }
+        assert timing["duration_seconds"] >= 0
+
 
 # --- make_write_questions ---
 
@@ -319,6 +389,33 @@ class TestWriteQuestions:
             "s9_q4",
         ]
 
+    def test_records_stage_timing(self):
+        llm = MagicMock()
+        mock_out = QuestionsOut(
+            questions=[
+                QuestionDraft(
+                    text=f"Q{i}?", options=["A", "B"], correct_index=0, explanation="e"
+                )
+                for i in range(3)
+            ]
+        )
+        with (
+            patch("graphs.material.nodes.structured_invoke", return_value=mock_out),
+            patch(
+                "graphs.material.nodes.with_unknown_option",
+                side_effect=lambda llm, lang, opts: opts,
+            ),
+        ):
+            node = make_write_questions(llm)
+            result = node({"step": {"id": "s1"}, "language": "English"})
+
+        (timing,) = result["stage_timings"]
+        assert timing["stage"] == "write_questions"
+        assert timing["context"] == {
+            "step_id": "s1", "slide_index": None, "attempt": None,
+        }
+        assert timing["duration_seconds"] >= 0
+
 
 # --- make_summarize_step ---
 
@@ -351,3 +448,19 @@ class TestSummarizeStep:
             node = make_summarize_step(llm)
             result = node({"step": {"id": "s1", "title": "T"}, "language": "English"})
         assert result["summary"]["key_points"] == ["only point"]
+
+    def test_records_stage_timing(self):
+        llm = MagicMock()
+        mock_out = SummaryOut(key_points=["kp1"])
+        with patch("graphs.material.nodes.structured_invoke", return_value=mock_out):
+            node = make_summarize_step(llm)
+            result = node(
+                {"step": {"id": "s1", "title": "T"}, "language": "English"}
+            )
+
+        (timing,) = result["stage_timings"]
+        assert timing["stage"] == "summarize_step"
+        assert timing["context"] == {
+            "step_id": "s1", "slide_index": None, "attempt": None,
+        }
+        assert timing["duration_seconds"] >= 0
