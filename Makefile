@@ -1,4 +1,4 @@
-.PHONY: check lint format typecheck test coverage db-up db-down db-clean migrate revision install-hooks
+.PHONY: check lint format typecheck test coverage db-up db-down db-clean db-clean-telemetry migrate revision install-hooks
 VENV := .venv/bin
 
 check: lint typecheck
@@ -31,6 +31,9 @@ migrate:
 
 db-clean:
 	podman exec learn-anything-backend-db-1 psql -U postgres -d learn_anything -c "TRUNCATE step_progress, step_materials, slide_contents, graph_stage_timings, probe_questions, plans, sessions CASCADE;"
+
+db-clean-telemetry:
+	podman exec learn-anything-backend-db-1 psql -U postgres -d learn_anything -c "TRUNCATE failed_slides, graph_stage_timings;"
 
 revision:
 	$(VENV)/alembic revision --autogenerate -m "$(m)"
