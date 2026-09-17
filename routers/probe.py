@@ -12,9 +12,9 @@ from langgraph.types import Command
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
 
+from core.language import DEFAULT_LANGUAGE
 from db import Phase, ProbeQuestion, Session, get_db
 from graphs import graph_config, probe_graph
-from language import DEFAULT_LANGUAGE
 
 router = APIRouter(tags=["probe"])
 

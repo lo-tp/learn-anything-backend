@@ -3,7 +3,7 @@
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 
-from llm import llm
+from core.llm import llm
 
 from .clarify import build_clarify_graph
 from .material import build_material_graph

@@ -104,7 +104,7 @@ class TestUnknownOption:
         ) as mock_ls:
             result = unknown_option(None)
             assert result == "I don't know"
-            from language import DEFAULT_LANGUAGE
+            from core.language import DEFAULT_LANGUAGE
 
             mock_ls.assert_called_once_with(None, DEFAULT_LANGUAGE, "I don't know")
 

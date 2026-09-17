@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from core.llm import llm
 from db import Phase, Session
-from llm import llm
 
 # --- POST /sessions (create + first Clarify call) ---
 

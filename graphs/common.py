@@ -8,7 +8,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
 
-from language import DEFAULT_LANGUAGE, localize_status
+from core.language import DEFAULT_LANGUAGE, localize_status
 
 
 def structured_invoke[Schema: BaseModel](

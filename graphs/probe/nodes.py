@@ -8,7 +8,7 @@ import uuid
 from langchain_core.language_models import BaseChatModel
 from langgraph.types import interrupt
 
-from language import DEFAULT_LANGUAGE, language_instruction
+from core.language import DEFAULT_LANGUAGE, language_instruction
 
 from ..common import structured_invoke, with_unknown_option
 from .prompts import (
