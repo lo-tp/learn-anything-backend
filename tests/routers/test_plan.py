@@ -17,7 +17,12 @@ from db import (
     SlideContent,
     StepMaterial,
 )
-from routers.plan import _ordered_materials, generate_materials, validate_plan
+from routers.plan import (
+    StepOut,
+    _ordered_materials,
+    generate_materials,
+    validate_plan,
+)
 
 
 def _valid_plan(**overrides) -> dict:
@@ -25,9 +30,9 @@ def _valid_plan(**overrides) -> dict:
         "prose_summary": "ps",
         "dependency_dag": "dag",
         "steps": [
-            {"id": "s1", "title": "T1", "description": "d",
+            {"id": "s1", "letter": "A", "title": "T1", "description": "d",
              "depends_on": [], "depth": 0},
-            {"id": "s2", "title": "T2", "description": "d",
+            {"id": "s2", "letter": "B", "title": "T2", "description": "d",
              "depends_on": ["s1"], "depth": 1},
         ],
     }
@@ -52,6 +57,18 @@ def _seed_plan_session(db, make_session, sid, phase, steps=None, **extra):
 
 
 # --- validate_plan (pure helper) ---
+
+
+class TestStepOut:
+    def test_letter_passes_through(self):
+        s = StepOut(id="s1", letter="A", title="T1", description="d",
+                    depends_on=[], depth=1)
+        assert s.letter == "A"
+
+    def test_legacy_step_without_letter_defaults_empty(self):
+        s = StepOut(id="s1", title="T1", description="d",
+                    depends_on=[], depth=1)
+        assert s.letter == ""
 
 
 class TestValidatePlan:
@@ -175,6 +192,7 @@ class TestGeneratePlan:
         assert body["phase"] == "reviewing"
         assert body["plan"]["prose_summary"] == "ps"
         assert len(body["plan"]["steps"]) == 2
+        assert [s["letter"] for s in body["plan"]["steps"]] == ["A", "B"]
 
         db.expire_all()
         session = db.get(Session, sid)

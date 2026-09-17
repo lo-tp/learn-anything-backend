@@ -69,13 +69,15 @@ class TestDesignOut:
 class TestRenderedStep:
     def test_valid(self):
         s = RenderedStep(
-            id="s0", title="A", description="d", depends_on=[], depth=1
+            id="s0", letter="A", title="A", description="d",
+            depends_on=[], depth=1
         )
         assert s.id == "s0"
+        assert s.letter == "A"
 
     def test_reject_depth_below_min(self):
         with pytest.raises(ValidationError):
-            RenderedStep(id="s0", title="A", description="d", depth=0)
+            RenderedStep(id="s0", letter="A", title="A", description="d", depth=0)
 
 
 class TestRenderOut:
@@ -83,7 +85,7 @@ class TestRenderOut:
         out = RenderOut(
             prose_summary="Summary.",
             dependency_dag="graph LR\n  s0 --> s1",
-            steps=[RenderedStep(id="s0", title="A", description="d", depth=1)],
+            steps=[RenderedStep(id="s0", letter="A", title="A", description="d", depth=1)],
         )
         assert len(out.steps) == 1
         assert out.dependency_dag.startswith("graph LR")

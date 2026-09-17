@@ -153,7 +153,7 @@ class TestRenderPlan:
         mock_out = RenderOut(
             prose_summary="Summary.",
             dependency_dag="graph LR",
-            steps=[RenderedStep(id="s0", title="A", description="d", depth=1)],
+            steps=[RenderedStep(id="s0", letter="A", title="A", description="d", depth=1)],
         )
         with patch(
             "graphs.plan.nodes.structured_invoke", return_value=mock_out
@@ -170,7 +170,7 @@ class TestRenderPlan:
         mock_out = RenderOut(
             prose_summary="S",
             dependency_dag="D",
-            steps=[RenderedStep(id="s0", title="A", description="d", depth=1)],
+            steps=[RenderedStep(id="s0", letter="A", title="A", description="d", depth=1)],
         )
         with patch(
             "graphs.plan.nodes.structured_invoke", return_value=mock_out

@@ -39,6 +39,7 @@ class DesignOut(BaseModel):
 
 class RenderedStep(BaseModel):
     id: str = Field(description="Step ID, e.g. 's0', 's1', etc.")
+    letter: str = Field(description="Uppercase letter index for display, e.g. 'A', 'B', 'C'.")
     title: str
     description: str = Field(description="One sentence (copied from the design step; do not expand it).")
     depends_on: list[str] = Field(

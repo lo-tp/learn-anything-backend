@@ -61,6 +61,7 @@ class AdjustIn(BaseModel):
 
 class StepOut(BaseModel):
     id: str
+    letter: str = ""  # display index (A, B, C, ...); empty for legacy plans
     title: str
     description: str
     depends_on: list[str]
