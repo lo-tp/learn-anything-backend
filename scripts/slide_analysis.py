@@ -170,7 +170,7 @@ def analyze(session_id: str | None, graph: str, since: datetime | None) -> None:
 
     # Slides that exhausted every attempt (never generated) vs slides that
     # eventually succeeded on a retry.
-    failed_rows_by_slide = Counter(
+    failed_rows_by_slide: Counter[tuple[str, str, int | None]] = Counter(
         (f.session_id, f.step_id, f.slide_index) for f in failures
     )
     exhausted = sum(

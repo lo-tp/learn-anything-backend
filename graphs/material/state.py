@@ -26,5 +26,9 @@ class MaterialState(TypedDict, total=False):
     # Entry shape: {"stage": str, "context": dict, "duration_seconds": float}.
     stage_timings: Annotated[list[dict], operator.add]
     compile_result: str  # "success" | "retry" | "exhausted"
+    # True when the just-compiled slide is a placeholder (the failed slide
+    # exhausted all attempts). The driver persists it on the SlideContent
+    # row; endpoints return placeholder rows only in dev mode.
+    current_slide_is_placeholder: bool
     questions: list[dict]
     summary: dict

@@ -511,6 +511,57 @@ class TestGetMaterials:
             "options": ["A", "B"], "correct_index": 0, "explanation": "e",
         }
 
+    def test_placeholder_slides_hidden_outside_dev(self, client, db,
+                                                    make_session, monkeypatch):
+        monkeypatch.delenv("DEV_MODE", raising=False)
+        sid = make_session(session_id="a", phase=Phase.EXECUTING).session_id
+        db.add(Plan(session_id=sid, version=1, prose_summary="ps",
+                    dependency_dag="dag", steps=[{"id": "s1"}], adjustments=[]))
+        db.add(StepMaterial(
+            session_id=sid, step_id="s1",
+            slides=["a_s1_slide_1", "a_s1_slide_2"], questions=[],
+            summary={"step_id": "s1", "title": "T1", "key_points": []},
+        ))
+        db.add(SlideContent(slide_id="a_s1_slide_1", session_id=sid,
+                            step_id="s1", content="<div/>"))
+        db.add(SlideContent(slide_id="a_s1_slide_2", session_id=sid,
+                            step_id="s1", content="<div>ph</div>",
+                            is_placeholder=True))
+        db.commit()
+
+        resp = client.get(f"/sessions/{sid}/materials")
+        assert resp.status_code == 200
+        items = resp.json()["generated_steps"][0]["items"]
+        # The placeholder slot is omitted from the deck in production.
+        assert items == [{"type": "slide", "slide_id": "a_s1_slide_1"}]
+
+    def test_placeholder_slides_visible_in_dev(self, client, db, make_session,
+                                               monkeypatch):
+        monkeypatch.setenv("DEV_MODE", "1")
+        sid = make_session(session_id="a", phase=Phase.EXECUTING).session_id
+        db.add(Plan(session_id=sid, version=1, prose_summary="ps",
+                    dependency_dag="dag", steps=[{"id": "s1"}], adjustments=[]))
+        db.add(StepMaterial(
+            session_id=sid, step_id="s1",
+            slides=["a_s1_slide_1", "a_s1_slide_2"], questions=[],
+            summary={"step_id": "s1", "title": "T1", "key_points": []},
+        ))
+        db.add(SlideContent(slide_id="a_s1_slide_1", session_id=sid,
+                            step_id="s1", content="<div/>"))
+        db.add(SlideContent(slide_id="a_s1_slide_2", session_id=sid,
+                            step_id="s1", content="<div>ph</div>",
+                            is_placeholder=True))
+        db.commit()
+
+        resp = client.get(f"/sessions/{sid}/materials")
+        assert resp.status_code == 200
+        items = resp.json()["generated_steps"][0]["items"]
+        # In dev mode the placeholder keeps its visible slot.
+        assert items == [
+            {"type": "slide", "slide_id": "a_s1_slide_1"},
+            {"type": "slide", "slide_id": "a_s1_slide_2"},
+        ]
+
 
 # --- POST /dev/sessions/{session_id}/regenerate (dev-only) ---
 
@@ -736,6 +787,43 @@ class TestGenerateMaterials:
         }
         assert timings[-1].duration_seconds > 0
         assert all(t.duration_seconds >= 0 for t in timings)
+
+    def test_placeholder_slide_persists_is_placeholder_flag(
+        self, db, db_engine, make_session, fake_session_factory
+    ):
+        sid = make_session(
+            session_id="a", phase=Phase.GENERATING, boundary_map={"a": {}}
+        ).session_id
+        db.add(Plan(session_id=sid, version=1, prose_summary="ps",
+                    dependency_dag="dag",
+                    steps=[{"id": "s1", "title": "T1", "description": "d",
+                            "depends_on": [], "depth": 0}],
+                    adjustments=[]))
+        db.commit()
+
+        # The first paused slide is a placeholder; the second is a real slide.
+        question = {"id": "q1", "text": "?", "options": ["A", "B"],
+                    "correct_index": 0, "explanation": "e"}
+        sequence = [
+            {"__interrupt__": object(), "slides": ["<div>ph</div>"],
+             "current_slide_is_placeholder": True},
+            {"__interrupt__": object(), "slides": ["<div>ph</div>", "<div>2</div>"],
+             "current_slide_is_placeholder": False},
+            {"slides": ["<div>ph</div>", "<div>2</div>"],
+             "questions": [question],
+             "summary": {"step_id": "s1", "title": "T1", "key_points": ["k"]},
+             "failed_attempts": [],
+             "stage_timings": []},
+        ]
+        with patch("routers.plan.material_graph") as graph:
+            graph.invoke.side_effect = sequence
+            generate_materials(sid)
+
+        db.expire_all()
+        s1 = db.get(SlideContent, "a_s1_slide_1")
+        s2 = db.get(SlideContent, "a_s1_slide_2")
+        assert s1.is_placeholder is True
+        assert s2.is_placeholder is False
 
     def test_skips_already_complete_step(self, db, db_engine, make_session,
                                          fake_session_factory):

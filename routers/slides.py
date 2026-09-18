@@ -5,6 +5,8 @@ JSX (React component source) it compiles and mounts to serve the client. The
 client never calls this endpoint directly (see docs/api-and-graphs.md).
 """
 
+import os
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
@@ -23,6 +25,8 @@ class SlideOut(BaseModel):
 def get_slide(slide_id: str, db: DBSession = Depends(get_db)) -> SlideOut:
     """Fetch raw slide JSX (component source) by globally-unique slide ID (internal)."""
     slide = db.get(SlideContent, slide_id)
-    if slide is None:
+    # Placeholder slides (a failed slide's stand-in) are only served in dev
+    # mode; outside dev they are invisible, as if the slide never existed.
+    if slide is None or (slide.is_placeholder and os.getenv("DEV_MODE") != "1"):
         raise HTTPException(status_code=404, detail="Slide not found")
     return SlideOut(slide_id=slide.slide_id, content=slide.content)

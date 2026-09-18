@@ -183,6 +183,10 @@ class SlideContent(Base):
     )
     step_id: Mapped[str] = mapped_column(String)
     content: Mapped[str] = mapped_column(Text)
+    # True for the placeholder slide generated when a slide exhausts all
+    # attempts. Placeholders are always generated and persisted, but the
+    # endpoints only return them in dev mode (DEV_MODE=1).
+    is_placeholder: Mapped[bool] = mapped_column(Boolean, default=False)
 
     session: Mapped[Session] = relationship(back_populates="slide_contents")
 

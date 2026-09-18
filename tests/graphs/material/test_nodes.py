@@ -283,6 +283,7 @@ class TestCompileSlide:
         assert result["compile_result"] == "success"
         assert result["slides"] == ["compiled_code"]
         assert result["slide_index"] == 1
+        assert result["current_slide_is_placeholder"] is False
 
     @patch("graphs.material.nodes._compile_slide")
     def test_retry_on_first_attempt(self, mock_compile):
@@ -297,7 +298,8 @@ class TestCompileSlide:
         assert result["failed_attempts"][0]["error"] == "syntax error"
 
     @patch("graphs.material.nodes._compile_slide")
-    def test_exhausted_on_max_attempts(self, mock_compile):
+    def test_exhausted_when_placeholder_also_fails(self, mock_compile):
+        # Both the real slide and the placeholder fail to compile.
         mock_compile.return_value = (None, "still broken")
         node = make_compile_slide(MagicMock())
         from graphs.material.sandbox import MAX_MATERIAL_ATTEMPTS
@@ -305,7 +307,9 @@ class TestCompileSlide:
         state = self._state(attempts_by_slide=[MAX_MATERIAL_ATTEMPTS])
         result = node(state)
 
+        assert mock_compile.call_count == 2  # real slide + placeholder
         assert result["compile_result"] == "exhausted"
+        assert "slides" not in result
         assert result["slide_index"] == 1  # moves past this slide
 
     @patch("graphs.material.nodes._compile_slide")
@@ -324,21 +328,21 @@ class TestCompileSlide:
         assert result["slide_index"] == 1  # == len(slide_contents)
 
     @patch("graphs.material.nodes._compile_slide")
-    def test_dev_mode_placeholder_on_exhaust(self, mock_compile):
-        mock_compile.return_value = (None, "broken")
-        node = make_compile_slide(MagicMock())
+    def test_placeholder_on_exhaust(self, mock_compile):
         from graphs.material.sandbox import MAX_MATERIAL_ATTEMPTS
 
-        # First call is the real slide (fails), second is the placeholder (succeeds)
+        # First call is the real slide (fails), second is the placeholder
+        # (succeeds). The placeholder is generated regardless of DEV_MODE.
         mock_compile.side_effect = [
             (None, "broken"),
             ("placeholder_code", ""),
         ]
+        node = make_compile_slide(MagicMock())
         state = self._state(attempts_by_slide=[MAX_MATERIAL_ATTEMPTS])
-        with patch.dict("os.environ", {"DEV_MODE": "1"}):
-            result = node(state)
+        result = node(state)
         assert result["compile_result"] == "success"
         assert result["slides"] == ["placeholder_code"]
+        assert result["current_slide_is_placeholder"] is True
 
     @patch("graphs.material.nodes._compile_slide")
     def test_records_stage_timing(self, mock_compile):

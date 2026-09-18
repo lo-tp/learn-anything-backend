@@ -261,6 +261,9 @@ def generate_materials(session_id: str) -> None:
                             session_id=session_id,
                             step_id=step["id"],
                             content=slides[-1],
+                            is_placeholder=state.get(
+                                "current_slide_is_placeholder", False
+                            ),
                         )
                     )
                     # Persist any stage timings that have accumulated since the
@@ -764,12 +767,22 @@ def get_materials(
             detail=f"Session {session_id} has unknown phase {session.phase!r}",
         )
 
+    # Placeholder slides (a failed slide's stand-in) are always generated
+    # and persisted, but are only returned here in dev mode — in production
+    # the slot is omitted from the deck.
+    if os.getenv("DEV_MODE") == "1":
+        placeholder_ids: set[str] = set()
+    else:
+        placeholder_ids = {
+            s.slide_id for s in session.slide_contents if s.is_placeholder
+        }
+
     generated_steps = [
         MaterialOut(
             step_id=m.step_id,
             summary=SummaryOut(**m.summary),
             items=[
-                *[SlideItem(type="slide", slide_id=sid) for sid in m.slides],
+                *[SlideItem(type="slide", slide_id=sid) for sid in m.slides if sid not in placeholder_ids],
                 *[QuestionItem(type="question", **q) for q in m.questions],
             ],
         )
