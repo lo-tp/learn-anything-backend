@@ -181,28 +181,43 @@ class TestWriteSlide:
         return mock_invoke.call_args.kwargs
 
     def test_first_attempt_uses_creative_profile(self):
-        from graphs.material.sandbox import slide_sampling_for_attempt
+        from graphs.material.sandbox import slide_sampling_bind_kwargs
 
-        assert self._kwargs_for_attempt([0]) == slide_sampling_for_attempt(1)
+        assert self._kwargs_for_attempt([0]) == slide_sampling_bind_kwargs(1)
 
     def test_second_attempt_uses_middle_profile(self):
-        from graphs.material.sandbox import slide_sampling_for_attempt
+        from graphs.material.sandbox import slide_sampling_bind_kwargs
 
-        assert self._kwargs_for_attempt([1]) == slide_sampling_for_attempt(2)
+        assert self._kwargs_for_attempt([1]) == slide_sampling_bind_kwargs(2)
 
     def test_third_attempt_uses_reliable_profile(self):
-        from graphs.material.sandbox import slide_sampling_for_attempt
+        from graphs.material.sandbox import slide_sampling_bind_kwargs
 
-        assert self._kwargs_for_attempt([2]) == slide_sampling_for_attempt(3)
+        assert self._kwargs_for_attempt([2]) == slide_sampling_bind_kwargs(3)
 
     def test_attempt_beyond_profiles_uses_last_profile(self):
         from graphs.material.sandbox import (
             SLIDE_SAMPLING_PROFILES,
-            slide_sampling_for_attempt,
+            slide_sampling_bind_kwargs,
         )
 
         n = len(SLIDE_SAMPLING_PROFILES)
-        assert self._kwargs_for_attempt([n]) == slide_sampling_for_attempt(n + 1)
+        assert self._kwargs_for_attempt([n]) == slide_sampling_bind_kwargs(n + 1)
+
+    def test_non_openai_params_are_nested_in_extra_body(self):
+        from graphs.material.sandbox import slide_sampling_bind_kwargs
+
+        kwargs = self._kwargs_for_attempt([0])
+        # Standard params stay top-level...
+        assert "temperature" in kwargs
+        assert "top_p" in kwargs
+        # ...while OpenAI-incompatible params are nested under extra_body...
+        assert "extra_body" in kwargs
+        for param in ("top_k", "min_p", "repeat_penalty"):
+            assert param in kwargs["extra_body"]
+            assert param not in kwargs
+        # ...and the result matches the shared helper exactly.
+        assert kwargs == slide_sampling_bind_kwargs(1)
 
     def test_no_compile_error_in_prompt(self):
         llm = _make_llm()

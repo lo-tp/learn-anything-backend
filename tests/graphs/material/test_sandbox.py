@@ -9,9 +9,11 @@ import httpx
 
 from graphs.material.sandbox import (
     MAX_MATERIAL_ATTEMPTS,
+    SLIDE_EXTRA_BODY_PARAMS,
     SLIDE_SAMPLING_PROFILES,
     _compile_slide,
     _placeholder_slide_jsx,
+    slide_sampling_bind_kwargs,
     slide_sampling_for_attempt,
 )
 
@@ -80,6 +82,40 @@ class TestSlideSamplingForAttempt:
         a = slide_sampling_for_attempt(1)
         a["temperature"] = 99.0
         assert slide_sampling_for_attempt(1)["temperature"] != 99.0
+
+
+class TestSlideSamplingBindKwargs:
+    def test_splits_standard_and_extra_body_params(self):
+        kwargs = slide_sampling_bind_kwargs(1)
+        profile = slide_sampling_for_attempt(1)
+        # Standard params are top-level with their profile values.
+        for key in ("temperature", "top_p"):
+            assert kwargs[key] == profile[key]
+        # Non-OpenAI params are nested under extra_body with their values.
+        assert set(kwargs["extra_body"]) == SLIDE_EXTRA_BODY_PARAMS
+        for key in SLIDE_EXTRA_BODY_PARAMS:
+            assert kwargs["extra_body"][key] == profile[key]
+            assert key not in kwargs
+
+    def test_covers_every_profile_param_exactly_once(self):
+        kwargs = slide_sampling_bind_kwargs(1)
+        profile = slide_sampling_for_attempt(1)
+        top_level = set(kwargs) - {"extra_body"}
+        assert top_level | set(kwargs["extra_body"]) == set(profile)
+        assert not (top_level & set(kwargs["extra_body"]))
+
+    def test_tracks_attempt(self):
+        # Different attempts yield different sampling values end to end.
+        assert slide_sampling_bind_kwargs(1) != slide_sampling_bind_kwargs(3)
+        assert (
+            slide_sampling_bind_kwargs(1)["temperature"]
+            != slide_sampling_bind_kwargs(3)["temperature"]
+        )
+
+    def test_returns_fresh_dict(self):
+        a = slide_sampling_bind_kwargs(1)
+        a["extra_body"]["top_k"] = 999
+        assert slide_sampling_bind_kwargs(1)["extra_body"]["top_k"] != 999
 
 
 class TestCompileSlide:

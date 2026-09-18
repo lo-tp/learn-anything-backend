@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from typing import Any
 
 import httpx
 
@@ -22,21 +23,34 @@ MAX_MATERIAL_ATTEMPTS = max(1, int(os.getenv("MAX_MATERIAL_ATTEMPTS", "3")))
 # One profile per write attempt: attempt 1 is the most creative (higher
 # temp/top_p) to maximize the chance of a good first draft; each retry steps
 # down toward the most deterministic profile so a slide that keeps failing to
-# compile gets progressively stable samples. Only OpenAI-supported params are
-# used (top_k/min_p/repeat_penalty are rejected by the OpenAI API).
+# compile gets progressively stable samples.
+#
+# temperature/top_p are standard OpenAI params, but top_k/min_p/
+# repeat_penalty are NOT part of the OpenAI API — OpenAI-compatible backends
+# (e.g. vLLM) only accept them when nested under ``extra_body``. See
+# SLIDE_EXTRA_BODY_PARAMS and slide_sampling_bind_kwargs.
 SLIDE_SAMPLING_PROFILES: tuple[dict[str, float], ...] = (
-    {  # Attempt 1 — most creative
-        "temperature": 0.6,
-        "top_p": 0.8,
+    {  # Attempt 1 — creative but reliable
+        "temperature": 0.4,
+        "top_p": 0.75,
+        "top_k": 25,
+        "min_p": 0.06,
+        "repeat_penalty": 1.02,
     },
-    {  # Attempt 2 — middle
-        "temperature": 0.35,
-        "top_p": 0.7,
+    {  # Attempt 2 — mostly deterministic
+        "temperature": 0.2,
+        "top_p": 0.6,
+        "top_k": 15,
+        "min_p": 0.08,
+        "repeat_penalty": 1.02,
     },
     {  # Attempt 3 — most reliable
         "temperature": 0.1,
         "top_p": 0.5,
-    },
+        "top_k": 10,
+        "min_p": 0.1,
+        "repeat_penalty": 1.05,
+    }
 )
 
 
@@ -48,6 +62,34 @@ def slide_sampling_for_attempt(attempt: int) -> dict[str, float]:
     """
     idx = max(0, min(attempt - 1, len(SLIDE_SAMPLING_PROFILES) - 1))
     return dict(SLIDE_SAMPLING_PROFILES[idx])
+
+
+# Profile params that are not part of the standard OpenAI API and must be
+# sent nested under ``extra_body`` (supported by OpenAI-compatible backends
+# such as vLLM). Passing them as top-level kwargs makes the OpenAI client
+# reject the request.
+SLIDE_EXTRA_BODY_PARAMS: frozenset[str] = frozenset(
+    {"top_k", "min_p", "repeat_penalty"}
+)
+
+
+def slide_sampling_bind_kwargs(attempt: int) -> dict[str, Any]:
+    """Bind kwargs for ``structured_invoke_messages`` for a 1-based attempt.
+
+    Splits the flat profile into what ``ChatOpenAI`` accepts as top-level
+    kwargs (``temperature``/``top_p``) and what must be forwarded to the
+    request body via ``extra_body`` (``top_k``/``min_p``/``repeat_penalty``).
+    The result is ready to spread into the invoke call:
+    ``structured_invoke_messages(llm, schema, msgs, **slide_sampling_bind_kwargs(n))``.
+    """
+    profile = slide_sampling_for_attempt(attempt)
+    extra_body = {k: v for k, v in profile.items() if k in SLIDE_EXTRA_BODY_PARAMS}
+    kwargs: dict[str, Any] = {
+        k: v for k, v in profile.items() if k not in SLIDE_EXTRA_BODY_PARAMS
+    }
+    if extra_body:
+        kwargs["extra_body"] = extra_body
+    return kwargs
 
 
 # --- Sandbox compile ---

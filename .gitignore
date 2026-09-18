@@ -3,8 +3,4 @@ __pycache__/
 .venv/
 .env
 .coverage
-
-# Agent skills
-.agents/
-skills-lock.json
 sql/
