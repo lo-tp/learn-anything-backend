@@ -20,31 +20,30 @@ _COMPILE_TIMEOUT_S = 30.0
 MAX_MATERIAL_ATTEMPTS = max(1, int(os.getenv("MAX_MATERIAL_ATTEMPTS", "3")))
 
 # --- Slide-generation sampling profiles ---
-# One profile per write attempt: attempt 1 is the most creative (higher
-# temp/top_p) to maximize the chance of a good first draft; each retry steps
-# down toward the most deterministic profile so a slide that keeps failing to
-# compile gets progressively stable samples.
+# One profile per write attempt. All attempts use the same deterministic
+# profile so a slide that keeps failing to compile gets identical, stable
+# samples on every retry.
 #
 # temperature/top_p are standard OpenAI params, but top_k/min_p/
 # repeat_penalty are NOT part of the OpenAI API — OpenAI-compatible backends
 # (e.g. vLLM) only accept them when nested under ``extra_body``. See
 # SLIDE_EXTRA_BODY_PARAMS and slide_sampling_bind_kwargs.
 SLIDE_SAMPLING_PROFILES: tuple[dict[str, float], ...] = (
-    {  # Attempt 1 — creative but reliable
-        "temperature": 0.4,
-        "top_p": 0.75,
-        "top_k": 25,
-        "min_p": 0.06,
-        "repeat_penalty": 1.02,
+    {  # Attempt 1
+        "temperature": 0.1,
+        "top_p": 0.5,
+        "top_k": 10,
+        "min_p": 0.1,
+        "repeat_penalty": 1.05,
     },
-    {  # Attempt 2 — mostly deterministic
-        "temperature": 0.2,
-        "top_p": 0.6,
-        "top_k": 15,
-        "min_p": 0.08,
-        "repeat_penalty": 1.02,
+    {  # Attempt 2
+        "temperature": 0.1,
+        "top_p": 0.5,
+        "top_k": 10,
+        "min_p": 0.1,
+        "repeat_penalty": 1.05,
     },
-    {  # Attempt 3 — most reliable
+    {  # Attempt 3
         "temperature": 0.1,
         "top_p": 0.5,
         "top_k": 10,

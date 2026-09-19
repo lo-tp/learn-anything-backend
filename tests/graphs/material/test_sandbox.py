@@ -69,7 +69,8 @@ class TestSlideSamplingForAttempt:
             slide_sampling_for_attempt(i)["temperature"]
             for i in range(1, len(SLIDE_SAMPLING_PROFILES) + 1)
         ]
-        assert all(a > b for a, b in pairwise(temps))
+        # Non-increasing across attempts; plateaus allowed.
+        assert all(a >= b for a, b in pairwise(temps))
 
     def test_clamps_beyond_profile_count(self):
         n = len(SLIDE_SAMPLING_PROFILES)
@@ -105,12 +106,10 @@ class TestSlideSamplingBindKwargs:
         assert not (top_level & set(kwargs["extra_body"]))
 
     def test_tracks_attempt(self):
-        # Different attempts yield different sampling values end to end.
-        assert slide_sampling_bind_kwargs(1) != slide_sampling_bind_kwargs(3)
-        assert (
-            slide_sampling_bind_kwargs(1)["temperature"]
-            != slide_sampling_bind_kwargs(3)["temperature"]
-        )
+        # All profiles are identical, so every attempt binds the same
+        # deterministic sampling end to end.
+        for i in range(1, len(SLIDE_SAMPLING_PROFILES) + 1):
+            assert slide_sampling_bind_kwargs(i) == slide_sampling_bind_kwargs(1)
 
     def test_returns_fresh_dict(self):
         a = slide_sampling_bind_kwargs(1)
