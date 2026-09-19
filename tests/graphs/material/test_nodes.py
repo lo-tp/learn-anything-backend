@@ -148,7 +148,7 @@ class TestWriteSlide:
 
     def test_returns_jsx_and_resets_error(self):
         llm = _make_llm()
-        mock_out = SlideOut(slide="export default function S() {}")
+        mock_out = SlideOut(code="export default function S() {}")
         with patch(
             "graphs.material.nodes.structured_invoke_messages", return_value=mock_out
         ):
@@ -162,7 +162,7 @@ class TestWriteSlide:
 
     def test_increments_attempts(self):
         llm = _make_llm()
-        mock_out = SlideOut(slide="export default function S() {}")
+        mock_out = SlideOut(code="export default function S() {}")
         with patch(
             "graphs.material.nodes.structured_invoke_messages", return_value=mock_out
         ):
@@ -172,7 +172,7 @@ class TestWriteSlide:
 
     def _kwargs_for_attempt(self, attempts_by_slide: list[int]):
         llm = _make_llm()
-        mock_out = SlideOut(slide="export default function S() {}")
+        mock_out = SlideOut(code="export default function S() {}")
         with patch(
             "graphs.material.nodes.structured_invoke_messages", return_value=mock_out
         ) as mock_invoke:
@@ -221,7 +221,7 @@ class TestWriteSlide:
 
     def test_no_compile_error_in_prompt(self):
         llm = _make_llm()
-        mock_out = SlideOut(slide="export default function S() {}")
+        mock_out = SlideOut(code="export default function S() {}")
         with patch(
             "graphs.material.nodes.structured_invoke_messages", return_value=mock_out
         ) as mock_invoke:
@@ -240,7 +240,7 @@ class TestWriteSlide:
 
     def test_records_stage_timing(self):
         llm = _make_llm()
-        mock_out = SlideOut(slide="export default function S() {}")
+        mock_out = SlideOut(code="export default function S() {}")
         with patch(
             "graphs.material.nodes.structured_invoke_messages", return_value=mock_out
         ):

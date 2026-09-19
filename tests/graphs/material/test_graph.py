@@ -153,7 +153,7 @@ class TestStageTimingAccumulation:
             patch(
                 "graphs.material.nodes.structured_invoke_messages",
                 side_effect=[
-                    SlideOut(slide=f"export default function {t}() {{}}")
+                    SlideOut(code=f"export default function {t}() {{}}")
                     for t in ("A", "B", "C")
                 ],
             ),

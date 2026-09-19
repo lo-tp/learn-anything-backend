@@ -61,8 +61,8 @@ class TestSlideContentsOut:
 
 class TestSlideOut:
     def test_valid(self):
-        out = SlideOut(slide="export default function S() { return null; }")
-        assert out.slide.startswith("export")
+        out = SlideOut(code="export default function S() { return null; }")
+        assert out.code.startswith("export")
 
 
 class TestQuestionDraft:

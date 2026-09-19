@@ -16,7 +16,14 @@ class SlideContentsOut(BaseModel):
 
 
 class SlideOut(BaseModel):
-    slide: str
+    code: str = Field(
+        description=(
+            "The complete raw TSX source of the slide component: a single "
+            "bare React module that starts with `export default function` "
+            "and ends with `}` — no markdown wrappers, no file headers, "
+            "no arrays, no JSON, no prose."
+        )
+    )
 
 
 class QuestionDraft(BaseModel):
