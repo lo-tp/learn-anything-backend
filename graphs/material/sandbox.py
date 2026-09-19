@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any
 
 import httpx
@@ -92,6 +93,28 @@ def slide_sampling_bind_kwargs(attempt: int) -> dict[str, Any]:
 
 
 # --- Sandbox compile ---
+
+# Raw transport errors look like:
+#   Transport/HTTP error: Client error '400 code must declare `export default`'
+#   for url 'http://localhost:3001/api/compile' For more information check: ...
+# Only the quoted status message is useful to the model on a retry.
+_TRANSPORT_ERROR_RE = re.compile(
+    r"^Transport/HTTP error: (?:Client|Server) error '(?P<msg>.*)' for url",
+    re.DOTALL,
+)
+
+
+def compile_error_for_feedback(error: str) -> str:
+    """Reduce a raw compile error to the meaningful message for retry feedback.
+
+    Strips the httpx transport wrapper (URL + "For more information" footer) so
+    the model sees e.g. ``500 Build failed with 1 error: compile.tsx:162:74:
+    ERROR: ...`` instead of the full client error.
+    """
+    m = _TRANSPORT_ERROR_RE.match(error.strip())
+    if m:
+        return " ".join(m.group("msg").split())
+    return " ".join(error.split())
 
 
 def _compile_slide(code: str) -> tuple[str | None, str]:

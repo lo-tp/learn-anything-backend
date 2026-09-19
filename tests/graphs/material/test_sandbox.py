@@ -13,6 +13,7 @@ from graphs.material.sandbox import (
     SLIDE_SAMPLING_PROFILES,
     _compile_slide,
     _placeholder_slide_jsx,
+    compile_error_for_feedback,
     slide_sampling_bind_kwargs,
     slide_sampling_for_attempt,
 )
@@ -115,6 +116,34 @@ class TestSlideSamplingBindKwargs:
         a = slide_sampling_bind_kwargs(1)
         a["extra_body"]["top_k"] = 999
         assert slide_sampling_bind_kwargs(1)["extra_body"]["top_k"] != 999
+
+
+class TestCompileErrorForFeedback:
+    def test_strips_client_error_wrapper(self):
+        raw = (
+            "Transport/HTTP error: Client error '400 code must declare "
+            "`export default`' for url 'http://localhost:3001/api/compile' "
+            "For more information check: https://developer.mozilla.org"
+        )
+        assert compile_error_for_feedback(raw) == (
+            "400 code must declare `export default`"
+        )
+
+    def test_strips_server_error_wrapper_with_nested_quotes(self):
+        raw = (
+            "Transport/HTTP error: Server error '500 Build failed with 1 error: "
+            "compile.tsx:162:74: ERROR: Expected \"}\" but found \")\"' for url "
+            "'http://localhost:3001/api/compile' For more information check: ..."
+        )
+        assert compile_error_for_feedback(raw) == (
+            '500 Build failed with 1 error: compile.tsx:162:74: '
+            'ERROR: Expected "}" but found ")"'
+        )
+
+    def test_plain_errors_are_whitespace_collapsed(self):
+        assert compile_error_for_feedback("syntax  error\nat\nline 3") == (
+            "syntax error at line 3"
+        )
 
 
 class TestCompileSlide:

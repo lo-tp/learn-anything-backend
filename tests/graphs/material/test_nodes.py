@@ -219,24 +219,35 @@ class TestWriteSlide:
         # ...and the result matches the shared helper exactly.
         assert kwargs == slide_sampling_bind_kwargs(1)
 
-    def test_no_compile_error_in_prompt(self):
+    def _human_content(self, **state_overrides) -> str:
         llm = _make_llm()
         mock_out = SlideOut(code="export default function S() {}")
         with patch(
             "graphs.material.nodes.structured_invoke_messages", return_value=mock_out
         ) as mock_invoke:
             node = make_write_slide(llm)
-            node(
-                self._state(
-                    attempts_by_slide=[1],
-                    last_compile_error="undefined variable 'x'",
-                )
-            )
-        # The retry prompt no longer includes the previous compile error
-        messages = mock_invoke.call_args[0][2]
-        human_content = messages[-1].content
+            node(self._state(**state_overrides))
+        return mock_invoke.call_args[0][2][-1].content
+
+    def test_retry_prompt_includes_sanitized_compile_error(self):
+        human_content = self._human_content(
+            attempts_by_slide=[1],
+            last_compile_error=(
+                "Transport/HTTP error: Client error '400 code must declare "
+                "`export default`' for url 'http://localhost:3001/api/compile' "
+                "For more information check: https://developer.mozilla.org"
+            ),
+        )
+        # The meaningful message is fed back...
+        assert "failed to compile" in human_content
+        assert "code must declare `export default`" in human_content
+        # ...but the raw transport wrapper is not echoed.
+        assert "Transport/HTTP error" not in human_content
+        assert "localhost:3001" not in human_content
+
+    def test_no_compile_error_in_first_attempt_prompt(self):
+        human_content = self._human_content()
         assert "failed to compile" not in human_content
-        assert "undefined variable 'x'" not in human_content
 
     def test_records_stage_timing(self):
         llm = _make_llm()
