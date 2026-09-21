@@ -6,8 +6,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session as DBSession
 
-from db import Phase, Session, get_db
 from core.security import require_auth
+from db import Phase, Session, get_db
 
 router = APIRouter(tags=["sessions"], dependencies=[Depends(require_auth)])
 

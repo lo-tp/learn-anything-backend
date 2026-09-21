@@ -14,7 +14,6 @@ from __future__ import annotations
 import os
 
 import jwt
-import pytest
 
 COOKIE_NAME = "access_token"
 

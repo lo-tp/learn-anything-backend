@@ -7,7 +7,7 @@ the API can see it.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy.orm import Session as DBSession
 
