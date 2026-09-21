@@ -553,6 +553,8 @@ The client uses the `slides` IDs to fetch individual slide JSX from the sandbox 
 
 Not part of the client API: only the **sandbox service** calls this to fetch the raw slide JSX it compiles/mounts to serve the client. Slide IDs are globally unique (`{session_id}_{step_id}_slide_{n}`).
 
+**Auth:** requires the `X-Service-Token` header (shared Sandbox service secret, `SANDBOX_SERVICE_TOKEN`); a human sign-in cookie is never accepted here. Missing/blank secret, missing header, or wrong header → `401` (fail-secure; `DEV_MODE` does not open it).
+
 ```json
 // Response
 {

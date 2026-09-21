@@ -7,6 +7,7 @@ client's cookie (handled elsewhere), so a token stays valid until it expires.
 
 from __future__ import annotations
 
+import hmac
 import os
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -116,7 +117,29 @@ def require_auth(request: Request) -> None:
     _decode_token(request)
 
 
-def get_current_user(request: Request, db=Depends(get_db)) -> "User":
+# --- Service-identity gate for the internal slides endpoint (#103) ---
+
+SERVICE_TOKEN_HEADER = "X-Service-Token"
+
+
+def require_service(request: Request) -> None:
+    """FastAPI dependency: require the shared Sandbox service token.
+
+    Fail-secure: ``SANDBOX_SERVICE_TOKEN`` is read per request, and a
+    missing/blank secret rejects every request. The gate is **never**
+    opened by ``DEV_MODE`` — the slides route is reachable only through
+    the ``X-Service-Token`` header, which is compared with
+    ``hmac.compare_digest`` (timing-safe).
+    """
+    expected = os.getenv("SANDBOX_SERVICE_TOKEN", "")
+    presented = request.headers.get(SERVICE_TOKEN_HEADER, "")
+    if not expected or not presented:
+        raise HTTPException(status_code=401, detail="Service token required")
+    if not hmac.compare_digest(expected.encode("utf-8"), presented.encode("utf-8")):
+        raise HTTPException(status_code=401, detail="Service token required")
+
+
+def get_current_user(request: Request, db=Depends(get_db)) -> User:
     """Resolve the current user from the sign-in token.
 
     Always requires a valid token + existing user (not gated by DEV_MODE).

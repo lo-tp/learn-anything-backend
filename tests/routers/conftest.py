@@ -92,6 +92,18 @@ def client(db_engine):
 
 
 @pytest.fixture()
+def service_token(monkeypatch):
+    """A valid Sandbox service token; sets SANDBOX_SERVICE_TOKEN to match.
+
+    Business-logic tests pass ``headers={"X-Service-Token": service_token}``
+    (the gate's own behaviour is tested in test_service_gate.py).
+    """
+    token = "test-service-token"
+    monkeypatch.setenv("SANDBOX_SERVICE_TOKEN", token)
+    return token
+
+
+@pytest.fixture()
 def auth_cookie():
     """A valid sign-in cookie value (for tests that disable DEV_MODE)."""
     from core.security import create_token

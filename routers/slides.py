@@ -3,6 +3,10 @@
 Not public — only the **sandbox service** calls this to fetch the raw slide
 JSX (React component source) it compiles and mounts to serve the client. The
 client never calls this endpoint directly (see docs/api-and-graphs.md).
+
+Auth is the service-identity gate (``require_service``), not the human
+cookie gate: a valid ``X-Service-Token`` header is required, and
+``DEV_MODE`` never opens it.
 """
 
 import os
@@ -11,10 +15,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
 
-from core.security import require_auth
+from core.security import require_service
 from db import SlideContent, get_db
 
-router = APIRouter(tags=["slides"], dependencies=[Depends(require_auth)])
+router = APIRouter(tags=["slides"], dependencies=[Depends(require_service)])
 
 
 class SlideOut(BaseModel):

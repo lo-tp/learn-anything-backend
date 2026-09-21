@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from db import SlideContent
 
+SERVICE_HEADER = "X-Service-Token"
+
 
 class TestGetSlide:
-    def test_found(self, client, db, make_session):
+    def test_found(self, client, db, make_session, service_token):
         sid = make_session(session_id="s1").session_id
         db.add(
             SlideContent(
@@ -18,20 +20,23 @@ class TestGetSlide:
         )
         db.commit()
 
-        resp = client.get("/slides/s1_stepA_slide_1")
+        resp = client.get(
+            "/slides/s1_stepA_slide_1", headers={SERVICE_HEADER: service_token}
+        )
         assert resp.status_code == 200
         assert resp.json() == {
             "slide_id": "s1_stepA_slide_1",
             "content": "<div>hi</div>",
         }
 
-    def test_not_found(self, client, db):
-        resp = client.get("/slides/does-not-exist")
+    def test_not_found(self, client, db, service_token):
+        resp = client.get("/slides/does-not-exist",
+                          headers={SERVICE_HEADER: service_token})
         assert resp.status_code == 404
         assert resp.json()["detail"] == "Slide not found"
 
     def test_placeholder_hidden_outside_dev(self, client, db, make_session,
-                                            monkeypatch, auth_cookie):
+                                            monkeypatch, service_token):
         monkeypatch.delenv("DEV_MODE", raising=False)
         sid = make_session(session_id="s1").session_id
         db.add(
@@ -46,11 +51,11 @@ class TestGetSlide:
         db.commit()
 
         resp = client.get("/slides/s1_stepA_slide_1",
-                          cookies={"access_token": auth_cookie})
+                          headers={SERVICE_HEADER: service_token})
         assert resp.status_code == 404
 
     def test_placeholder_visible_in_dev(self, client, db, make_session,
-                                        monkeypatch):
+                                        monkeypatch, service_token):
         monkeypatch.setenv("DEV_MODE", "1")
         sid = make_session(session_id="s1").session_id
         db.add(
@@ -64,7 +69,8 @@ class TestGetSlide:
         )
         db.commit()
 
-        resp = client.get("/slides/s1_stepA_slide_1")
+        resp = client.get("/slides/s1_stepA_slide_1",
+                          headers={SERVICE_HEADER: service_token})
         assert resp.status_code == 200
         assert resp.json() == {
             "slide_id": "s1_stepA_slide_1",
