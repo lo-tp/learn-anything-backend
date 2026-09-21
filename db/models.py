@@ -18,6 +18,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
     create_engine,
 )
@@ -61,6 +62,11 @@ class Phase(str, Enum):
     EXECUTING = "executing"
     COMPLETE = "complete"
     ERROR = "error"
+
+
+class ReviewSource(str, Enum):
+    PROBE = "probe"
+    MATERIAL = "material"
 
 
 # --- Models ---
@@ -294,6 +300,50 @@ class StepProgress(Base):
     complete: Mapped[bool] = mapped_column(Boolean, default=False)
 
     session: Mapped[Session] = relationship(back_populates="step_progress")
+
+
+class ReviewCard(Base):
+    """A durable, self-contained record of one question the learner got wrong.
+
+    One card per unique ``(user_id, source, session_id, source_question_id)``.
+    Stores the full question snapshot plus SM-2 spaced-repetition state.
+    """
+
+    __tablename__ = "review_cards"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "source", "session_id", "source_question_id",
+            name="uq_review_card_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    source: Mapped[str] = mapped_column(String, default=ReviewSource.PROBE.value)
+    source_question_id: Mapped[str] = mapped_column(String)
+    # Provenance only — NOT a foreign key, so cards outlive their session.
+    session_id: Mapped[str] = mapped_column(String, index=True)
+    step_id: Mapped[str | None] = mapped_column(String, nullable=True)  # material only
+    # Self-contained question snapshot: {text, options, correct_index, explanation}.
+    question: Mapped[dict[str, Any]] = mapped_column(JSON)
+    # SM-2 state.
+    interval_days: Mapped[int] = mapped_column(Integer, default=0)
+    ease: Mapped[float] = mapped_column(Float, default=2.5)
+    lapses: Mapped[int] = mapped_column(Integer, default=0)
+    due_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    is_retired: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
 
 
 # --- FastAPI dependency ---
