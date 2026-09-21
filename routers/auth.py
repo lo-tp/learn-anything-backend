@@ -1,13 +1,13 @@
-"""Auth routes: account creation and sign-in.
+"""Auth routes: account creation, sign-in, profile, and sign-out.
 
-Scope of this module is #86 — register + login. The sign-in cookie is a
-30-day JWT (httpOnly, SameSite=Lax) set by the backend on the shared
-``localhost`` host so both the frontend origin and the API can see it.
+The sign-in cookie is a 30-day JWT (httpOnly, SameSite=Lax) set by the
+backend on the shared ``localhost`` host so both the frontend origin and
+the API can see it.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy.orm import Session as DBSession
 
@@ -50,6 +50,17 @@ class UserOut(BaseModel):
     id: int
     email: str
     display_name: str
+
+
+class UpdateMeRequest(BaseModel):
+    display_name: str
+
+    @field_validator("display_name")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Display name must not be blank")
+        return value
 
 
 class Message(BaseModel):
@@ -104,3 +115,39 @@ def login(
         path="/",
     )
     return Message(message="Signed in")
+
+
+def _get_current_user(
+    request: Request, db: DBSession = Depends(get_db)
+) -> User:
+    """Resolve the current user from the sign-in token (always required)."""
+    return security.get_current_user(request, db)
+
+
+_current_user = Depends(_get_current_user)
+
+
+@router.get("/auth/me", response_model=UserOut)
+def me(user: User = _current_user) -> UserOut:
+    """Read the current user's profile."""
+    return UserOut(id=user.id, email=user.email, display_name=user.display_name)
+
+
+@router.patch("/auth/me", response_model=UserOut)
+def update_me(
+    payload: UpdateMeRequest,
+    user: User = _current_user,
+    db: DBSession = Depends(get_db),
+) -> UserOut:
+    """Update the current user's display name."""
+    user.display_name = payload.display_name
+    db.commit()
+    db.refresh(user)
+    return UserOut(id=user.id, email=user.email, display_name=user.display_name)
+
+
+@router.post("/auth/logout", response_model=Message)
+def logout(response: Response) -> Message:
+    """Sign out: clear the presenting client's cookie."""
+    response.delete_cookie(security.COOKIE_NAME, path="/")
+    return Message(message="Signed out")

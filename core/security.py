@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import os
 from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING
 
 import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError
 from fastapi import Depends, HTTPException, Request
+
+if TYPE_CHECKING:
+    from db import User
 
 _JWT_ALGORITHM = "HS256"
 
@@ -106,3 +110,24 @@ def require_auth(request: Request) -> None:
 
 
 auth_dep = Depends(require_auth)
+
+
+def get_current_user(request: Request, db) -> "User":
+    """Resolve the current user from the sign-in token.
+
+    Always requires a valid token + existing user (not gated by DEV_MODE).
+    Used by /auth/me endpoints where the user's own profile is the resource.
+    """
+    from db import User
+
+    token = request.cookies.get(COOKIE_NAME)
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = jwt.decode(token, _jwt_secret(), algorithms=[_JWT_ALGORITHM])
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    user = db.query(User).filter(User.email == payload["sub"]).first()
+    if user is None:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
