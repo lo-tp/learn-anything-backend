@@ -117,14 +117,7 @@ def login(
     return Message(message="Signed in")
 
 
-def _get_current_user(
-    request: Request, db: DBSession = Depends(get_db)
-) -> User:
-    """Resolve the current user from the sign-in token (always required)."""
-    return security.get_current_user(request, db)
-
-
-_current_user = Depends(_get_current_user)
+_current_user = Depends(security.get_current_user)
 
 
 @router.get("/auth/me", response_model=UserOut)

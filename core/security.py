@@ -16,6 +16,8 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError
 from fastapi import Depends, HTTPException, Request
 
+from db import get_db
+
 if TYPE_CHECKING:
     from db import User
 
@@ -89,6 +91,17 @@ def _is_dev_mode() -> bool:
     return os.getenv("DEV_MODE") in ("true", "1")
 
 
+def _decode_token(request: Request) -> dict:
+    """Extract and validate the sign-in token; 401 on missing/invalid."""
+    token = request.cookies.get(COOKIE_NAME)
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        return jwt.decode(token, _jwt_secret(), algorithms=[_JWT_ALGORITHM])
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
 def require_auth(request: Request) -> None:
     """FastAPI dependency: require a valid sign-in token unless DEV_MODE.
 
@@ -100,19 +113,10 @@ def require_auth(request: Request) -> None:
     """
     if _is_dev_mode():
         return
-    token = request.cookies.get(COOKIE_NAME)
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    try:
-        jwt.decode(token, _jwt_secret(), algorithms=[_JWT_ALGORITHM])
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    _decode_token(request)
 
 
-auth_dep = Depends(require_auth)
-
-
-def get_current_user(request: Request, db) -> "User":
+def get_current_user(request: Request, db=Depends(get_db)) -> "User":
     """Resolve the current user from the sign-in token.
 
     Always requires a valid token + existing user (not gated by DEV_MODE).
@@ -120,13 +124,7 @@ def get_current_user(request: Request, db) -> "User":
     """
     from db import User
 
-    token = request.cookies.get(COOKIE_NAME)
-    if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    try:
-        payload = jwt.decode(token, _jwt_secret(), algorithms=[_JWT_ALGORITHM])
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    payload = _decode_token(request)
     user = db.query(User).filter(User.email == payload["sub"]).first()
     if user is None:
         raise HTTPException(status_code=401, detail="User not found")
