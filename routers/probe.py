@@ -7,15 +7,16 @@ learner's answers for the whole current batch at once.
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from langgraph.types import Command
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
 
 from core.language import DEFAULT_LANGUAGE
-from core.security import require_auth
-from db import Phase, ProbeQuestion, Session, get_db
+from core.security import get_current_user_optional, require_auth
+from db import Phase, ProbeQuestion, Session, User, get_db
 from graphs import graph_config, probe_graph
+from services.review import record_missed_question
 
 router = APIRouter(tags=["probe"], dependencies=[Depends(require_auth)])
 
@@ -85,8 +86,10 @@ def _update_answers(
     db: DBSession,
     questions: list[ProbeQuestion],
     answers: list[tuple[uuid.UUID, int]],
+    user: User | None,
+    session_id: str,
 ) -> None:
-    """Mark ProbeQuestion rows as answered."""
+    """Mark ProbeQuestion rows as answered; record review cards for misses."""
     by_id = {q.question_id: q for q in questions}
     answered_at = datetime.now(UTC)
     for question_id, selected_index in answers:
@@ -94,6 +97,20 @@ def _update_answers(
         question.selected_index = selected_index
         question.is_correct = selected_index == question.correct_index
         question.answered_at = answered_at
+        if user is not None and question.is_correct is False:
+            record_missed_question(
+                db,
+                user_id=user.id,
+                source="probe",
+                session_id=session_id,
+                source_question_id=question.id,
+                question={
+                    "text": question.text,
+                    "options": question.options,
+                    "correct_index": question.correct_index,
+                    "explanation": question.explanation or "",
+                },
+            )
     db.commit()
 
 
@@ -106,7 +123,10 @@ def _update_answers(
     response_model_exclude_none=True,
 )
 def probe_session(
-    session_id: str, body: ProbeIn, db: DBSession = Depends(get_db)
+    session_id: str,
+    body: ProbeIn,
+    request: Request,
+    db: DBSession = Depends(get_db),
 ) -> ProbeOut:
     """Start the probe or submit the answers for the current batch (combined endpoint)."""
     session = _get_session_or_404(db, session_id)
@@ -116,6 +136,7 @@ def probe_session(
             detail=f"Session is in phase '{session.phase}', not 'probing'",
         )
 
+    user = get_current_user_optional(request, db)
     config = graph_config(session_id, "probe")
 
     if body.answers is None:
@@ -188,7 +209,7 @@ def probe_session(
 
     if "__interrupt__" in result:
         # Next batch — update the answered rows, persist the new batch
-        _update_answers(db, answered_questions, answer_pairs)
+        _update_answers(db, answered_questions, answer_pairs, user, session_id)
         next_batch = result.get("next_batch")
         if not next_batch:
             raise HTTPException(status_code=500, detail="Graph did not produce questions")
@@ -199,7 +220,7 @@ def probe_session(
         )
 
     # Probe complete — boundary_map is the exit output
-    _update_answers(db, answered_questions, answer_pairs)
+    _update_answers(db, answered_questions, answer_pairs, user, session_id)
     boundary_map = result.get("boundary_map", {})
     session.boundary_map = boundary_map
     session.phase = Phase.PLANNING.value

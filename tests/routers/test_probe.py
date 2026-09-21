@@ -6,7 +6,8 @@ import uuid
 from datetime import UTC, datetime
 from unittest.mock import patch
 
-from db import Phase, ProbeQuestion, Session
+from core.security import create_token
+from db import Phase, ProbeQuestion, ReviewCard, Session
 
 
 def _qid() -> str:
@@ -215,3 +216,77 @@ class TestProbeResume:
         row = db.get(ProbeQuestion, q1)
         assert row.selected_index == 0
         assert row.is_correct is True  # correct_index is 0
+
+
+# --- Probe hook: server-side review card capture (#108) ---
+
+
+class TestProbeHook:
+    """A signed-in probe miss records a ReviewCard; correct/no-user do not."""
+
+    def test_signed_in_miss_creates_review_card(
+        self, client, db, user, make_session
+    ):
+        sid = make_session(session_id="a", phase=Phase.PROBING).session_id
+        q1 = _qid()
+        _seed_probe(db, sid, [q1])
+        cookie = {"access_token": create_token(user.email)}
+        with patch("routers.probe.probe_graph") as graph:
+            graph.invoke.return_value = {"boundary_map": {}}
+            resp = client.post(
+                f"/sessions/{sid}/probe",
+                json={"answers": [{"question_id": q1, "selected_index": 1}]},
+                cookies=cookie,
+            )
+        assert resp.status_code == 200
+
+        cards = (
+            db.query(ReviewCard)
+            .filter_by(user_id=user.id, source="probe", session_id=sid)
+            .all()
+        )
+        assert len(cards) == 1
+        card = cards[0]
+        assert card.source_question_id == q1
+        assert card.question["correct_index"] == 0
+
+    def test_correct_answer_does_not_create_card(
+        self, client, db, user, make_session
+    ):
+        sid = make_session(session_id="a", phase=Phase.PROBING).session_id
+        q1 = _qid()
+        _seed_probe(db, sid, [q1])
+        cookie = {"access_token": create_token(user.email)}
+        with patch("routers.probe.probe_graph") as graph:
+            graph.invoke.return_value = {"boundary_map": {}}
+            resp = client.post(
+                f"/sessions/{sid}/probe",
+                json={"answers": [{"question_id": q1, "selected_index": 0}]},
+                cookies=cookie,
+            )
+        assert resp.status_code == 200
+
+        cards = (
+            db.query(ReviewCard)
+            .filter_by(user_id=user.id, source="probe", session_id=sid)
+            .all()
+        )
+        assert len(cards) == 0
+
+    def test_no_user_probe_succeeds_but_no_card(
+        self, client, db, make_session
+    ):
+        """DEV_MODE with no cookie: probe works but creates no card."""
+        sid = make_session(session_id="a", phase=Phase.PROBING).session_id
+        q1 = _qid()
+        _seed_probe(db, sid, [q1])
+        with patch("routers.probe.probe_graph") as graph:
+            graph.invoke.return_value = {"boundary_map": {}}
+            resp = client.post(
+                f"/sessions/{sid}/probe",
+                json={"answers": [{"question_id": q1, "selected_index": 1}]},
+            )
+        assert resp.status_code == 200
+
+        cards = db.query(ReviewCard).all()
+        assert len(cards) == 0
