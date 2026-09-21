@@ -66,7 +66,7 @@ def db(db_engine):
 @pytest.fixture()
 def client(db_engine):
     """A FastAPI TestClient with ``get_db`` pointed at the test engine."""
-    from routers import auth, clarify, plan, probe, sessions, slides
+    from routers import auth, clarify, plan, probe, review, sessions, slides
 
     app = FastAPI()
     app.include_router(auth.router)
@@ -75,6 +75,7 @@ def client(db_engine):
     app.include_router(probe.router)
     app.include_router(plan.router)
     app.include_router(slides.router)
+    app.include_router(review.router)
 
     TestingSession = sessionmaker(bind=db_engine)
 
@@ -108,6 +109,22 @@ def auth_cookie():
     """A valid sign-in cookie value (for tests that disable DEV_MODE)."""
     from core.security import create_token
     return create_token("test@example.com")
+
+
+@pytest.fixture()
+def user(db):
+    """A real ``User`` row for per-user (review) scoping tests."""
+    from core.security import hash_password
+    from db import User
+
+    u = User(
+        email="review@example.com",
+        display_name="Reviewer",
+        password_hash=hash_password("supersecret"),
+    )
+    db.add(u)
+    db.commit()
+    return u
 
 
 @pytest.fixture()

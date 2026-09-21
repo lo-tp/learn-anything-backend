@@ -152,3 +152,21 @@ def get_current_user(request: Request, db=Depends(get_db)) -> User:
     if user is None:
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+
+def get_current_user_optional(
+    request: Request, db=Depends(get_db)
+) -> User | None:
+    """Resolve the current user, or None when absent/unsigned (never raises).
+
+    Used by the probe path to attribute server-side review cards: in DEV_MODE
+    with no real user present this returns None (probe still works, no card),
+    and with a signed-in user it returns that user.
+    """
+    from db import User
+
+    try:
+        payload = _decode_token(request)
+    except HTTPException:
+        return None
+    return db.query(User).filter(User.email == payload["sub"]).first()
