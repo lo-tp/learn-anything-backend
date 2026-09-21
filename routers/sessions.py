@@ -7,8 +7,9 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session as DBSession
 
 from db import Phase, Session, get_db
+from core.security import require_auth
 
-router = APIRouter(tags=["sessions"])
+router = APIRouter(tags=["sessions"], dependencies=[Depends(require_auth)])
 
 
 # --- Schemas ---

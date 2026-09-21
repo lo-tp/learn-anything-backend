@@ -31,7 +31,7 @@ class TestGetSlide:
         assert resp.json()["detail"] == "Slide not found"
 
     def test_placeholder_hidden_outside_dev(self, client, db, make_session,
-                                            monkeypatch):
+                                            monkeypatch, auth_cookie):
         monkeypatch.delenv("DEV_MODE", raising=False)
         sid = make_session(session_id="s1").session_id
         db.add(
@@ -45,7 +45,8 @@ class TestGetSlide:
         )
         db.commit()
 
-        resp = client.get("/slides/s1_stepA_slide_1")
+        resp = client.get("/slides/s1_stepA_slide_1",
+                          cookies={"access_token": auth_cookie})
         assert resp.status_code == 404
 
     def test_placeholder_visible_in_dev(self, client, db, make_session,

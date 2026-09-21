@@ -26,6 +26,10 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 # ``.env`` (loaded via ``load_dotenv()`` in ``llm.py`` during test imports)
 # may carry a real ``JWT_SECRET``, which must not change auth test behavior.
 os.environ["JWT_SECRET"] = "test-secret"
+# Session endpoints default to gated (DEV_MODE off); the business-logic tests
+# exercise endpoints with the gate open. The auth-gate behaviour itself is
+# tested in test_auth_gate.py with DEV_MODE explicitly toggled.
+os.environ["DEV_MODE"] = "true"
 
 import pytest
 from fastapi import FastAPI
@@ -85,6 +89,13 @@ def client(db_engine):
 
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture()
+def auth_cookie():
+    """A valid sign-in cookie value (for tests that disable DEV_MODE)."""
+    from core.security import create_token
+    return create_token("test@example.com")
 
 
 @pytest.fixture()

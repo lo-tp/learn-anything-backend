@@ -512,7 +512,8 @@ class TestGetMaterials:
         }
 
     def test_placeholder_slides_hidden_outside_dev(self, client, db,
-                                                    make_session, monkeypatch):
+                                                    make_session, monkeypatch,
+                                                    auth_cookie):
         monkeypatch.delenv("DEV_MODE", raising=False)
         sid = make_session(session_id="a", phase=Phase.EXECUTING).session_id
         db.add(Plan(session_id=sid, version=1, prose_summary="ps",
@@ -529,7 +530,8 @@ class TestGetMaterials:
                             is_placeholder=True))
         db.commit()
 
-        resp = client.get(f"/sessions/{sid}/materials")
+        resp = client.get(f"/sessions/{sid}/materials",
+                          cookies={"access_token": auth_cookie})
         assert resp.status_code == 200
         items = resp.json()["generated_steps"][0]["items"]
         # The placeholder slot is omitted from the deck in production.
@@ -567,10 +569,12 @@ class TestGetMaterials:
 
 
 class TestDevRegenerate:
-    def test_disabled_by_default(self, client, db, make_session, monkeypatch):
+    def test_disabled_by_default(self, client, db, make_session, monkeypatch,
+                                  auth_cookie):
         monkeypatch.delenv("DEV_MODE", raising=False)
         sid = make_session(session_id="a", phase=Phase.GENERATING).session_id
-        resp = client.post(f"/dev/sessions/{sid}/regenerate")
+        resp = client.post(f"/dev/sessions/{sid}/regenerate",
+                           cookies={"access_token": auth_cookie})
         assert resp.status_code == 404
 
     def test_no_plan_is_409(self, client, db, make_session, monkeypatch):

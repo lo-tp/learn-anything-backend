@@ -29,6 +29,7 @@ from core.language import (
     localize_status,
 )
 from core.llm import llm
+from core.security import require_auth
 from db import (
     FailedSlide,
     GraphStageTiming,
@@ -44,7 +45,7 @@ from graphs import checkpointer, graph_config, material_graph, plan_graph
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["plan"])
+router = APIRouter(tags=["plan"], dependencies=[Depends(require_auth)])
 
 # One lock per session: a double-approve must not race check-then-insert on
 # the shared in-memory SQLite connection. The guard protects lock creation.

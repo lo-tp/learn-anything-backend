@@ -13,10 +13,11 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
 
 from core.language import DEFAULT_LANGUAGE
+from core.security import require_auth
 from db import Phase, ProbeQuestion, Session, get_db
 from graphs import graph_config, probe_graph
 
-router = APIRouter(tags=["probe"])
+router = APIRouter(tags=["probe"], dependencies=[Depends(require_auth)])
 
 
 # --- Schemas ---

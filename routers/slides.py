@@ -11,9 +11,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
 
+from core.security import require_auth
 from db import SlideContent, get_db
 
-router = APIRouter(tags=["slides"])
+router = APIRouter(tags=["slides"], dependencies=[Depends(require_auth)])
 
 
 class SlideOut(BaseModel):

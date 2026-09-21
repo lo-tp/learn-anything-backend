@@ -11,10 +11,11 @@ from sqlalchemy.orm import Session as DBSession
 from core.language import DEFAULT_LANGUAGE, detect_language, has_meaningful_signal
 from core.llm import llm
 from db import Phase, Session, get_db
+from core.security import require_auth
 from graphs import clarify_graph, graph_config
 from graphs.clarify import ClarifyState
 
-router = APIRouter(tags=["clarify"])
+router = APIRouter(tags=["clarify"], dependencies=[Depends(require_auth)])
 
 
 # --- Schemas ---

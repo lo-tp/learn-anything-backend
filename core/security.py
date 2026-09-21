@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 import jwt
 from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError
+from fastapi import Depends, HTTPException, Request
 
 _JWT_ALGORITHM = "HS256"
 
@@ -74,3 +75,34 @@ def create_token(email: str) -> str:
         "exp": now + TOKEN_TTL,
     }
     return jwt.encode(payload, _jwt_secret(), algorithm=_JWT_ALGORITHM)
+
+
+# --- Sign-in gate for learning-session endpoints (#89) ---
+
+
+def _is_dev_mode() -> bool:
+    """Read DEV_MODE per request (secure default: off)."""
+    return os.getenv("DEV_MODE") in ("true", "1")
+
+
+def require_auth(request: Request) -> None:
+    """FastAPI dependency: require a valid sign-in token unless DEV_MODE.
+
+    - ``DEV_MODE`` is read from the environment on **every request** so
+      tests (and runtime toggles) take effect immediately.
+    - Missing or invalid cookie → 401.
+    - When the gate passes, no per-user scoping is applied: sessions
+      remain shared across all users.
+    """
+    if _is_dev_mode():
+        return
+    token = request.cookies.get(COOKIE_NAME)
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        jwt.decode(token, _jwt_secret(), algorithms=[_JWT_ALGORITHM])
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+auth_dep = Depends(require_auth)
