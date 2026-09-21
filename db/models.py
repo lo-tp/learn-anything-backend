@@ -66,6 +66,33 @@ class Phase(str, Enum):
 # --- Models ---
 
 
+class User(Base):
+    """A registered account.
+
+    The sign-in state itself is the JWT cookie issued at login (stateless);
+    only the durable account row lives here. ``password_hash`` is an argon2
+    hash — no plaintext is ever stored.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # Unique login identifier. Stored lowercased so lookups and the unique
+    # constraint are case-insensitive.
+    email: Mapped[str] = mapped_column(String, unique=True, index=True)
+    # Shown in the top bar; defaults to the email's local part at sign-up.
+    display_name: Mapped[str] = mapped_column(String)
+    password_hash: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+
 class Session(Base):
     __tablename__ = "sessions"
 

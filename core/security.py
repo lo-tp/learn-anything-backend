@@ -1,0 +1,76 @@
+"""Password hashing and sign-in token (JWT) helpers.
+
+The sign-in state is a stateless 30-day JWT carried in an httpOnly cookie.
+There is no server-side revocation: logout only clears the presenting
+client's cookie (handled elsewhere), so a token stays valid until it expires.
+"""
+
+from __future__ import annotations
+
+import os
+from datetime import UTC, datetime, timedelta
+
+import jwt
+from argon2 import PasswordHasher
+from argon2.exceptions import VerificationError
+
+_JWT_ALGORITHM = "HS256"
+
+# 30-day sign-in state.
+TOKEN_TTL = timedelta(days=30)
+COOKIE_MAX_AGE_SECONDS = int(TOKEN_TTL.total_seconds())
+
+COOKIE_NAME = "access_token"
+
+
+def _jwt_secret() -> str:
+    """The shared signing secret (parent #85).
+
+    Read per call so a late env change (tests toggling it, a reloaded
+    ``.env``) is honoured; called once at import to fail fast at startup
+    if it is absent, mirroring ``DATABASE_URL`` in ``db.models``.
+    """
+    secret = os.getenv("JWT_SECRET")
+    if not secret:
+        raise RuntimeError(
+            "JWT_SECRET is not set. "
+            "Expected the shared secret used to sign/verify the sign-in token."
+        )
+    return secret
+
+
+# Validate presence now (fail fast); the value is still read per call.
+_jwt_secret()
+
+
+# One hasher instance is reused: argon2-cffi precomputes its salt length and
+# parameters once, which is what the docs recommend for repeated use.
+_hasher = PasswordHasher()
+
+
+def hash_password(password: str) -> str:
+    """Return an argon2 hash string for ``password``."""
+    return _hasher.hash(password)
+
+
+def verify_password(password_hash: str, password: str) -> bool:
+    """Return True if ``password`` matches ``password_hash``.
+
+    Never raises: a corrupt or non-argon2 stored value is reported as a
+    mismatch rather than an error, so login fails as a generic 401.
+    """
+    try:
+        return _hasher.verify(password_hash, password)
+    except VerificationError:
+        return False
+
+
+def create_token(email: str) -> str:
+    """Encode a 30-day HS256 JWT whose subject is the user's email."""
+    now = datetime.now(UTC)
+    payload = {
+        "sub": email,
+        "iat": now,
+        "exp": now + TOKEN_TTL,
+    }
+    return jwt.encode(payload, _jwt_secret(), algorithm=_JWT_ALGORITHM)

@@ -1,5 +1,5 @@
-"""Shared infrastructure: the LLM client and language-detection helpers."""
+"""Shared infrastructure: the LLM client, language-detection, and auth/security."""
 
-from . import language, llm
+from . import language, llm, security
 
-__all__ = ["language", "llm"]
+__all__ = ["language", "llm", "security"]

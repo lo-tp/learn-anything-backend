@@ -22,6 +22,10 @@ from collections.abc import Iterator
 
 # Must happen before any ``db`` import in this test package.
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+# Pinned (not setdefault) before any module import: a developer's local
+# ``.env`` (loaded via ``load_dotenv()`` in ``llm.py`` during test imports)
+# may carry a real ``JWT_SECRET``, which must not change auth test behavior.
+os.environ["JWT_SECRET"] = "test-secret"
 
 import pytest
 from fastapi import FastAPI
@@ -58,9 +62,10 @@ def db(db_engine):
 @pytest.fixture()
 def client(db_engine):
     """A FastAPI TestClient with ``get_db`` pointed at the test engine."""
-    from routers import clarify, plan, probe, sessions, slides
+    from routers import auth, clarify, plan, probe, sessions, slides
 
     app = FastAPI()
+    app.include_router(auth.router)
     app.include_router(sessions.router)
     app.include_router(clarify.router)
     app.include_router(probe.router)

@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
-from routers import clarify, plan, probe, sessions, slides
+from routers import auth, clarify, plan, probe, sessions, slides
 
 # Log level is controlled by LOG_LEVEL in .env (default: INFO).
 # Set LOG_LEVEL=DEBUG for per-step / per-node material generation detail.
@@ -32,6 +32,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router)
 app.include_router(sessions.router)
 app.include_router(clarify.router)
 app.include_router(probe.router)

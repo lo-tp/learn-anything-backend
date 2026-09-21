@@ -11,6 +11,7 @@ from .models import (
     SlideContent,
     StepMaterial,
     StepProgress,
+    User,
     engine,
     get_db,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "SlideContent",
     "StepMaterial",
     "StepProgress",
+    "User",
     "engine",
     "get_db",
 ]
