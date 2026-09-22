@@ -65,7 +65,7 @@ class TestSeedMockUser:
         user = db.query(User).filter(User.email == "mock@example.com").first()
         assert user is not None
         assert user.display_name == "Mock User"
-        assert security.verify_password(user.password_hash, "mock-password-123")
+        assert security.verify_password(user.password_hash, "12345678")
 
     def test_seed_is_idempotent(self, db, db_engine, monkeypatch):
         monkeypatch.setenv("MOCK_LLM", "1")

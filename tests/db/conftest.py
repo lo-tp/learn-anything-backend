@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+os.environ.setdefault("JWT_SECRET", "test-secret")
 
 import pytest
 from sqlalchemy import create_engine
