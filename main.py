@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
+from core.mock_llm import is_mock_mode
 from routers import auth, clarify, plan, probe, review, sessions, slides
 
 # Log level is controlled by LOG_LEVEL in .env (default: INFO).
@@ -17,6 +18,12 @@ logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+
+if is_mock_mode():
+    logging.getLogger(__name__).warning(
+        "RUNNING IN MOCK MODE: pre-material LLM mocked, slide generation "
+        "disabled, in-memory DB."
+    )
 
 PORT = int(os.getenv("PORT", "8000"))
 

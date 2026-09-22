@@ -9,10 +9,9 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
 
 from core.language import DEFAULT_LANGUAGE, detect_language, has_meaningful_signal
-from core.llm import llm
 from core.security import require_auth
 from db import Phase, Session, get_db
-from graphs import clarify_graph, graph_config
+from graphs import clarify_graph, graph_config, pre_material_llm
 from graphs.clarify import ClarifyState
 
 router = APIRouter(tags=["clarify"], dependencies=[Depends(require_auth)])
@@ -90,7 +89,7 @@ def create_session(body: GoalIn, db: DBSession = Depends(get_db)) -> ClarifyResu
     """Create a session and make the first Clarify graph call."""
     # Detect the learner's language from the goal and store it on the session;
     # every reply and the generated materials are produced in this language.
-    language = detect_language(body.goal, llm)
+    language = detect_language(body.goal, pre_material_llm)
     session = Session(
         session_id=uuid.uuid4().hex,
         goal=body.goal,
@@ -126,7 +125,7 @@ def clarify_session(
     # Follow the learner's language if their answer carries enough signal to
     # detect it reliably (a one-word answer must not flip the session language).
     if has_meaningful_signal(body.answer):
-        session.language = detect_language(body.answer, llm)
+        session.language = detect_language(body.answer, pre_material_llm)
         db.commit()
     result = clarify_graph.invoke(
         Command(

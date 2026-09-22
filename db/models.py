@@ -13,6 +13,7 @@ from sqlalchemy import (
     JSON,
     Boolean,
     DateTime,
+    Engine,
     Float,
     ForeignKey,
     Integer,
@@ -30,24 +31,44 @@ from sqlalchemy.orm import (
     sessionmaker,
 )
 from sqlalchemy.orm import Session as DBSession
+from sqlalchemy.pool import StaticPool
 
-# --- Engine (PostgreSQL) ---
+from core.mock_llm import is_mock_mode
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError(
-        "DATABASE_URL is not set. "
-        "Expected e.g. postgresql+psycopg://user:pass@host:5432/db"
-    )
+# --- Engine (PostgreSQL, or in-memory SQLite in mock mode) ---
 
-engine = create_engine(DATABASE_URL)
+
+def make_engine() -> Engine:
+    """Build the application engine.
+
+    Mock mode (#118): ``DATABASE_URL`` is ignored — the engine is in-memory
+    SQLite with one shared connection (``StaticPool``), same as the test
+    suite, and every table is created at startup. Data is wiped on restart.
+
+    Otherwise: PostgreSQL from ``DATABASE_URL`` (fail fast if unset).
+    """
+    if is_mock_mode():
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        # Tables are created at startup — no migrations in mock mode.
+        # (Called after every model below is defined.)
+        Base.metadata.create_all(engine)
+        return engine
+
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError(
+            "DATABASE_URL is not set. "
+            "Expected e.g. postgresql+psycopg://user:pass@host:5432/db"
+        )
+    return create_engine(database_url)
 
 
 class Base(DeclarativeBase):
     pass
-
-
-SessionFactory = sessionmaker(bind=engine)
 
 
 # --- Enum ---
@@ -197,9 +218,7 @@ class StepMaterial(Base):
     # questions/summary, partial slides) and is flipped to True when the step
     # completes. The driver skips only complete rows, so a provisional row is
     # re-run (cleaned up) on a fresh generation, not skipped.
-    is_complete: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, default=False
-    )
+    is_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     session: Mapped[Session] = relationship(back_populates="materials")
 
@@ -312,7 +331,10 @@ class ReviewCard(Base):
     __tablename__ = "review_cards"
     __table_args__ = (
         UniqueConstraint(
-            "user_id", "source", "session_id", "source_question_id",
+            "user_id",
+            "source",
+            "session_id",
+            "source_question_id",
             name="uq_review_card_identity",
         ),
     )
@@ -343,6 +365,13 @@ class ReviewCard(Base):
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
     )
+
+
+# --- Engine + session factory (built after every model is defined, so the
+# mock-mode create_all sees the full metadata) ---
+
+engine = make_engine()
+SessionFactory = sessionmaker(bind=engine)
 
 
 # --- FastAPI dependency ---

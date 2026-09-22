@@ -28,7 +28,7 @@ from core.language import (
     has_meaningful_signal,
     localize_status,
 )
-from core.llm import llm
+from core.mock_llm import is_mock_mode
 from core.security import require_auth
 from db import (
     FailedSlide,
@@ -41,7 +41,13 @@ from db import (
     StepMaterial,
     get_db,
 )
-from graphs import checkpointer, graph_config, material_graph, plan_graph
+from graphs import (
+    checkpointer,
+    graph_config,
+    material_graph,
+    plan_graph,
+    pre_material_llm,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -143,12 +149,17 @@ def generate_materials(session_id: str) -> None:
     then). The DB is the resume point: a ``StepMaterial`` row for a step means
     it is done — skip it (but keep its summary in the accumulated context).
 
+    Defensive guard (#118): mock mode never schedules this — a no-op even if
+    it is somehow invoked.
+
     The per-slide retry loop lives inside the material graph; the driver
     streams the graph per step and persists each slide to the DB immediately
     after it compiles, so a crash mid-step loses at most the in-flight
     slide. Orphan SlideContent/FailedSlide rows from a previous partial run
     are cleaned up before re-invoking.
     """
+    if is_mock_mode():
+        return
     with _session_lock(session_id):
         started = time.monotonic()
         db = SessionFactory()
@@ -174,7 +185,8 @@ def generate_materials(session_id: str) -> None:
             language = session.language or DEFAULT_LANGUAGE
             logger.info(
                 "Material generation started: session=%s, steps=%d",
-                session_id, len(steps),
+                session_id,
+                len(steps),
             )
             summaries: list[dict] = []
             for step in steps:  # already in dependency order
@@ -196,7 +208,8 @@ def generate_materials(session_id: str) -> None:
                 logger.debug(
                     "Material generation: generating step %s "
                     "(established concepts: %d)",
-                    step["id"], len(summaries),
+                    step["id"],
+                    len(summaries),
                 )
                 # Clean up from a previous partial run of this step: a
                 # provisional StepMaterial row (crashed before completing)
@@ -205,10 +218,12 @@ def generate_materials(session_id: str) -> None:
                 if existing is not None:
                     db.delete(existing)
                 db.query(SlideContent).filter_by(
-                    session_id=session_id, step_id=step["id"],
+                    session_id=session_id,
+                    step_id=step["id"],
                 ).delete()
                 db.query(FailedSlide).filter_by(
-                    session_id=session_id, step_id=step["id"],
+                    session_id=session_id,
+                    step_id=step["id"],
                 ).delete()
                 db.commit()
 
@@ -285,9 +300,7 @@ def generate_materials(session_id: str) -> None:
                     # fresh list so SQLAlchemy's JSON column detects the change).
                     provisional.slides = provisional.slides + [slide_id]
                     db.commit()
-                    state = material_graph.invoke(
-                        Command(resume=True), config
-                    )
+                    state = material_graph.invoke(Command(resume=True), config)
                 result = state
 
                 # Finalize the provisional row and persist failed attempts and
@@ -331,8 +344,11 @@ def generate_materials(session_id: str) -> None:
                         session_id=session_id,
                         graph="material",
                         stage="generate_step",
-                        context={"step_id": step["id"], "slide_index": None,
-                                 "attempt": None},
+                        context={
+                            "step_id": step["id"],
+                            "slide_index": None,
+                            "attempt": None,
+                        },
                         duration_seconds=step_total,
                     )
                 )
@@ -352,13 +368,15 @@ def generate_materials(session_id: str) -> None:
             db.commit()
             logger.info(
                 "Material generation complete: session=%s, %.1fs total",
-                session_id, time.monotonic() - started,
+                session_id,
+                time.monotonic() - started,
             )
         except Exception:
             db.rollback()
             logger.exception(
                 "Material generation failed for session %s after %.1fs",
-                session_id, time.monotonic() - started,
+                session_id,
+                time.monotonic() - started,
             )
             try:
                 # Re-fetch: the rollback expired the objects loaded above.
@@ -420,9 +438,7 @@ def validate_plan(plan: dict) -> None:
     """Validate a rendered plan: non-empty steps, valid dep IDs, acyclic."""
     steps = plan.get("steps", [])
     if not steps:
-        raise HTTPException(
-            status_code=500, detail="Generated plan failed validation"
-        )
+        raise HTTPException(status_code=500, detail="Generated plan failed validation")
 
     ids = {s["id"] for s in steps}
     for s in steps:
@@ -451,9 +467,7 @@ def validate_plan(plan: dict) -> None:
                 queue.append(neighbor)
 
     if visited != len(ids):
-        raise HTTPException(
-            status_code=500, detail="Generated plan failed validation"
-        )
+        raise HTTPException(status_code=500, detail="Generated plan failed validation")
 
 
 def _persist_plan(
@@ -492,9 +506,7 @@ def _persist_plan(
     "/sessions/{session_id}/plan/generate",
     response_model=PlanOut,
 )
-def generate_plan(
-    session_id: str, db: DBSession = Depends(get_db)
-) -> PlanOut:
+def generate_plan(session_id: str, db: DBSession = Depends(get_db)) -> PlanOut:
     """Trigger plan generation."""
     session = _get_session_or_404(db, session_id)
     if session.phase == Phase.REVIEWING.value:
@@ -525,9 +537,7 @@ def generate_plan(
         )
     except Exception:  # noqa: BLE001 — catch all to clean up thread
         _cleanup_thread(session_id)
-        raise HTTPException(
-            status_code=500, detail="Plan generation failed"
-        )
+        raise HTTPException(status_code=500, detail="Plan generation failed")
 
     if "__interrupt__" not in result:
         _cleanup_thread(session_id)
@@ -581,7 +591,7 @@ def adjust_plan(
 
     # Follow the learner's language if the adjustment carries enough signal.
     if has_meaningful_signal(body.adjustment):
-        session.language = detect_language(body.adjustment, llm)
+        session.language = detect_language(body.adjustment, pre_material_llm)
         db.commit()
     try:
         result = plan_graph.invoke(
@@ -593,9 +603,7 @@ def adjust_plan(
         )
     except Exception:  # noqa: BLE001 — catch all to clean up thread
         _cleanup_thread(session_id)
-        raise HTTPException(
-            status_code=500, detail="Plan adjustment failed"
-        )
+        raise HTTPException(status_code=500, detail="Plan adjustment failed")
 
     if "__interrupt__" not in result:
         _cleanup_thread(session_id)
@@ -618,7 +626,11 @@ def adjust_plan(
 
     existing = session.plan
     new_version = existing.version + 1 if existing else 1
-    new_adjustments = list(existing.adjustments) + [body.adjustment] if existing else [body.adjustment]
+    new_adjustments = (
+        list(existing.adjustments) + [body.adjustment]
+        if existing
+        else [body.adjustment]
+    )
     _persist_plan(db, session, plan, version=new_version, adjustments=new_adjustments)
     db.commit()
 
@@ -659,9 +671,7 @@ def approve_plan(
         )
     except Exception:  # noqa: BLE001 — catch all to clean up thread
         _cleanup_thread(session_id)
-        raise HTTPException(
-            status_code=500, detail="Plan approval failed"
-        )
+        raise HTTPException(status_code=500, detail="Plan approval failed")
 
     plan = result.get("current_plan")
     if plan is None:
@@ -673,9 +683,21 @@ def approve_plan(
     existing = session.plan
     if existing is not None:
         _persist_plan(
-            db, session, plan, version=existing.version,
+            db,
+            session,
+            plan,
+            version=existing.version,
             adjustments=existing.adjustments,
         )
+
+    if is_mock_mode():
+        # #118: mock mode never advances into slide generation — the session
+        # stays in REVIEWING and generate_materials is not scheduled.
+        return ApproveOut(
+            phase=Phase.REVIEWING,
+            message="Plan approved. Slide generation is disabled in mock mode.",
+        )
+
     session.phase = Phase.GENERATING.value
     db.commit()
 
@@ -687,7 +709,7 @@ def approve_plan(
         # The confirmation is a user-facing reply, so it is in the learner's
         # language (falls back to the English text if translation fails).
         message=localize_status(
-            llm,
+            pre_material_llm,
             session.language or DEFAULT_LANGUAGE,
             "Plan approved. Material generation started in the background.",
         ),
@@ -709,6 +731,12 @@ def dev_regenerate(
     Requires the session to already have a plan and boundary_map
     (i.e. it has passed the planning phase). Skips all upstream phases.
     """
+    # #118: dev regeneration is refused in mock mode (slide generation is
+    # disabled there).
+    if is_mock_mode():
+        raise HTTPException(
+            status_code=400, detail="Dev regeneration is disabled in mock mode."
+        )
     if os.getenv("DEV_MODE") != "1":
         raise HTTPException(status_code=404, detail="Not found")
 
@@ -751,18 +779,14 @@ def dev_regenerate(
     "/sessions/{session_id}/materials",
     response_model=MaterialsOut,
 )
-def get_materials(
-    session_id: str, db: DBSession = Depends(get_db)
-) -> MaterialsOut:
+def get_materials(session_id: str, db: DBSession = Depends(get_db)) -> MaterialsOut:
     """Poll material generation progress with full content."""
     session = _get_session_or_404(db, session_id)
 
     try:
         phase = Phase(session.phase)
     except ValueError:
-        logger.error(
-            "Session %s has unknown phase %r", session_id, session.phase
-        )
+        logger.error("Session %s has unknown phase %r", session_id, session.phase)
         raise HTTPException(
             status_code=500,
             detail=f"Session {session_id} has unknown phase {session.phase!r}",
@@ -783,7 +807,11 @@ def get_materials(
             step_id=m.step_id,
             summary=SummaryOut(**m.summary),
             items=[
-                *[SlideItem(type="slide", slide_id=sid) for sid in m.slides if sid not in placeholder_ids],
+                *[
+                    SlideItem(type="slide", slide_id=sid)
+                    for sid in m.slides
+                    if sid not in placeholder_ids
+                ],
                 *[QuestionItem(type="question", **q) for q in m.questions],
             ],
         )

@@ -16,6 +16,7 @@ from .models import (
     User,
     engine,
     get_db,
+    make_engine,
 )
 
 __all__ = [
@@ -36,4 +37,5 @@ __all__ = [
     "User",
     "engine",
     "get_db",
+    "make_engine",
 ]
