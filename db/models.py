@@ -31,7 +31,7 @@ from sqlalchemy.orm import (
     sessionmaker,
 )
 from sqlalchemy.orm import Session as DBSession
-from sqlalchemy.pool import StaticPool
+
 
 from core.mock_llm import is_mock_mode
 
@@ -41,17 +41,17 @@ from core.mock_llm import is_mock_mode
 def make_engine() -> Engine:
     """Build the application engine.
 
-    Mock mode (#118): ``DATABASE_URL`` is ignored — the engine is in-memory
-    SQLite with one shared connection (``StaticPool``), same as the test
-    suite, and every table is created at startup. Data is wiped on restart.
+    Mock mode (#118): ``DATABASE_URL`` is ignored — the engine is a
+    file-based SQLite DB (one per process, wiped on restart) so each
+    session gets its own connection and SQLite's built-in locking handles
+    concurrency safely.
 
     Otherwise: PostgreSQL from ``DATABASE_URL`` (fail fast if unset).
     """
     if is_mock_mode():
         engine = create_engine(
-            "sqlite://",
+            "sqlite:///mock.db",
             connect_args={"check_same_thread": False},
-            poolclass=StaticPool,
         )
         # Tables are created at startup — no migrations in mock mode.
         # (Called after every model below is defined.)
@@ -380,7 +380,7 @@ SessionFactory = sessionmaker(bind=engine)
 # Its password is an argon2 hash so it is a usable login (POST /auth/login).
 _MOCK_USER_EMAIL = "mock@example.com"
 _MOCK_USER_DISPLAY_NAME = "Mock User"
-_MOCK_USER_PASSWORD = "mock-password-123"
+_MOCK_USER_PASSWORD = "12345678"
 
 
 def seed_mock_user(engine: Engine | None = None) -> None:
