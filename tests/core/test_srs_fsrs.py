@@ -29,10 +29,10 @@ class TestFreshCard:
     def test_fresh_again_gives_shorter_step(self):
         """Fresh card with Again should give a shorter step than Good."""
         card = Card()
-        interval_again, due_again, _, _ = fsrs_apply(
+        interval_again, _, _, _ = fsrs_apply(
             card, Rating.Again, now=NOW, lapses=0
         )
-        interval_good, due_good, _, _ = fsrs_apply(
+        interval_good, _, _, _ = fsrs_apply(
             Card(), Rating.Good, now=NOW, lapses=0
         )
         assert interval_again < interval_good
@@ -129,7 +129,7 @@ class TestAgainLapses:
 class TestDueDate:
     def test_due_date_is_after_now(self):
         card = Card()
-        interval_days, new_due, _, _ = fsrs_apply(card, Rating.Good, now=NOW, lapses=0)
+        _, new_due, _, _ = fsrs_apply(card, Rating.Good, now=NOW, lapses=0)
         assert new_due > NOW
 
     def test_due_date_reflects_interval(self):
@@ -155,6 +155,6 @@ class TestDueDate:
             last_review=NOW - timedelta(days=1),
             step=None,
         )
-        interval_days, new_due, _, _ = fsrs_apply(card, Rating.Good, now=NOW, lapses=0)
+        interval_days, _, _, _ = fsrs_apply(card, Rating.Good, now=NOW, lapses=0)
         # stability 10, desired retention 0.9 -> interval ~21 days
         assert interval_days > 10
