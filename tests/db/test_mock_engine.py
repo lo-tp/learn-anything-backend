@@ -52,3 +52,28 @@ class TestMakeEngineMockMode:
 
         with pytest.raises(RuntimeError):
             make_engine()
+
+
+class TestSeedMockUser:
+    def test_seeds_fixed_user_with_valid_password(self, db, db_engine, monkeypatch):
+        monkeypatch.setenv("MOCK_LLM", "1")
+        from core import security
+        from db import User, seed_mock_user
+
+        seed_mock_user(engine=db_engine)
+
+        user = db.query(User).filter(User.email == "mock@example.com").first()
+        assert user is not None
+        assert user.display_name == "Mock User"
+        assert security.verify_password(user.password_hash, "mock-password-123")
+
+    def test_seed_is_idempotent(self, db, db_engine, monkeypatch):
+        monkeypatch.setenv("MOCK_LLM", "1")
+        from db import User, seed_mock_user
+
+        seed_mock_user(engine=db_engine)
+        seed_mock_user(engine=db_engine)
+
+        assert (
+            db.query(User).filter(User.email == "mock@example.com").count() == 1
+        )

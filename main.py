@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 load_dotenv()
 
 from core.mock_llm import is_mock_mode
+from db import seed_mock_user
 from routers import auth, clarify, plan, probe, review, sessions, slides
 
 # Log level is controlled by LOG_LEVEL in .env (default: INFO).
@@ -22,8 +23,11 @@ logging.basicConfig(
 if is_mock_mode():
     logging.getLogger(__name__).warning(
         "RUNNING IN MOCK MODE: pre-material LLM mocked, slide generation "
-        "disabled, in-memory DB."
+        "disabled, in-memory DB (seeded with a fixed fake user)."
     )
+    # Feed a fixed fake account into the RAM DB's users table before the app
+    # starts serving, so a known login is always available in mock mode.
+    seed_mock_user()
 
 PORT = int(os.getenv("PORT", "8000"))
 

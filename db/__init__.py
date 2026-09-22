@@ -17,6 +17,7 @@ from .models import (
     engine,
     get_db,
     make_engine,
+    seed_mock_user,
 )
 
 __all__ = [
@@ -38,4 +39,5 @@ __all__ = [
     "engine",
     "get_db",
     "make_engine",
+    "seed_mock_user",
 ]

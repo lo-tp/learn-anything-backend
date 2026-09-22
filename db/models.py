@@ -374,6 +374,47 @@ engine = make_engine()
 SessionFactory = sessionmaker(bind=engine)
 
 
+# --- Mock-mode seed (#118): a fixed fake account in the RAM DB ---
+
+# The single fixed account the mock-mode RAM DB is seeded with at startup.
+# Its password is an argon2 hash so it is a usable login (POST /auth/login).
+_MOCK_USER_EMAIL = "mock@example.com"
+_MOCK_USER_DISPLAY_NAME = "Mock User"
+_MOCK_USER_PASSWORD = "mock-password-123"
+
+
+def seed_mock_user(engine: Engine | None = None) -> None:
+    """Ensure the fixed fake user exists in the mock-mode RAM DB.
+
+    Called from ``main`` at startup when ``MOCK_LLM`` is set, so the in-memory
+    ``users`` table always starts with one known account (id: mock@example.com /
+    password: mock-password-123). Idempotent: a no-op when the user already
+    exists, so it is safe to call on every start.
+
+    ``engine`` defaults to the module engine; a test may pass its own engine.
+    """
+    # Imported lazily: ``core.security`` imports ``db`` at module level, so a
+    # top-level import here would create a ``db.models <-> core.security``
+    # cycle at engine-creation time. By the time this runs (post-import, from
+    # ``main``) the cycle is gone.
+    from core import security
+
+    db = sessionmaker(bind=engine)() if engine is not None else SessionFactory()
+    try:
+        if db.query(User).filter(User.email == _MOCK_USER_EMAIL).first():
+            return
+        db.add(
+            User(
+                email=_MOCK_USER_EMAIL,
+                display_name=_MOCK_USER_DISPLAY_NAME,
+                password_hash=security.hash_password(_MOCK_USER_PASSWORD),
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
 # --- FastAPI dependency ---
 
 
