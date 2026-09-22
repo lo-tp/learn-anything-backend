@@ -1,4 +1,4 @@
-"""SRS (spaced repetition) wrapper over the ``supermemo2`` package.
+"""SRS (spaced repetition) wrapper over the ``supermemo2`` and ``fsrs`` packages.
 
 Pure, no I/O — unit-testable in isolation (see ``tests/core/test_srs.py``).
 
@@ -7,12 +7,16 @@ a wrong answer). This module tracks ``lapses`` (total wrong answers, never
 reset) instead, so lapses are computed locally, not from the package.
 Retirement (``interval >= RETIRE_DAYS``) is also our extension, not in the
 package.
+
+The FSRS wrapper (``fsrs_apply``) similarly tracks lapses locally — a lapse
+is counted when a card in Review state is rated Again.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from fsrs import Card, Rating, Scheduler, State
 from supermemo2 import first_review, review
 
 RETIRE_DAYS = 21
@@ -48,3 +52,27 @@ def sm2_apply(
 def next_due_at(now: datetime | None = None) -> datetime:
     """One day after ``now`` (defaults to the current time)."""
     return (now or datetime.now(UTC)) + timedelta(days=1)
+
+
+_fsrs_scheduler = Scheduler(enable_fuzzing=False)
+
+
+def fsrs_apply(
+    card: Card,
+    rating: Rating,
+    now: datetime,
+    lapses: int = 0,
+) -> tuple[float, datetime, int, Card]:
+    """Apply one FSRS review and return ``(new_interval_days, new_due, new_lapses, new_card)``.
+
+    - ``new_interval_days`` is the fractional days until the card is due.
+    - ``new_due`` is the absolute due datetime.
+    - ``new_lapses`` is the local lapse count (incremented when a card in
+      Review state is rated Again).
+    - ``new_card`` is the updated FSRS card state for the next review.
+    """
+    is_lapse = card.state == State.Review and rating == Rating.Again
+    new_lapses = lapses + (1 if is_lapse else 0)
+    new_card, _log = _fsrs_scheduler.review_card(card, rating, review_datetime=now)
+    interval_days = (new_card.due - now).total_seconds() / 86_400
+    return interval_days, new_card.due, new_lapses, new_card

@@ -17,6 +17,7 @@ dependencies = [
     "alembic>=1.14",
     "langid>=1.1.6",
     "supermemo2>=3.0.1",
+    "fsrs>=6.3.2",
 ]
 
 [tool.ruff.lint.flake8-bugbear]
