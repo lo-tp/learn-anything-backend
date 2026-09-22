@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import uuid
-from pathlib import Path
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from enum import Enum
@@ -32,7 +31,7 @@ from sqlalchemy.orm import (
     sessionmaker,
 )
 from sqlalchemy.orm import Session as DBSession
-
+from sqlalchemy.pool import QueuePool
 
 from core.mock_llm import is_mock_mode
 
@@ -42,19 +41,20 @@ from core.mock_llm import is_mock_mode
 def make_engine() -> Engine:
     """Build the application engine.
 
-    Mock mode (#118): ``DATABASE_URL`` is ignored — the engine is a
-    file-based SQLite DB (one per process, wiped on restart) so each
-    session gets its own connection and SQLite's built-in locking handles
-    concurrency safely.
+    Mock mode (#118): ``DATABASE_URL`` is ignored — the engine is an
+    in-memory SQLite DB with a single-connection QueuePool. The pool
+    serialises access so concurrent threads never share the same
+    ``sqlite3.Connection`` (avoids ``SQLITE_MISUSE``). Data is wiped
+    on restart.
 
     Otherwise: PostgreSQL from ``DATABASE_URL`` (fail fast if unset).
     """
     if is_mock_mode():
-        # Wipe on start so every launch begins with a clean DB.
-        Path("mock.db").unlink(missing_ok=True)
         engine = create_engine(
-            "sqlite:///mock.db",
+            "sqlite://",
             connect_args={"check_same_thread": False},
+            poolclass=QueuePool,
+            pool_size=1,
         )
         # Tables are created at startup — no migrations in mock mode.
         # (Called after every model below is defined.)
