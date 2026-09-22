@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from pathlib import Path
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from enum import Enum
@@ -49,6 +50,8 @@ def make_engine() -> Engine:
     Otherwise: PostgreSQL from ``DATABASE_URL`` (fail fast if unset).
     """
     if is_mock_mode():
+        # Wipe on start so every launch begins with a clean DB.
+        Path("mock.db").unlink(missing_ok=True)
         engine = create_engine(
             "sqlite:///mock.db",
             connect_args={"check_same_thread": False},
