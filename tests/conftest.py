@@ -12,5 +12,6 @@ from __future__ import annotations
 
 import os
 
+os.environ["MOCK_LLM"] = "false"
 os.environ["MAX_PROBE_QUESTIONS"] = "10"
 os.environ["PROBE_BATCH_SIZE"] = "3"

@@ -17,17 +17,12 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerificationError
 from fastapi import Depends, HTTPException, Request
 
-from core.mock_llm import is_mock_mode
 from db import get_db
 
 if TYPE_CHECKING:
     from db import User
 
 _JWT_ALGORITHM = "HS256"
-
-# Fixed placeholder secret for mock mode (#118): there are no users in the
-# RAM DB, so the token code path just needs a stable value to sign with.
-_MOCK_JWT_SECRET = "mock-jwt-secret"
 
 # 30-day sign-in state.
 TOKEN_TTL = timedelta(days=30)
@@ -42,13 +37,9 @@ def _jwt_secret() -> str:
     Read per call so a late env change (tests toggling it, a reloaded
     ``.env``) is honoured; called once at import to fail fast at startup
     if it is absent, mirroring ``DATABASE_URL`` in ``db.models``.
-    In mock mode (#118) a missing secret does not fail fast — a fixed
-    placeholder is used (mock mode has no users).
     """
     secret = os.getenv("JWT_SECRET")
     if not secret:
-        if is_mock_mode():
-            return _MOCK_JWT_SECRET
         raise RuntimeError(
             "JWT_SECRET is not set. "
             "Expected the shared secret used to sign/verify the sign-in token."
@@ -120,10 +111,8 @@ def require_auth(request: Request) -> None:
     - Missing or invalid cookie → 401.
     - When the gate passes, no per-user scoping is applied: sessions
       remain shared across all users.
-    - In mock mode (#118) the gate is bypassed — there are no users in the
-      RAM DB.
     """
-    if is_mock_mode() or _is_dev_mode():
+    if _is_dev_mode():
         return
     _decode_token(request)
 
@@ -141,12 +130,7 @@ def require_service(request: Request) -> None:
     opened by ``DEV_MODE`` — the slides route is reachable only through
     the ``X-Service-Token`` header, which is compared with
     ``hmac.compare_digest`` (timing-safe).
-
-    In mock mode (#118) the gate is bypassed (the slides route is
-    sandbox-only and never invoked in mock mode).
     """
-    if is_mock_mode():
-        return
     expected = os.getenv("SANDBOX_SERVICE_TOKEN", "")
     presented = request.headers.get(SERVICE_TOKEN_HEADER, "")
     if not expected or not presented:

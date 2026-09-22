@@ -1,9 +1,6 @@
 """Tests for MOCK_LLM mode end-to-end behavior (#118).
 
 Acceptance criteria:
-- In mock mode the learner endpoints are reachable without a sign-in
-  cookie/token (no 401): require_auth and require_service are bypassed.
-- MOCK_LLM=1 alone starts without JWT_SECRET (no import-time fail-fast).
 - Approving the plan in mock mode does not advance the phase to
   GENERATING and does not schedule generate_materials; it returns a clear
   message that slide generation is disabled.
@@ -15,9 +12,6 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-import jwt
-
-from core.security import create_token
 from db import Phase, Plan, Session
 from routers.plan import generate_materials
 
@@ -37,41 +31,6 @@ def _valid_plan() -> dict:
             },
         ],
     }
-
-
-# --- Auth gates are bypassed in mock mode ---
-
-
-class TestMockAuthBypass:
-    def test_learner_endpoints_public_without_cookie(self, client, db, monkeypatch):
-        """DEV_MODE off, no cookie: gated endpoints are reachable in mock mode."""
-        monkeypatch.setenv("MOCK_LLM", "1")
-        monkeypatch.delenv("DEV_MODE", raising=False)
-
-        resp = client.get("/sessions")
-        assert resp.status_code == 200
-
-    def test_service_gate_bypassed(self, client, db, make_session, monkeypatch):
-        """No X-Service-Token and no SANDBOX_SERVICE_TOKEN: the gate is open
-        (the request reaches the handler and 404s on the missing slide)."""
-        monkeypatch.setenv("MOCK_LLM", "1")
-        monkeypatch.delenv("DEV_MODE", raising=False)
-        monkeypatch.delenv("SANDBOX_SERVICE_TOKEN", raising=False)
-        make_session(session_id="s1")
-
-        resp = client.get("/slides/nope_slide_1")
-        assert resp.status_code == 404  # gate bypassed, not 401
-
-
-class TestMockJwtNoFailFast:
-    def test_create_token_without_jwt_secret(self, monkeypatch):
-        monkeypatch.setenv("MOCK_LLM", "1")
-        monkeypatch.delenv("JWT_SECRET", raising=False)
-
-        token = create_token("mock@example.com")
-        # A decodable HS256 JWT (signed with the mock placeholder).
-        payload = jwt.decode(token, options={"verify_signature": False})
-        assert payload["sub"] == "mock@example.com"
 
 
 # --- Approving the plan never enters slide generation ---
