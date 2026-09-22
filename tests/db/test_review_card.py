@@ -1,4 +1,4 @@
-"""Unit tests for the ReviewCard model (issue #105).
+"""Unit tests for the ReviewCard model (issue #116).
 
 Exercises the ORM model against a real in-memory SQLite database via
 ``Base.metadata.create_all`` — this is the seam the model ticket owns; the
@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+from fsrs import Card, State
 from sqlalchemy.exc import IntegrityError
 
 from db import ReviewCard, ReviewSource, User
@@ -32,6 +33,12 @@ def _question() -> dict:
     }
 
 
+def _fresh_fsrs_state(now: datetime | None = None) -> dict:
+    now = now or datetime.now(UTC)
+    return dict(Card(due=now, last_review=now, state=State.Learning, step=0,
+                     stability=None, difficulty=None, card_id=0).to_dict())
+
+
 def test_review_source_values():
     assert ReviewSource.PROBE.value == "probe"
     assert ReviewSource.MATERIAL.value == "material"
@@ -46,11 +53,9 @@ def test_create_and_read_card(db):
         session_id="s1",
         step_id=None,
         question=_question(),
-        interval_days=0,
-        ease=2.5,
+        fsrs_state=_fresh_fsrs_state(),
         lapses=0,
         due_at=datetime.now(UTC),
-        is_retired=False,
     )
     db.add(card)
     db.commit()
@@ -63,10 +68,8 @@ def test_create_and_read_card(db):
     assert got.session_id == "s1"
     assert got.step_id is None
     assert got.question == _question()
-    assert got.interval_days == 0
-    assert got.ease == 2.5
     assert got.lapses == 0
-    assert got.is_retired is False
+    assert got.fsrs_state is not None
     assert got.created_at is not None
     assert got.updated_at is not None
 
@@ -81,14 +84,12 @@ def test_defaults_applied(db):
         session_id="s2",
         step_id="step_1",
         question=_question(),
+        fsrs_state=_fresh_fsrs_state(),
     )
     db.add(card)
     db.commit()
 
-    assert card.interval_days == 0
-    assert card.ease == 2.5
     assert card.lapses == 0
-    assert card.is_retired is False
     assert card.due_at is not None
     assert card.source == "material"
     assert card.step_id == "step_1"
@@ -103,6 +104,7 @@ def test_unique_identity_constraint(db):
         "session_id": "s1",
         "source_question_id": "q1",
         "question": _question(),
+        "fsrs_state": _fresh_fsrs_state(),
     }
     db.add(ReviewCard(**base))
     db.commit()

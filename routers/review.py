@@ -6,14 +6,16 @@ current user via ``security.get_current_user`` and scopes by ``user_id``.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
+from typing import Any, Literal, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fsrs import Card, Rating
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session as DBSession
 
 from core import security
-from core.srs import next_due_at, sm2_apply
+from core.srs import fsrs_apply
 from db import ReviewCard, User, get_db
 from services.review import count_due, get_due_cards, record_missed_question
 
@@ -53,28 +55,30 @@ class ReviewCardOut(BaseModel):
     session_id: str
     step_id: str | None = None
     due_at: datetime
-    interval_days: int
-    ease: float
     lapses: int
 
 
 class ReviewAnswerIn(BaseModel):
-    selected_index: int
+    rating: Literal["again", "hard", "good", "easy"]
 
 
 class ReviewAnswerOut(BaseModel):
-    was_correct: bool
     due_at: datetime
-    interval_days: int
-    ease: float
+    interval_days: float
     lapses: int
-    is_retired: bool
 
 
 class ReviewSummaryOut(BaseModel):
     due_count: int
-    total_active: int
-    total_retired: int
+    total_cards: int
+
+
+_RATING_MAP: dict[str, Rating] = {
+    "again": Rating.Again,
+    "hard": Rating.Hard,
+    "good": Rating.Good,
+    "easy": Rating.Easy,
+}
 
 
 def _card_out(card: ReviewCard) -> ReviewCardOut:
@@ -85,8 +89,6 @@ def _card_out(card: ReviewCard) -> ReviewCardOut:
         session_id=card.session_id,
         step_id=card.step_id,
         due_at=card.due_at,
-        interval_days=card.interval_days,
-        ease=card.ease,
         lapses=card.lapses,
     )
 
@@ -126,7 +128,7 @@ def due_cards(
     db: DBSession = Depends(get_db),
     limit: int = Query(default=20, ge=1, le=100),
 ) -> list[ReviewCardOut]:
-    """The learner's due, non-retired cards ordered by ``due_at``."""
+    """The learner's due cards ordered by ``due_at``."""
     return [_card_out(c) for c in get_due_cards(db, user.id, limit)]
 
 
@@ -137,29 +139,28 @@ def answer_card(
     user: User = Depends(security.get_current_user),
     db: DBSession = Depends(get_db),
 ) -> ReviewAnswerOut:
-    """Submit an answer: update the card's SRS state and return the result."""
+    """Submit a confidence rating: update the card's FSRS state and return
+    the new due date, derived interval, and lapse count."""
     card = db.get(ReviewCard, card_id)
     if card is None or card.user_id != user.id:
         raise HTTPException(status_code=404, detail="Card not found")
-    if not (0 <= body.selected_index < len(card.question["options"])):
-        raise HTTPException(status_code=422, detail="selected_index out of range")
-    was_correct = body.selected_index == card.question["correct_index"]
-    interval, ease, lapses, retired = sm2_apply(
-        card.interval_days, card.ease, card.lapses, was_correct
+
+    rating = _RATING_MAP[body.rating]
+    now = datetime.now(UTC)
+    fsrs_card = Card.from_dict(card.fsrs_state)  # type: ignore[arg-type]
+    interval_days, new_due, new_lapses, new_fsrs_card = fsrs_apply(
+        fsrs_card, rating, now=now, lapses=card.lapses
     )
-    card.interval_days = interval
-    card.ease = ease
-    card.lapses = lapses
-    card.is_retired = retired
-    card.due_at = next_due_at()
+
+    card.fsrs_state = cast(dict[str, Any], new_fsrs_card.to_dict())
+    card.lapses = new_lapses
+    card.due_at = new_due
     db.commit()
+
     return ReviewAnswerOut(
-        was_correct=was_correct,
         due_at=card.due_at,
-        interval_days=interval,
-        ease=ease,
-        lapses=lapses,
-        is_retired=retired,
+        interval_days=interval_days,
+        lapses=new_lapses,
     )
 
 
@@ -168,16 +169,7 @@ def summary(
     user: User = Depends(security.get_current_user),
     db: DBSession = Depends(get_db),
 ) -> ReviewSummaryOut:
-    """Lightweight due / active / retired counts for the top-bar badge."""
+    """Lightweight due / total counts for the top-bar badge."""
     due = count_due(db, user.id)
-    active = (
-        db.query(ReviewCard)
-        .filter(ReviewCard.user_id == user.id, ReviewCard.is_retired.is_(False))
-        .count()
-    )
-    retired = (
-        db.query(ReviewCard)
-        .filter(ReviewCard.user_id == user.id, ReviewCard.is_retired.is_(True))
-        .count()
-    )
-    return ReviewSummaryOut(due_count=due, total_active=active, total_retired=retired)
+    total = db.query(ReviewCard).filter(ReviewCard.user_id == user.id).count()
+    return ReviewSummaryOut(due_count=due, total_cards=total)

@@ -306,7 +306,7 @@ class ReviewCard(Base):
     """A durable, self-contained record of one question the learner got wrong.
 
     One card per unique ``(user_id, source, session_id, source_question_id)``.
-    Stores the full question snapshot plus SM-2 spaced-repetition state.
+    Stores the full question snapshot plus FSRS spaced-repetition state.
     """
 
     __tablename__ = "review_cards"
@@ -328,14 +328,13 @@ class ReviewCard(Base):
     step_id: Mapped[str | None] = mapped_column(String, nullable=True)  # material only
     # Self-contained question snapshot: {text, options, correct_index, explanation}.
     question: Mapped[dict[str, Any]] = mapped_column(JSON)
-    # SM-2 state.
-    interval_days: Mapped[int] = mapped_column(Integer, default=0)
-    ease: Mapped[float] = mapped_column(Float, default=2.5)
+    # FSRS state (serialized Card dict from fsrs.Card.to_dict()).
+    fsrs_state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Locally tracked lapse count (incremented on Again-in-Review).
     lapses: Mapped[int] = mapped_column(Integer, default=0)
     due_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
-    is_retired: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
