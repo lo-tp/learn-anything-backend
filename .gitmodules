@@ -1,0 +1,3 @@
+[submodule "prompts"]
+	path = prompts
+	url = git@github.com:lo-tp/learn-anything-prompts.git

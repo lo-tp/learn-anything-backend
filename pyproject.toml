@@ -43,3 +43,6 @@ show_missing = true
 
 [tool.pytest.ini_options]
 addopts = "--cov=graphs --cov=routers --cov-report=term-missing --cov-fail-under=95"
+markers = [
+    "real_prompts: asserts on real (private) prompt content; skipped if the prompts submodule is not checked out",
+]

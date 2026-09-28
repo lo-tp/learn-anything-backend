@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from unittest.mock import MagicMock, patch
 
 from graphs.plan.nodes import (
@@ -99,6 +100,7 @@ class TestDesignPlan:
         assert result["design_steps"][0]["title"] == "A"
         assert result["design_steps"][1]["depends_on"] == ["A"]
 
+    @pytest.mark.real_prompts
     def test_refinement_pass_uses_refine_system(self):
         llm = _make_llm()
         state = self._state(
@@ -113,6 +115,7 @@ class TestDesignPlan:
         # Refine system should be used
         assert "Refine the existing plan" in str(mock_invoke.call_args)
 
+    @pytest.mark.real_prompts
     def test_initial_pass_uses_initial_system(self):
         llm = _make_llm()
         with patch(

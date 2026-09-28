@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from itertools import pairwise
 from unittest.mock import MagicMock, patch
 
@@ -19,6 +20,7 @@ from graphs.material.sandbox import (
 )
 
 
+@pytest.mark.real_prompts
 class TestPlaceholderSlideJsx:
     def test_embeds_title(self):
         jsx = _placeholder_slide_jsx("My Slide")

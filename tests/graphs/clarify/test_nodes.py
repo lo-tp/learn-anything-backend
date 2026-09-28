@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from unittest.mock import MagicMock, patch
 
 from graphs.clarify.nodes import (
@@ -54,6 +55,7 @@ class TestAssessGoal:
         assert "narrowed_goal" not in result
         assert result["open_dimensions"] == ["which branch", "level"]
 
+    @pytest.mark.real_prompts
     def test_cap_forces_specific(self):
         llm = _make_llm()
         # Even if LLM says too_broad, at cap it should return narrowed_goal
