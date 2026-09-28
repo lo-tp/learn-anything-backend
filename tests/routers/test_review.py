@@ -2,7 +2,7 @@
 
 Against the real DB + a real ``User`` row (JWT cookie). Covers the
 confidence contract: capture, answer (again/hard/good/easy), due deck,
-summary, and re-miss reset.
+and re-miss reset.
 """
 
 from __future__ import annotations
@@ -295,25 +295,3 @@ class TestAnswerCard:
         )
         assert resp.status_code == 404
 
-
-# --- GET /review/summary ---
-
-
-class TestSummary:
-    def test_counts_due_and_total(self, client, db, user):
-        now = datetime.now(UTC)
-        _seed_card(db, user.id, qid="due", due_at=now - timedelta(days=1))
-        _seed_card(db, user.id, qid="pending",
-                   due_at=now + timedelta(days=1))
-
-        resp = client.get("/review/summary", cookies=_cookie(user))
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["due_count"] == 1
-        assert body["total_cards"] == 2
-        # No retired count.
-        assert "total_retired" not in body
-
-    def test_empty_deck_is_zero(self, client, db, user):
-        resp = client.get("/review/summary", cookies=_cookie(user))
-        assert resp.json() == {"due_count": 0, "total_cards": 0}

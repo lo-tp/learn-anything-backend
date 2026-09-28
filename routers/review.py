@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session as DBSession
 from core import security
 from core.srs import fsrs_apply
 from db import ReviewCard, User, get_db
-from services.review import count_due, get_due_cards, record_missed_question
+from services.review import get_due_cards, record_missed_question
 
 router = APIRouter(tags=["review"], dependencies=[Depends(security.get_current_user)])
 
@@ -66,11 +66,6 @@ class ReviewAnswerOut(BaseModel):
     due_at: datetime
     interval_days: float
     lapses: int
-
-
-class ReviewSummaryOut(BaseModel):
-    due_count: int
-    total_cards: int
 
 
 _RATING_MAP: dict[str, Rating] = {
@@ -163,13 +158,3 @@ def answer_card(
         lapses=new_lapses,
     )
 
-
-@router.get("/review/summary", response_model=ReviewSummaryOut)
-def summary(
-    user: User = Depends(security.get_current_user),
-    db: DBSession = Depends(get_db),
-) -> ReviewSummaryOut:
-    """Lightweight due / total counts for the top-bar badge."""
-    due = count_due(db, user.id)
-    total = db.query(ReviewCard).filter(ReviewCard.user_id == user.id).count()
-    return ReviewSummaryOut(due_count=due, total_cards=total)

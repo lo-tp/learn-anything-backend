@@ -96,15 +96,3 @@ def get_due_cards(
         .all()
     )
 
-
-def count_due(db: DBSession, user_id: int) -> int:
-    """Count the learner's due cards."""
-    now = datetime.now(UTC)
-    return (
-        db.query(ReviewCard)
-        .filter(
-            ReviewCard.user_id == user_id,
-            ReviewCard.due_at <= now,
-        )
-        .count()
-    )
