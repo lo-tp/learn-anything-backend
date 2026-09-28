@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 
 from core.prompts import (
     DETECT_LANGUAGE_SYSTEM,
-    language_instruction,
+    language_instruction,  # noqa: F401  (re-exported for graph nodes)
     localize_status_system,
 )
 

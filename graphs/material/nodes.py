@@ -17,10 +17,10 @@ from core.language import DEFAULT_LANGUAGE, language_instruction
 
 from ..common import structured_invoke, structured_invoke_messages, with_unknown_option
 from .prompts import (
+    _JSX_SYSTEM_PROMPT,
     PLAN_SLIDE_CONTENTS_SYSTEM,
     SUMMARIZE_STEP_SYSTEM,
     WRITE_QUESTIONS_SYSTEM,
-    _JSX_SYSTEM_PROMPT,
 )
 from .sandbox import (
     MAX_MATERIAL_ATTEMPTS,

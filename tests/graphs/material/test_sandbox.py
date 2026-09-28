@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import pytest
 from itertools import pairwise
 from unittest.mock import MagicMock, patch
 
 import httpx
+import pytest
 
 from graphs.material.sandbox import (
     MAX_MATERIAL_ATTEMPTS,
