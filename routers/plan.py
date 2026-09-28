@@ -29,7 +29,7 @@ from core.language import (
     localize_status,
 )
 from core.mock_llm import is_mock_mode
-from core.security import require_auth
+from core.security import is_dev_mode, require_auth
 from db import (
     FailedSlide,
     GraphStageTiming,
@@ -737,7 +737,7 @@ def dev_regenerate(
         raise HTTPException(
             status_code=400, detail="Dev regeneration is disabled in mock mode."
         )
-    if os.getenv("DEV_MODE") != "1":
+    if not is_dev_mode():
         raise HTTPException(status_code=404, detail="Not found")
 
     session = _get_session_or_404(db, session_id)

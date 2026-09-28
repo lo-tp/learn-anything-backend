@@ -583,6 +583,18 @@ class TestDevRegenerate:
         resp = client.post(f"/dev/sessions/{sid}/regenerate")
         assert resp.status_code == 409
 
+    def test_reachable_without_auth_when_dev_mode_is_true(
+        self, client, db, make_session, monkeypatch
+    ):
+        """DEV_MODE=true (the auth gate's dev-mode value) opens the endpoint:
+
+        no auth cookie is sent and the endpoint is not hidden behind a 404.
+        """
+        monkeypatch.setenv("DEV_MODE", "true")
+        sid = make_session(session_id="a", phase=Phase.GENERATING).session_id
+        resp = client.post(f"/dev/sessions/{sid}/regenerate")
+        assert resp.status_code == 409  # reached, not 401/404
+
     def test_success_wipes_materials_and_restarts(self, client, db, make_session,
                                                   monkeypatch):
         monkeypatch.setenv("DEV_MODE", "1")

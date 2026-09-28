@@ -87,8 +87,13 @@ def create_token(email: str) -> str:
 # --- Sign-in gate for learning-session endpoints (#89) ---
 
 
-def _is_dev_mode() -> bool:
-    """Read DEV_MODE per request (secure default: off)."""
+def is_dev_mode() -> bool:
+    """The shared DEV_MODE predicate (secure default: off).
+
+    Read per request so tests (and runtime toggles) take effect
+    immediately. Any endpoint that keys off dev mode must use this
+    helper so the flag has one meaning application-wide.
+    """
     return os.getenv("DEV_MODE") in ("true", "1")
 
 
@@ -112,7 +117,7 @@ def require_auth(request: Request) -> None:
     - When the gate passes, no per-user scoping is applied: sessions
       remain shared across all users.
     """
-    if _is_dev_mode():
+    if is_dev_mode():
         return
     _decode_token(request)
 
