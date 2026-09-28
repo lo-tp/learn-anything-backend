@@ -2,6 +2,7 @@
 name = "learn-anything-backend"
 version = "0.1.0"
 requires-python = ">=3.13"
+license = { text = "GPL-3.0-only" }
 dependencies = [
     "fastapi>=0.141.1",
     "python-dotenv>=1.2.3",
