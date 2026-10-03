@@ -126,6 +126,29 @@ class TestPlanSlideContents:
         }
         assert timing["duration_seconds"] >= 0
 
+    def test_plans_with_the_minimum_reasoning_effort(self):
+        """Slide planning is a slide-generation call: it binds minimal reasoning."""
+        from graphs.material.sandbox import SLIDE_REASONING_EFFORT
+
+        llm = _make_llm()
+        mock_out = SlideContentsOut(
+            slide_contents=[
+                SlideContentSpec(title="A", key_points=["k"], visual_hint="v"),
+                SlideContentSpec(title="B", key_points=["k"], visual_hint="v"),
+                SlideContentSpec(title="C", key_points=["k"], visual_hint="v"),
+            ]
+        )
+        with patch(
+            "graphs.material.nodes.structured_invoke", return_value=mock_out
+        ) as mock_invoke:
+            node = make_plan_slide_contents(llm)
+            node({"step": {"id": "s1"}, "language": "English"})
+
+        assert SLIDE_REASONING_EFFORT == "minimal"
+        assert mock_invoke.call_args.kwargs == {
+            "reasoning_effort": SLIDE_REASONING_EFFORT,
+        }
+
 
 # --- make_write_slide ---
 
@@ -218,6 +241,15 @@ class TestWriteSlide:
             assert param not in kwargs
         # ...and the result matches the shared helper exactly.
         assert kwargs == slide_sampling_bind_kwargs(1)
+
+    def test_writes_with_the_minimum_reasoning_effort(self):
+        """Every slide-writing attempt asks for the smallest reasoning budget."""
+        from graphs.material.sandbox import SLIDE_REASONING_EFFORT
+
+        for attempt_index in (0, 1, 2):
+            kwargs = self._kwargs_for_attempt([attempt_index])
+            assert kwargs["reasoning_effort"] == SLIDE_REASONING_EFFORT == "minimal"
+            assert "reasoning_effort" not in kwargs.get("extra_body", {})
 
     def _human_content(self, **state_overrides) -> str:
         llm = _make_llm()

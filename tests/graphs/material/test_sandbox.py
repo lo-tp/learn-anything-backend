@@ -11,6 +11,7 @@ import pytest
 from graphs.material.sandbox import (
     MAX_MATERIAL_ATTEMPTS,
     SLIDE_EXTRA_BODY_PARAMS,
+    SLIDE_REASONING_EFFORT,
     SLIDE_SAMPLING_PROFILES,
     _compile_slide,
     _placeholder_slide_jsx,
@@ -105,8 +106,30 @@ class TestSlideSamplingBindKwargs:
         kwargs = slide_sampling_bind_kwargs(1)
         profile = slide_sampling_for_attempt(1)
         top_level = set(kwargs) - {"extra_body"}
-        assert top_level | set(kwargs["extra_body"]) == set(profile)
+        # reasoning_effort is not a profile entry; the bind factory adds it to
+        # every slide-writing call (see test_reasoning_effort_is_minimal).
+        assert top_level | set(kwargs["extra_body"]) == set(profile) | {
+            "reasoning_effort"
+        }
         assert not (top_level & set(kwargs["extra_body"]))
+
+    def test_reasoning_effort_is_minimal_on_every_attempt(self):
+        """Slide generation always runs with the smallest reasoning budget."""
+        for attempt in range(1, len(SLIDE_SAMPLING_PROFILES) + 2):
+            kwargs = slide_sampling_bind_kwargs(attempt)
+            assert kwargs["reasoning_effort"] == SLIDE_REASONING_EFFORT == "minimal"
+
+    def test_reasoning_effort_stays_out_of_extra_body(self):
+        """Nesting it is the vLLM dialect; llama.cpp only reads the top level.
+
+        Measured against the project's llama.cpp backend: a top-level
+        `reasoning_effort: "minimal"` cut the completion to 4 tokens with no
+        reasoning, while `chat_template_kwargs: {"thinking": false}` was
+        ignored and the model kept thinking.
+        """
+        kwargs = slide_sampling_bind_kwargs(1)
+        assert "reasoning_effort" not in kwargs["extra_body"]
+        assert "reasoning_effort" in kwargs
 
     def test_tracks_attempt(self):
         # All profiles are identical, so every attempt binds the same

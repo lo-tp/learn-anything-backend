@@ -24,6 +24,7 @@ from .prompts import (
 )
 from .sandbox import (
     MAX_MATERIAL_ATTEMPTS,
+    SLIDE_REASONING_EFFORT,
     _compile_slide,
     _placeholder_slide_jsx,
     compile_error_for_feedback,
@@ -79,7 +80,12 @@ def make_plan_slide_contents(llm: BaseChatModel):
             "plan_slide_contents: step=%s, established_concepts=%d",
             step.get("id"), len(established),
         )
-        out = structured_invoke(llm, SlideContentsOut, system, "\n".join(parts))
+        out = structured_invoke(
+            llm, SlideContentsOut, system, "\n".join(parts),
+            # Slide generation runs at the minimum reasoning budget; see
+            # SLIDE_REASONING_EFFORT in sandbox.py for the measurement behind it.
+            reasoning_effort=SLIDE_REASONING_EFFORT,
+        )
         contents = [
             {
                 "title": s.title,

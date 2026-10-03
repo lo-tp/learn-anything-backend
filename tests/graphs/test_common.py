@@ -48,6 +48,28 @@ class TestStructuredInvoke:
             assert mock_fn.call_args[0][0] is llm
             assert mock_fn.call_args[0][1] is _DummySchema
 
+    def test_forwards_bind_kwargs(self):
+        """A per-call bind (e.g. reasoning_effort) must reach the invoker."""
+        llm = MagicMock()
+        mock_result = _DummySchema(value="x")
+        with patch(
+            "graphs.common.structured_invoke_messages", return_value=mock_result
+        ) as mock_fn:
+            structured_invoke(
+                llm, _DummySchema, "s", "h", reasoning_effort="minimal"
+            )
+            assert mock_fn.call_args.kwargs == {"reasoning_effort": "minimal"}
+
+    def test_no_bind_kwargs_by_default(self):
+        """Call sites that pass nothing must keep sending nothing."""
+        llm = MagicMock()
+        mock_result = _DummySchema(value="x")
+        with patch(
+            "graphs.common.structured_invoke_messages", return_value=mock_result
+        ) as mock_fn:
+            structured_invoke(llm, _DummySchema, "s", "h")
+            assert mock_fn.call_args.kwargs == {}
+
 
 # --- structured_invoke_messages ---
 

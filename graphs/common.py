@@ -12,11 +12,18 @@ from core.language import DEFAULT_LANGUAGE, localize_status
 
 
 def structured_invoke[Schema: BaseModel](
-    llm: BaseChatModel, schema: type[Schema], system: str, human: str
+    llm: BaseChatModel, schema: type[Schema], system: str, human: str,
+    **bind_kwargs: Any,
 ) -> Schema:
-    """Run the LLM with structured output and return a validated schema instance."""
+    """Run the LLM with structured output and return a validated schema instance.
+
+    ``bind_kwargs`` are forwarded to :func:`structured_invoke_messages` for
+    callers that build the messages inline (e.g. ``reasoning_effort="minimal"``
+    on a slide-generation call).
+    """
     return structured_invoke_messages(
-        llm, schema, [SystemMessage(content=system), HumanMessage(content=human)]
+        llm, schema, [SystemMessage(content=system), HumanMessage(content=human)],
+        **bind_kwargs,
     )
 
 

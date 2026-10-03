@@ -54,6 +54,22 @@ SLIDE_SAMPLING_PROFILES: tuple[dict[str, float], ...] = (
 )
 
 
+# --- Slide-generation reasoning budget ---
+#
+# Every slide-generation call (planning a step's slide contents, and each
+# write attempt) asks for the smallest reasoning budget. On this project's
+# llama.cpp backend `reasoning_effort` is honoured and maps onto the Qwen3
+# think switch: `minimal`/`none` do not think at all (a measured answer came
+# back in 4 completion tokens with no reasoning), while `low`/`medium`/`high`
+# do (~150-300 reasoning characters). `minimal` is also a valid OpenAI
+# reasoning effort, so the same value is correct if the backend is
+# api.openai.com.
+#
+# It lives next to the sampling profiles because `slide_sampling_bind_kwargs`
+# is the single place that assembles what a slide-writing call sends.
+SLIDE_REASONING_EFFORT: str = "minimal"
+
+
 def slide_sampling_for_attempt(attempt: int) -> dict[str, float]:
     """Sampling params for the given 1-based write attempt.
 
@@ -79,6 +95,9 @@ def slide_sampling_bind_kwargs(attempt: int) -> dict[str, Any]:
     Splits the flat profile into what ``ChatOpenAI`` accepts as top-level
     kwargs (``temperature``/``top_p``) and what must be forwarded to the
     request body via ``extra_body`` (``top_k``/``min_p``/``repeat_penalty``).
+    Adds ``reasoning_effort`` (SLIDE_REASONING_EFFORT) at the top level: it is
+    a standard OpenAI field, so nesting it under ``extra_body`` — the vLLM
+    ``chat_template_kwargs`` dialect — is ignored by llama.cpp.
     The result is ready to spread into the invoke call:
     ``structured_invoke_messages(llm, schema, msgs, **slide_sampling_bind_kwargs(n))``.
     """
@@ -87,6 +106,7 @@ def slide_sampling_bind_kwargs(attempt: int) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         k: v for k, v in profile.items() if k not in SLIDE_EXTRA_BODY_PARAMS
     }
+    kwargs["reasoning_effort"] = SLIDE_REASONING_EFFORT
     if extra_body:
         kwargs["extra_body"] = extra_body
     return kwargs
