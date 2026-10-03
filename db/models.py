@@ -47,6 +47,15 @@ def make_engine() -> Engine:
     ``sqlite3.Connection`` (avoids ``SQLITE_MISUSE``). Data is wiped
     on restart.
 
+    ``max_overflow=0`` is what makes that serialisation real: with the
+    default ``max_overflow=10``, a checkout taken while the pooled
+    connection is busy opens a *new* ``sqlite://`` database — and every
+    in-memory SQLite connection is its own, empty, table-less database.
+    That surfaced as ``OperationalError: no such table: sessions`` on
+    GET /sessions whenever another request was in flight. With no
+    overflow allowed, a second caller waits for the one real database
+    instead of getting an empty impostor.
+
     Otherwise: PostgreSQL from ``DATABASE_URL`` (fail fast if unset).
     """
     if is_mock_mode():
@@ -55,6 +64,7 @@ def make_engine() -> Engine:
             connect_args={"check_same_thread": False},
             poolclass=QueuePool,
             pool_size=1,
+            max_overflow=0,
         )
         # Tables are created at startup — no migrations in mock mode.
         # (Called after every model below is defined.)

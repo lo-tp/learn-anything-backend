@@ -6,8 +6,12 @@ Acceptance criteria:
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
-from sqlalchemy import inspect
+from sqlalchemy import inspect, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 
@@ -52,6 +56,46 @@ class TestMakeEngineMockMode:
 
         with pytest.raises(RuntimeError):
             make_engine()
+
+
+class TestMockEngineConcurrentCheckouts:
+    def test_second_concurrent_checkout_sees_the_same_database(self, monkeypatch):
+        """Regression (#118): an overflow checkout opened a *second, empty* RAM DB.
+
+        ``QueuePool(pool_size=1)`` leaves SQLAlchemy's default ``max_overflow=10``,
+        so a checkout taken while another holds the pooled connection opened a
+        brand-new ``sqlite://`` database — one with no tables at all:
+        ``OperationalError: no such table: sessions`` (seen on GET /sessions
+        while a concurrent request held the real connection).
+        """
+        from db.models import Session, make_engine
+
+        monkeypatch.setenv("MOCK_LLM", "1")
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        engine = make_engine()
+        try:
+            held = engine.connect()  # "request 1" holds the pooled connection
+            outcome: dict[str, object] = {}
+
+            def second_request() -> None:
+                try:
+                    other = engine.connect()
+                    other.execute(select(Session)).fetchall()
+                    other.close()
+                    outcome["ok"] = True
+                except OperationalError as exc:
+                    outcome["error"] = exc
+
+            thread = threading.Thread(target=second_request)
+            thread.start()
+            time.sleep(0.2)  # let it try to check out while the pool is busy
+            held.close()  # "request 1" finishes; the waiter may proceed
+            thread.join(10)
+
+            assert not thread.is_alive(), "second checkout never completed"
+            assert "ok" in outcome, f"second checkout failed: {outcome.get('error')}"
+        finally:
+            engine.dispose()
 
 
 class TestSeedMockUser:
