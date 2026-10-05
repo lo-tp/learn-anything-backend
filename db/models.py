@@ -37,6 +37,40 @@ from core.mock_llm import is_mock_mode
 
 # --- Engine (PostgreSQL, or in-memory SQLite in mock mode) ---
 
+# Hosts hand out Postgres URLs without a driver in the scheme, and both
+# spellings are seen in the wild (`postgresql://` and the older `postgres://`).
+_PG_SCHEMES = ("postgresql://", "postgres://")
+
+
+def psycopg_url(url: str) -> str:
+    """Rewrite a driver-less Postgres URL to the psycopg3 driver.
+
+    This project depends on ``psycopg`` (v3) only, but SQLAlchemy routes a
+    plain ``postgresql://`` URL to psycopg2, which is not installed. Rewriting
+    the scheme keeps a host-supplied ``DATABASE_URL`` (Render, Railway, …)
+    working without asking anyone to edit it by hand. Anything that already
+    names a driver, and every non-Postgres URL, is returned unchanged.
+    """
+    for scheme in _PG_SCHEMES:
+        if url.startswith(scheme):
+            return "postgresql+psycopg://" + url.removeprefix(scheme)
+    return url
+
+
+def database_url_from_env() -> str:
+    """The configured ``DATABASE_URL``, driver-normalised (fail fast if unset).
+
+    Used by both the application engine and ``alembic/env.py`` so a host's
+    connection string is interpreted the same way in both places.
+    """
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        raise RuntimeError(
+            "DATABASE_URL is not set. "
+            "Expected e.g. postgresql+psycopg://user:pass@host:5432/db"
+        )
+    return psycopg_url(url)
+
 
 def make_engine() -> Engine:
     """Build the application engine.
@@ -71,13 +105,7 @@ def make_engine() -> Engine:
         Base.metadata.create_all(engine)
         return engine
 
-    database_url = os.getenv("DATABASE_URL")
-    if not database_url:
-        raise RuntimeError(
-            "DATABASE_URL is not set. "
-            "Expected e.g. postgresql+psycopg://user:pass@host:5432/db"
-        )
-    return create_engine(database_url)
+    return create_engine(database_url_from_env())
 
 
 class Base(DeclarativeBase):

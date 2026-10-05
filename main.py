@@ -52,6 +52,17 @@ app.include_router(slides.router)
 app.include_router(review.router)
 
 
+@app.get("/health", include_in_schema=False)
+def health() -> dict[str, str]:
+    """Liveness probe for the platform health check (Render polls this).
+
+    Deliberately cheap and dependency-free: it answers as soon as the app can
+    serve a request, so a slow or unreachable Postgres shows up as request
+    errors in the logs rather than a restart loop.
+    """
+    return {"status": "ok"}
+
+
 if __name__ == "__main__":
     import uvicorn
 

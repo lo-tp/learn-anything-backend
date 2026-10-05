@@ -14,9 +14,11 @@ from .models import (
     StepMaterial,
     StepProgress,
     User,
+    database_url_from_env,
     engine,
     get_db,
     make_engine,
+    psycopg_url,
     seed_mock_user,
 )
 
@@ -36,8 +38,10 @@ __all__ = [
     "StepMaterial",
     "StepProgress",
     "User",
+    "database_url_from_env",
     "engine",
     "get_db",
     "make_engine",
+    "psycopg_url",
     "seed_mock_user",
 ]
