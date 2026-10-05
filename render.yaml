@@ -1,0 +1,67 @@
+# Render Blueprint for the Learn Anything backend (API only).
+# Reference: https://render.com/docs/blueprint-spec
+#
+# Scope: this FastAPI service and its Postgres database. The frontend and the
+# esbuild Sandbox are deployed separately; they only appear here as the URLs
+# and shared tokens this service needs to talk to them.
+#
+# Everything marked `sync: false` is a secret you fill in once in the
+# Dashboard (Blueprint → Edit / service → Environment).
+
+services:
+  - type: web
+    name: learn-anything-backend
+    runtime: python
+    # `free` sleeps after 15 min idle and the first request then pays a cold
+    # start (a slow trade for a service that runs multi-minute LLM graphs).
+    # Move to `starter` for an always-on instance.
+    plan: free
+    branch: main
+    autoDeploy: true
+    healthCheckPath: /health
+    # build.sh: private prompts → uv.lock install → alembic upgrade head.
+    # A preDeployCommand is not available on free plans, so migrations run here.
+    buildCommand: bash scripts/build.sh
+    startCommand: .venv/bin/uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      # Plain postgresql:// is rewritten to the psycopg3 driver on read.
+      - key: DATABASE_URL
+        fromDatabase:
+          name: learn-anything-db
+          property: connectionString
+      - key: PROMPTS_TOKEN
+        sync: false # read-only GitHub token for lo-tp/learn-anything-prompts
+      - key: JWT_SECRET
+        sync: false # must be identical to the value the frontend signs with
+      - key: SANDBOX_SERVICE_TOKEN
+        sync: false # must match the Sandbox service (internal /slides gate)
+      - key: SANDBOX_URL
+        sync: false # Sandbox base URL, e.g. https://learn-anything-sandbox.onrender.com
+      - key: FRONTEND_DOMAIN
+        sync: false # exact CORS origin of the frontend, e.g. https://learn-anything.app
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_BASE_URL
+        sync: false # OpenAI-compatible endpoint reachable from Render
+      - key: LLM_MODEL
+        sync: false
+      - key: MAX_PROBE_QUESTIONS
+        value: "10"
+      - key: MAX_MATERIAL_ATTEMPTS
+        value: "3"
+      - key: LOG_LEVEL
+        value: INFO
+      # Set to 1 to run without any LLM: pre-material phases are mocked, the
+      # DB is in-memory SQLite and DATABASE_URL is ignored. Useful as a pure
+      # platform smoke test; not a real deployment.
+      - key: MOCK_LLM
+        value: ""
+
+databases:
+  - name: learn-anything-db
+    databaseName: learn_anything
+    user: learn_anything
+    plan: free
+    # No ipAllowList entry: the database is reachable only from services in
+    # this account. Add your own CIDR if you want to run `make migrate`
+    # against it from a laptop.

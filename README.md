@@ -47,6 +47,12 @@ Copy `.env.example` to `.env` and adjust as needed:
 | `PORT` | API server port | `8000` |
 | `FRONTEND_DOMAIN` | Allowed CORS origin | `http://localhost:3000` |
 | `SANDBOX_URL` | Esbuild sandbox URL for slide compilation | `http://localhost:8080` |
+| `SANDBOX_SERVICE_TOKEN` | Shared token for the internal `/slides` gate (#103) | — |
+| `JWT_SECRET` | Shared sign-in token secret; **must match the frontend** | — |
+| `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `LLM_MODEL` | OpenAI-compatible LLM endpoint | `gpt-4o-mini` at api.openai.com |
+| `DEV_MODE` | `true`/`1` skips the sign-in gate on session endpoints | off |
+| `MOCK_LLM` | `true`/`1` runs the pre-material phases without an LLM, on an in-memory DB | off |
+| `LA_PROMPTS_STUB` | `1` uses the public prompt stubs when `prompts/` is not checked out | off |
 | `MAX_PROBE_QUESTIONS` | Max questions per probe session | `10` |
 | `MAX_MATERIAL_ATTEMPTS` | Max compile retry attempts per slide | `3` |
 | `LOG_LEVEL` | Logging level (`INFO`, `DEBUG`, etc.) | `INFO` |
@@ -62,6 +68,31 @@ make db-clean    # truncate all tables (dev only)
 make migrate     # run alembic migrations
 make revision    # autogenerate a new migration (pass -m "message")
 ```
+
+## Deploy (Render)
+
+`render.yaml` is a [Render Blueprint](https://render.com/docs/blueprint-spec): one
+web service plus a Postgres database. Apply it once with
+`https://dashboard.render.com/blueprint/new?repo=https://github.com/lo-tp/learn-anything-backend`,
+then every push to `main` redeploys.
+
+The build runs `scripts/build.sh`, which does three things:
+
+1. **Fetches the private prompt templates.** `prompts/` is a submodule of a
+   private repo, so host clone credentials cannot reach it. `build.sh` reads the
+   pinned commit out of this repo's tree and fetches exactly that commit with
+   `PROMPTS_TOKEN` — a GitHub token with **read-only** access to
+   `lo-tp/learn-anything-prompts` and nothing else.
+2. Installs runtime dependencies with `uv sync --frozen --no-install-project --no-dev`.
+3. Applies migrations (`alembic upgrade head`). Render only offers
+   `preDeployCommand` on paid plans, so this lives in the build instead.
+
+Fill the `sync: false` values in the Render Dashboard before the first deploy:
+`PROMPTS_TOKEN`, `JWT_SECRET` (same value as the frontend), `SANDBOX_SERVICE_TOKEN`,
+`SANDBOX_URL`, `FRONTEND_DOMAIN`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `LLM_MODEL`.
+A plain `postgresql://...` from any host works: the `+psycopg` driver is added on
+read (`db.models.database_url_from_env`). `GET /health` is the health-check probe.
+
 
 ## Make Targets
 

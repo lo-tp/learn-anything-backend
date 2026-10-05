@@ -2,6 +2,7 @@ ref/
 __pycache__/
 .venv/
 .env
+.env.prod
 .coverage
 sql/
 .pi/
