@@ -73,8 +73,9 @@ make revision    # autogenerate a new migration (pass -m "message")
 
 `render.yaml` is a [Render Blueprint](https://render.com/docs/blueprint-spec): one
 web service plus a Postgres database. Apply it once with
-`https://dashboard.render.com/blueprint/new?repo=https://github.com/lo-tp/learn-anything-backend`,
-then every push to `main` redeploys.
+`https://dashboard.render.com/blueprint/new?repo=https://github.com/lo-tp/learn-anything-backend`.
+Deploys stay manual on purpose (`autoDeploy: false`): after pushing to `main`, publish
+with **Manual Deploy → Deploy latest commit** on the service page.
 
 The build runs `scripts/build.sh`, which does three things:
 

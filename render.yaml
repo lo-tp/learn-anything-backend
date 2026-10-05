@@ -17,7 +17,9 @@ services:
     # Move to `starter` for an always-on instance.
     plan: free
     branch: main
-    autoDeploy: true
+    # Deploys are deliberate: push to main, then "Manual Deploy" in the
+    # Dashboard when you actually want to publish.
+    autoDeploy: false
     healthCheckPath: /health
     # build.sh: private prompts → uv.lock install → alembic upgrade head.
     # A preDeployCommand is not available on free plans, so migrations run here.
