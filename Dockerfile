@@ -60,7 +60,12 @@ RUN test -f prompts/probe.py || { \
 
 RUN chown -R app:app /app
 
-USER app
+# Numeric, not `app`. Kubernetes' `runAsNonRoot: true` verifies the image's user
+# numerically and refuses a name it cannot resolve ("image has non-numeric user
+# (app), cannot verify user is non-root"), which turns a working container into a
+# pod stuck in CreateContainerConfigError. The uid is already fixed by useradd
+# above; naming it here too would only be a second spelling of the same fact.
+USER 10001
 
 EXPOSE 8000
 
