@@ -29,7 +29,12 @@ env:
   PROJECT_ID: learn-anything-510905
   REGISTRY: asia-east2-docker.pkg.dev/learn-anything-510905/learn-anything
   IMAGE: learn-anything-backend
-  WIF_PROVIDER: projects/learn-anything-510905/locations/global/workloadIdentityPools/learn-anything-github/providers/lo-tp-learn-anything-backend
+  # The provider's canonical resource name, which is `projects/<PROJECT_NUMBER>/…`,
+  # not `projects/<PROJECT_ID>/…`. STS rejects the project-id audience with
+  # `invalid_target` and a message claiming the provider may not exist, which is
+  # how this line was wrong once. The authoritative copy is
+  # `terraform output workload_identity_provider_names` in learn-anything-infra.
+  WIF_PROVIDER: projects/358071090957/locations/global/workloadIdentityPools/learn-anything-github/providers/lo-tp-learn-anything-backend
   WIF_SERVICE_ACCOUNT: deploy-ci@learn-anything-510905.iam.gserviceaccount.com
 
 jobs:
