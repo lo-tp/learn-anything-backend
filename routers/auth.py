@@ -110,9 +110,7 @@ def login(
         security.COOKIE_NAME,
         token,
         max_age=security.COOKIE_MAX_AGE_SECONDS,
-        httponly=True,
-        samesite="lax",
-        path="/",
+        **security.cookie_policy(),
     )
     return Message(message="Signed in")
 
@@ -142,5 +140,7 @@ def update_me(
 @router.post("/auth/logout", response_model=Message)
 def logout(response: Response) -> Message:
     """Sign out: clear the presenting client's cookie."""
-    response.delete_cookie(security.COOKIE_NAME, path="/")
+    # The same scope as on the way in: a domain-scoped cookie is not cleared by a
+    # host-only delete.
+    response.delete_cookie(security.COOKIE_NAME, **security.cookie_policy())
     return Message(message="Signed out")

@@ -31,6 +31,31 @@ COOKIE_MAX_AGE_SECONDS = int(TOKEN_TTL.total_seconds())
 COOKIE_NAME = "access_token"
 
 
+def cookie_policy() -> dict:
+    """The sign-in cookie's scope, spelled once.
+
+    Two services sit on one domain: ``api.`` issues this cookie and ``learn.``
+    reads it (``proxy.ts`` verifies it with the same ``JWT_SECRET``). A cookie
+    written without a ``domain`` is host-only, so the app's own gate can never
+    see that a user has signed in — it would bounce a signed-in browser back to
+    the login page forever. Setting ``COOKIE_DOMAIN`` to the shared parent
+    (``.lotp.xyz``) is what makes the two halves one session; leaving it unset
+    keeps the cookie host-only, which is what a developer running both services
+    on localhost wants.
+
+    ``Secure`` follows the frontend origin's scheme rather than adding a flag of
+    its own: one setting already says whether this deployment is served over
+    https, and two flags that can disagree is one too many.
+    """
+    return {
+        "domain": os.getenv("COOKIE_DOMAIN") or None,
+        "secure": os.getenv("FRONTEND_DOMAIN", "").startswith("https://"),
+        "httponly": True,
+        "samesite": "lax",
+        "path": "/",
+    }
+
+
 def _jwt_secret() -> str:
     """The shared signing secret (parent #85).
 

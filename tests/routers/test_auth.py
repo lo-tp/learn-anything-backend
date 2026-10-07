@@ -154,3 +154,55 @@ class TestLogin:
         assert resp.status_code == 401
         assert resp.json()["detail"] == "Invalid credentials"
         assert COOKIE_NAME not in resp.cookies
+
+
+class TestCookieScope:
+    """Where the sign-in cookie is allowed to travel (infra M6).
+
+    The app gate (`learn.` verifying this JWT with the same secret) and the token
+    issuer (`api.`) are two hosts on one domain. Without a shared parent domain the
+    cookie never reaches the host that reads it, and a signed-in browser is bounced
+    back to the login page by its own frontend.
+    """
+
+    def _login(self, client, email: str) -> str:
+        client.post(
+            "/auth/register", json={"email": email, "password": "supersecret"}
+        )
+        resp = client.post(
+            "/auth/login", json={"email": email, "password": "supersecret"}
+        )
+        assert resp.status_code == 200
+        return resp.headers["set-cookie"].lower()
+
+    def test_unset_cookie_domain_keeps_it_host_only(
+        self, client, monkeypatch
+    ):
+        # Local development: the API and the app are separate origins on
+        # localhost, and a parent-domain cookie would leak across them.
+        monkeypatch.delenv("COOKIE_DOMAIN", raising=False)
+        monkeypatch.setenv("FRONTEND_DOMAIN", "http://localhost:3000")
+        set_cookie = self._login(client, "host-only@example.com")
+        assert "domain=" not in set_cookie
+        assert "secure" not in set_cookie
+
+    def test_cookie_domain_shares_the_session_across_surfaces(
+        self, client, monkeypatch
+    ):
+        monkeypatch.setenv("COOKIE_DOMAIN", ".lotp.xyz")
+        monkeypatch.setenv("FRONTEND_DOMAIN", "https://learn.lotp.xyz")
+        set_cookie = self._login(client, "shared@example.com")
+        assert "domain=.lotp.xyz" in set_cookie
+        # A production surface is https-only, so the cookie should never travel
+        # over a plaintext connection.
+        assert "secure" in set_cookie
+
+    def test_logout_clears_the_cookie_it_set(self, client, monkeypatch):
+        """A domain-scoped cookie is not removed by a host-only delete."""
+        monkeypatch.setenv("COOKIE_DOMAIN", ".lotp.xyz")
+        monkeypatch.setenv("FRONTEND_DOMAIN", "https://learn.lotp.xyz")
+        self._login(client, "logout@example.com")
+        resp = client.post("/auth/logout")
+        assert resp.status_code == 200
+        set_cookie = resp.headers["set-cookie"].lower()
+        assert "domain=.lotp.xyz" in set_cookie
