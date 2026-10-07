@@ -1,0 +1,37 @@
+# Build context hygiene. Everything here is local state or something the running
+# container never reads. Note what is *not* excluded: `prompts/`, the private
+# submodule, because the image takes it from the source tree and the Dockerfile
+# fails if it is missing.
+
+# Local virtualenv and tool caches — the image installs from uv.lock instead.
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+*.tsbuildinfo
+.pyrightproj
+
+# Local configuration and secrets. `load_dotenv()` would otherwise bake a
+# developer's DATABASE_URL into the image; in the cluster these values arrive as
+# environment variables from rendered Secrets.
+.env
+.env.*
+!.env.example
+
+# The submodule working tree is **kept**: the image gets the prompt templates from
+# it, and the Dockerfile checks that they are there.
+
+# Git metadata: not read by the build, and it only makes the context bigger.
+.git
+
+# Not needed to serve the API. Tests run in CI against the source, not inside the
+# running container.
+tests/
+user-stories/
+docs/
+docker-compose.yml
+render.yaml
+
+.DS_Store

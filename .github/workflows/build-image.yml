@@ -1,0 +1,97 @@
+# Builds the API image and pushes it to Artifact Registry. The point of this file
+# is the second half: the image is **built by a pipeline, not by a laptop**, so the
+# thing that runs in the cluster is the thing a review saw.
+#
+# Authentication is the Workload Identity Federation set up in
+# lo-tp/learn-anything-infra (`gcp/ci_identity.tf`): this job trades its GitHub
+# OIDC token for an access token as `deploy-ci`, which needs no stored credential
+# and no `gcloud`. The provider name encodes *this* repository, which is what
+# makes the grant narrow.
+#
+# One human step, because it cannot be derived: the repository secret
+# `PROMPTS_TOKEN` — a GitHub token with read access to lo-tp/learn-anything-prompts,
+# the same one Render uses. Without it this job stops at the submodule step and
+# says so.
+
+name: build image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # the OIDC token the workload identity provider trusts
+
+env:
+  PROJECT_ID: learn-anything-510905
+  REGISTRY: asia-east2-docker.pkg.dev/learn-anything-510905/learn-anything
+  IMAGE: learn-anything-backend
+  WIF_PROVIDER: projects/learn-anything-510905/locations/global/workloadIdentityPools/learn-anything-github/providers/lo-tp-learn-anything-backend
+  WIF_SERVICE_ACCOUNT: deploy-ci@learn-anything-510905.iam.gserviceaccount.com
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `prompts/` is a private submodule, and the image expects it present (there
+      # is a guard in the Dockerfile). It is initialised here, from the pinned
+      # commit, so the commit being built is what decides which prompts ship.
+      # The URL rewrite is spelled out rather than left to the checkout action,
+      # because .gitmodules names an SSH URL and a token works over HTTPS.
+      - name: Fetch the pinned prompts submodule
+        env:
+          PROMPTS_TOKEN: ${{ secrets.PROMPTS_TOKEN }}
+        run: |
+          if [ -z "$PROMPTS_TOKEN" ]; then
+            echo "::error::Repository secret PROMPTS_TOKEN is not set (needs read access to lo-tp/learn-anything-prompts)."
+            exit 1
+          fi
+          git -c "url.https://x-access-token:${PROMPTS_TOKEN}@github.com/.insteadOf=git@github.com:" \
+            submodule update --init prompts
+          test -f prompts/probe.py
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
+          # Long enough to build and push, no longer.
+          access_token_lifetime: 1800s
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          # The cluster schedules amd64. Building for the runner's native arch is
+          # the same thing here, and stating it keeps an Apple-silicon laptop from
+          # producing a local image the cluster would never run.
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE }}:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The deploy pins a digest, not a tag: a tag can be re-pointed under a
+      # rollout, a digest cannot. Surfaced here so promoting an image is a copy,
+      # not a guess.
+      - if: github.event_name == 'push'
+        run: |
+          {
+            echo "## Image"
+            echo "- tag: \`${{ env.REGISTRY }}/${{ env.IMAGE }}:sha-${{ github.sha }}\`"
+            echo "- digest: \`${{ steps.build.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
