@@ -78,9 +78,15 @@ rollout (`PLAN.md` M5), and the environment variables the app reads come from
 Secret Manager, rendered into cluster Secrets at deploy time. Values are never
 stored in this repository.
 
-What happens here is `.github/workflows/build-image.yml`: build the image, **run it
-and assert its first routes** (a smoke step), and only then publish it under a
-`sha-<commit>` tag. An image that never answered a request never gets a tag.
+What happens here is `.github/workflows/build-image.yml`: lint, typecheck and the
+test suite; then build the image, **run it and assert its first routes** (a smoke
+step), and only then publish it under a `sha-<commit>` tag. An image that never
+answered a request never gets a tag.
+
+Only `release` publishes, and `release` moves only by merging `main` into it — that
+merge is the act that ships: the image is built, smoke-tested, published, pinned by
+digest in the infrastructure repository, and deployed, in one chain. `main` is
+checked and never builds an image.
 
 The API is served at `https://api.lotp.xyz`; `GET /health` is the probe the
 platform watches. It stays dependency-free on purpose — a slow database shows up as
