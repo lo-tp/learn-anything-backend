@@ -7,12 +7,12 @@ Use the `gh` CLI to fetch issues from that repository unless the user specifies 
 
 ## Domain docs
 
-**All context and ADR documentation lives in the main repo `lo-tp/learn-anything` — not in this backend repo.**
+**All context and ADR documentation lives in `lo-tp/learn-anything-frontend` — not in this backend repo.** (The old `lo-tp/learn-anything` repo is archived; it was moved there.)
 
 - `CONTEXT.md` — the domain glossary
 - `docs/adr/` — architecture decision records
 
-Fetch and edit them via `gh` against `lo-tp/learn-anything` (e.g. `gh api repos/lo-tp/learn-anything/contents/CONTEXT.md`). Do **not** create `CONTEXT.md` or `docs/adr/` in this backend repo.
+Fetch and edit them via `gh` against `lo-tp/learn-anything-frontend` (e.g. `gh api repos/lo-tp/learn-anything-frontend/contents/CONTEXT.md`). Do **not** create `CONTEXT.md` or `docs/adr/` in this backend repo. The infrastructure context has its own glossary and ADRs in `lo-tp/learn-anything-infra`.
 
 ## Shipping
 
