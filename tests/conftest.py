@@ -16,6 +16,16 @@ import os
 import pytest
 
 os.environ["MOCK_LLM"] = "false"
+# core/llm.py constructs a real ChatOpenAI at import time whenever MOCK_LLM is off,
+# and the SDK rejects an empty ``api_key`` — so on a machine with no ``.env``
+# (a CI runner, a fresh clone), *collection itself* aborts with
+# ``OpenAIError: Missing credentials`` before a single test runs. No test reaches
+# the network; the client only has to construct. Pinning a non-secret placeholder
+# makes the suite hermetic: a laptop and a CI runner now collect the same tests from
+# the same environment, which is the whole point of this block. The one test that
+# asserts startup with *no* credential deletes the variable itself (see
+# tests/core/test_mock_llm.py).
+os.environ["OPENAI_API_KEY"] = "test-only-placeholder-not-a-secret"
 # Allow the prompt loader to fall back to public stubs when the private
 # ``prompts`` submodule is not checked out (e.g. a fresh public clone).
 os.environ.setdefault("LA_PROMPTS_STUB", "1")
