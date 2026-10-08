@@ -150,4 +150,29 @@ jobs:
             echo "## Image"
             echo "- tag: \`${{ env.REGISTRY }}/${{ env.IMAGE }}:sha-${{ github.sha }}\`"
             echo "- digest: \`${{ steps.build.outputs.digest }}\`"
+            echo
+            echo "Handed to learn-anything-infra: that repository pins this digest and deploys it."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # The image exists and was built from `release`, so the deciding is done: hand
+      # the delivery to the repository that owns deployment. It pins this digest and
+      # runs the deploy order (secrets, migration gate, apply, rollout, drift check,
+      # public surfaces). The dispatch is explicit because `workflow_run` cannot cross
+      # repositories. It needs one repository secret: `DELIVERY_TOKEN`, a
+      # fine-grained PAT allowed to start workflows in lo-tp/learn-anything-infra and
+      # nothing else. If it is missing, warn rather than fail: the image is published,
+      # and that repository reconciles on a schedule anyway.
+      - name: Hand the delivery to the infrastructure repository
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.DELIVERY_TOKEN }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::DELIVERY_TOKEN is not set in this repository, so nothing was dispatched; learn-anything-infra will pick this image up at its next scheduled reconciliation."
+            exit 0
+          fi
+          gh workflow run deliver.yml --repo lo-tp/learn-anything-infra --ref main \
+            -f source_run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            -f source_repo="$GITHUB_REPOSITORY" \
+            -f source_branch="$GITHUB_REF_NAME"
+          echo "dispatched deliver.yml in lo-tp/learn-anything-infra from $GITHUB_REF_NAME"
