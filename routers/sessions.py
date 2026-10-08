@@ -52,6 +52,22 @@ class SessionList(BaseModel):
     sessions: list[SessionListItem]
 
 
+def session_list_item(session: Session) -> SessionListItem:
+    """Build one list item from a ``Session`` row.
+
+    The only place this shape is built: ``routers.explore`` renders the same
+    item for the public Explore feed, so a field added here is added there too
+    — and the generated client types stay authoritative for both surfaces.
+    """
+    return SessionListItem(
+        session_id=session.session_id,
+        phase=Phase(session.phase),
+        goal=session.goal,
+        narrowed_goal=session.narrowed_goal,
+        created_at=session.created_at,
+    )
+
+
 # --- Routes ---
 
 
@@ -64,18 +80,7 @@ def list_sessions(
     query = db.query(Session).order_by(Session.created_at.desc())
     if phase is not None:
         query = query.filter(Session.phase.in_([p.value for p in phase]))
-    return SessionList(
-        sessions=[
-            SessionListItem(
-                session_id=s.session_id,
-                phase=Phase(s.phase),
-                goal=s.goal,
-                narrowed_goal=s.narrowed_goal,
-                created_at=s.created_at,
-            )
-            for s in query.all()
-        ]
-    )
+    return SessionList(sessions=[session_list_item(s) for s in query.all()])
 
 
 @router.get("/sessions/{session_id}", response_model=SessionState)
