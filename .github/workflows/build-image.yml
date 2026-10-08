@@ -12,11 +12,16 @@
 # `PROMPTS_TOKEN` — a GitHub token with read access to lo-tp/learn-anything-prompts
 # and nothing else. Without it this job stops at the submodule step and says so.
 
+# Publish policy: `main` is verified, never published. `release` is the only branch
+# that builds and pushes an image — promoting main into `release` (by merge, never
+# by committing on it) is the human act that means "this goes live", and
+# lo-tp/learn-anything-infra pins the digest that comes out of it.
+
 name: build image
 
 on:
   push:
-    branches: [main]
+    branches: [main, release]
   pull_request:
   workflow_dispatch:
 
@@ -37,7 +42,40 @@ env:
   WIF_SERVICE_ACCOUNT: deploy-ci@learn-anything-510905.iam.gserviceaccount.com
 
 jobs:
+  # The three checks the repository's own Makefile runs — lint, typecheck, unit
+  # tests — in CI, before anything is built. A green image is not a correct image.
+  #
+  # Dependencies are installed the way the Dockerfile installs them
+  # (`uv sync --frozen` against uv.lock), with the dev group included, so the
+  # resolved environment here and the one copied into the image come from the same
+  # lock. The `prompts` submodule is deliberately absent: tests/conftest.py sets
+  # LA_PROMPTS_STUB so a fresh clone without the private submodule still runs the
+  # suite, which is exactly the condition this job should prove.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install the locked environment (plus dev tools)
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Typecheck
+        run: uv run pyright .
+
+      - name: Unit tests
+        run: uv run python -m pytest tests/ -q
+
   build:
+    needs: check
+    # Only `release` produces an image. Everything else is checked and stops there.
+    if: github.ref == 'refs/heads/release'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
