@@ -69,30 +69,34 @@ make migrate     # run alembic migrations
 make revision    # autogenerate a new migration (pass -m "message")
 ```
 
-## Deploy (Render)
+## Deploy
 
-`render.yaml` is a [Render Blueprint](https://render.com/docs/blueprint-spec): one
-web service plus a Postgres database. Apply it once with
-`https://dashboard.render.com/blueprint/new?repo=https://github.com/lo-tp/learn-anything-backend`.
-Deploys stay manual on purpose (`autoDeploy: false`): after pushing to `main`, publish
-with **Manual Deploy → Deploy latest commit** on the service page.
+This repository builds the artifact; it does not decide where it runs. That lives in
+**[lo-tp/learn-anything-infra](https://github.com/lo-tp/learn-anything-infra)**:
+the production overlay pins this image **by digest**, a migration Job gates every
+rollout (`PLAN.md` M5), and the environment variables the app reads come from
+Secret Manager, rendered into cluster Secrets at deploy time. Values are never
+stored in this repository.
 
-The build runs `scripts/build.sh`, which does three things:
+What happens here is `.github/workflows/build-image.yml`: build the image, **run it
+and assert its first routes** (a smoke step), and only then publish it under a
+`sha-<commit>` tag. An image that never answered a request never gets a tag.
 
-1. **Fetches the private prompt templates.** `prompts/` is a submodule of a
-   private repo, so host clone credentials cannot reach it. `build.sh` reads the
-   pinned commit out of this repo's tree and fetches exactly that commit with
-   `PROMPTS_TOKEN` — a GitHub token with **read-only** access to
-   `lo-tp/learn-anything-prompts` and nothing else.
-2. Installs runtime dependencies with `uv sync --frozen --no-install-project --no-dev`.
-3. Applies migrations (`alembic upgrade head`). Render only offers
-   `preDeployCommand` on paid plans, so this lives in the build instead.
+The API is served at `https://api.lotp.xyz`; `GET /health` is the probe the
+platform watches. It stays dependency-free on purpose — a slow database shows up as
+request errors, not a restart loop.
 
-Fill the `sync: false` values in the Render Dashboard before the first deploy:
-`PROMPTS_TOKEN`, `JWT_SECRET` (same value as the frontend), `SANDBOX_SERVICE_TOKEN`,
-`SANDBOX_URL`, `FRONTEND_DOMAIN`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `LLM_MODEL`.
-A plain `postgresql://...` from any host works: the `+psycopg` driver is added on
-read (`db.models.database_url_from_env`). `GET /health` is the health-check probe.
+Two build-time facts worth knowing:
+
+1. **`prompts/` is a submodule of a private repository**, so a clone's credentials
+   cannot reach it. CI initialises it from the pinned commit with `PROMPTS_TOKEN`,
+   a GitHub token with read-only access to `lo-tp/learn-anything-prompts` and
+   nothing else; locally, `git submodule update --init prompts`. The Dockerfile
+   fails the build if the directory is missing rather than shipping an image that
+   500s on every prompt.
+2. **A plain `postgresql://…` URL is accepted** from any host: the `+psycopg`
+   driver is added on read (`db.models.database_url_from_env`), which is how the
+   same string works for the app and for `alembic`.
 
 
 ## Make Targets

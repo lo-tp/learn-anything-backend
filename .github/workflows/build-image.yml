@@ -9,9 +9,8 @@
 # makes the grant narrow.
 #
 # One human step, because it cannot be derived: the repository secret
-# `PROMPTS_TOKEN` — a GitHub token with read access to lo-tp/learn-anything-prompts,
-# the same one Render uses. Without it this job stops at the submodule step and
-# says so.
+# `PROMPTS_TOKEN` — a GitHub token with read access to lo-tp/learn-anything-prompts
+# and nothing else. Without it this job stops at the submodule step and says so.
 
 name: build image
 
