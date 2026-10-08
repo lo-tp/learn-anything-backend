@@ -161,14 +161,15 @@ jobs:
       # repositories. It needs one repository secret: `DELIVERY_TOKEN`, a
       # fine-grained PAT allowed to start workflows in lo-tp/learn-anything-infra and
       # nothing else. If it is missing, warn rather than fail: the image is published,
-      # and that repository reconciles on a schedule anyway.
+      # and nothing then ships by itself: that repository's cron has never fired, so
+      # the manual path is `gh workflow run deliver.yml --repo lo-tp/…-infra`.
       - name: Hand the delivery to the infrastructure repository
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ secrets.DELIVERY_TOKEN }}
         run: |
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::warning::DELIVERY_TOKEN is not set in this repository, so nothing was dispatched; learn-anything-infra will pick this image up at its next scheduled reconciliation."
+            echo "::warning::DELIVERY_TOKEN is not set in this repository, so nothing was dispatched. Deliver it by hand: gh workflow run deliver.yml --repo lo-tp/learn-anything-infra (that repository's schedule has never been observed to fire)."
             exit 0
           fi
           gh workflow run deliver.yml --repo lo-tp/learn-anything-infra --ref main \
