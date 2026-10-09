@@ -12,13 +12,25 @@ from db import Phase, Plan, StepProgress
 UTC_OFFSET_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|\+00:00)$")
 
 
+def _signed_in(auth_cookie: str) -> dict[str, str]:
+    """A sign-in cookie: History requires one from every caller (#145).
+
+    The token does not need a matching ``User`` row — History is not scoped per
+    User — so the plain ``auth_cookie`` fixture is enough. A Visitor's refusal
+    is asserted in ``test_auth_gate.TestDataOwningEndpointsAlwaysRefuseAVisitor``.
+    """
+    return {"access_token": auth_cookie}
+
+
 class TestListSessions:
-    def test_empty(self, client, db):
-        resp = client.get("/sessions")
+    """The History list, as a signed-in caller is answered today."""
+
+    def test_empty(self, client, db, auth_cookie):
+        resp = client.get("/sessions", cookies=_signed_in(auth_cookie))
         assert resp.status_code == 200
         assert resp.json() == {"sessions": []}
 
-    def test_returns_all_newest_first(self, client, db, make_session):
+    def test_returns_all_newest_first(self, client, db, make_session, auth_cookie):
         make_session(
             session_id="a",
             phase=Phase.CLARIFYING,
@@ -32,7 +44,7 @@ class TestListSessions:
             created_at=datetime(2024, 2, 1, tzinfo=UTC),
         )
 
-        resp = client.get("/sessions")
+        resp = client.get("/sessions", cookies=_signed_in(auth_cookie))
         assert resp.status_code == 200
         ids = [s["session_id"] for s in resp.json()["sessions"]]
         assert ids == ["b", "a"]
@@ -44,7 +56,9 @@ class TestListSessions:
         # clients parse it as local time.
         assert UTC_OFFSET_RE.match(first["created_at"]), first["created_at"]
 
-    def test_naive_legacy_created_at_serialized_as_utc(self, client, db, make_session):
+    def test_naive_legacy_created_at_serialized_as_utc(
+        self, client, db, make_session, auth_cookie
+    ):
         # Rows written before the timestamptz migration (or via a driver that
         # strips the offset) come back naive; the response must still carry
         # an explicit UTC offset so the instant is unambiguous.
@@ -55,35 +69,45 @@ class TestListSessions:
                 tzinfo=None
             ),
         )
-        resp = client.get("/sessions")
+        resp = client.get("/sessions", cookies=_signed_in(auth_cookie))
         created_at = resp.json()["sessions"][0]["created_at"]
         assert UTC_OFFSET_RE.match(created_at), created_at
         assert created_at.startswith("2026-09-17T01:02:49")
 
-    def test_filter_by_single_phase(self, client, db, make_session):
+    def test_filter_by_single_phase(self, client, db, make_session, auth_cookie):
         make_session(session_id="a", phase=Phase.CLARIFYING)
         make_session(session_id="b", phase=Phase.PROBING)
         make_session(session_id="c", phase=Phase.PROBING)
 
-        resp = client.get("/sessions", params={"phase": ["probing"]})
+        resp = client.get(
+            "/sessions",
+            params={"phase": ["probing"]},
+            cookies=_signed_in(auth_cookie),
+        )
         ids = sorted(s["session_id"] for s in resp.json()["sessions"])
         assert ids == ["b", "c"]
 
-    def test_filter_by_multiple_phases(self, client, db, make_session):
+    def test_filter_by_multiple_phases(self, client, db, make_session, auth_cookie):
         make_session(session_id="a", phase=Phase.CLARIFYING)
         make_session(session_id="b", phase=Phase.PROBING)
         make_session(session_id="c", phase=Phase.PLANNING)
 
         resp = client.get(
-            "/sessions", params={"phase": ["clarifying", "planning"]}
+            "/sessions",
+            params={"phase": ["clarifying", "planning"]},
+            cookies=_signed_in(auth_cookie),
         )
         ids = sorted(s["session_id"] for s in resp.json()["sessions"])
         assert ids == ["a", "c"]
 
-    def test_filter_matches_nothing(self, client, db, make_session):
+    def test_filter_matches_nothing(self, client, db, make_session, auth_cookie):
         make_session(session_id="a", phase=Phase.CLARIFYING)
 
-        resp = client.get("/sessions", params={"phase": ["complete"]})
+        resp = client.get(
+            "/sessions",
+            params={"phase": ["complete"]},
+            cookies=_signed_in(auth_cookie),
+        )
         assert resp.json() == {"sessions": []}
 
 

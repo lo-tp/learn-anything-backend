@@ -66,11 +66,12 @@ def db(db_engine):
 @pytest.fixture()
 def client(db_engine):
     """A FastAPI TestClient with ``get_db`` pointed at the test engine."""
-    from routers import auth, clarify, plan, probe, review, sessions, slides
+    from routers import auth, clarify, explore, plan, probe, review, sessions, slides
 
     app = FastAPI()
     app.include_router(auth.router)
     app.include_router(sessions.router)
+    app.include_router(explore.router)
     app.include_router(clarify.router)
     app.include_router(probe.router)
     app.include_router(plan.router)

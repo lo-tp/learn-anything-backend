@@ -11,7 +11,7 @@ load_dotenv()
 
 from core.mock_llm import is_mock_mode
 from db import seed_mock_user
-from routers import auth, clarify, plan, probe, review, sessions, slides
+from routers import auth, clarify, explore, plan, probe, review, sessions, slides
 
 # Log level is controlled by LOG_LEVEL in .env (default: INFO).
 # Set LOG_LEVEL=DEBUG for per-step / per-node material generation detail.
@@ -45,6 +45,7 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(sessions.router)
+app.include_router(explore.router)
 app.include_router(clarify.router)
 app.include_router(probe.router)
 app.include_router(plan.router)

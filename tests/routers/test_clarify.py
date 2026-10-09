@@ -7,11 +7,25 @@ from unittest.mock import patch
 from core.llm import llm
 from db import Phase, Session
 
+
+def _signed_in(auth_cookie: str) -> dict[str, str]:
+    """A sign-in cookie: creating a Session requires one from every caller (#145).
+
+    A Visitor's refusal — and the fact that the refused request writes nothing —
+    is asserted in ``test_auth_gate.TestDataOwningEndpointsAlwaysRefuseAVisitor``.
+    """
+    return {"access_token": auth_cookie}
+
+
 # --- POST /sessions (create + first Clarify call) ---
 
 
 class TestCreateSession:
-    def test_interrupt_returns_clarifying_questions(self, client, db, make_session):
+    """A signed-in caller starts a Session and gets the first Clarify call."""
+
+    def test_interrupt_returns_clarifying_questions(
+        self, client, db, make_session, auth_cookie
+    ):
         with (
             patch("routers.clarify.clarify_graph") as graph,
             patch("routers.clarify.detect_language", return_value="English") as dl,
@@ -20,7 +34,11 @@ class TestCreateSession:
                 "__interrupt__": object(),
                 "clarifying_questions": ["What area?", "How deep?"],
             }
-            resp = client.post("/sessions", json={"goal": "Learn calculus"})
+            resp = client.post(
+                "/sessions",
+                json={"goal": "Learn calculus"},
+                cookies=_signed_in(auth_cookie),
+            )
 
         assert resp.status_code == 200
         body = resp.json()
@@ -36,13 +54,19 @@ class TestCreateSession:
         assert session.goal == "Learn calculus"
         dl.assert_called_once_with("Learn calculus", llm)
 
-    def test_complete_returns_narrowed_goal(self, client, db, make_session):
+    def test_complete_returns_narrowed_goal(
+        self, client, db, make_session, auth_cookie
+    ):
         with (
             patch("routers.clarify.clarify_graph") as graph,
             patch("routers.clarify.detect_language", return_value="English"),
         ):
             graph.invoke.return_value = {"narrowed_goal": "Master derivatives"}
-            resp = client.post("/sessions", json={"goal": "Learn calculus"})
+            resp = client.post(
+                "/sessions",
+                json={"goal": "Learn calculus"},
+                cookies=_signed_in(auth_cookie),
+            )
 
         assert resp.status_code == 200
         body = resp.json()
@@ -54,13 +78,19 @@ class TestCreateSession:
         assert session.phase == Phase.PROBING.value
         assert session.narrowed_goal == "Master derivatives"
 
-    def test_initial_state_and_config_passed_to_graph(self, client, db, make_session):
+    def test_initial_state_and_config_passed_to_graph(
+        self, client, db, make_session, auth_cookie
+    ):
         with (
             patch("routers.clarify.clarify_graph") as graph,
             patch("routers.clarify.detect_language", return_value="Spanish"),
         ):
             graph.invoke.return_value = {"narrowed_goal": "ng"}
-            client.post("/sessions", json={"goal": "Aprender cálculo"})
+            client.post(
+                "/sessions",
+                json={"goal": "Aprender cálculo"},
+                cookies=_signed_in(auth_cookie),
+            )
 
         args, _kwargs = graph.invoke.call_args
         initial_state = args[0]

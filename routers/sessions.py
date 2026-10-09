@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session as DBSession
 
-from core.security import require_auth
+from core.security import require_auth, require_sign_in
 from db import Phase, Session, get_db
 
 router = APIRouter(tags=["sessions"], dependencies=[Depends(require_auth)])
@@ -52,30 +52,49 @@ class SessionList(BaseModel):
     sessions: list[SessionListItem]
 
 
+def session_list_item(session: Session) -> SessionListItem:
+    """Build one list item from a ``Session`` row.
+
+    The only place this shape is built: ``routers.explore`` renders the same
+    item for the public Explore feed, so a field added here is added there too
+    — and the generated client types stay authoritative for both surfaces.
+    """
+    return SessionListItem(
+        session_id=session.session_id,
+        phase=Phase(session.phase),
+        goal=session.goal,
+        narrowed_goal=session.narrowed_goal,
+        created_at=session.created_at,
+    )
+
+
 # --- Routes ---
 
 
-@router.get("/sessions", response_model=SessionList)
+@router.get(
+    "/sessions",
+    response_model=SessionList,
+    # History is the surface a User works in, so it requires a sign-in cookie
+    # whatever DEV_MODE says (#145): an anonymous caller gets 401, not an empty
+    # list. GET /sessions/{session_id} keeps the bounded gate — opening one
+    # Session's deck is browsing, and a Visitor is expected to do that.
+    dependencies=[Depends(require_sign_in)],
+)
 def list_sessions(
     phase: list[Phase] | None = Query(default=None),
     db: DBSession = Depends(get_db),
 ) -> SessionList:
-    """List all sessions, newest first, optionally filtered by phase(s)."""
+    """List History: every Session record, newest first, optionally filtered by
+    phase(s).
+
+    Requires a sign-in cookie (#145). Records are not scoped per User yet: every
+    signed-in caller is shown the same list (see
+    ``tests/routers/test_auth_gate.TestSessionsSharedAcrossUsers``).
+    """
     query = db.query(Session).order_by(Session.created_at.desc())
     if phase is not None:
         query = query.filter(Session.phase.in_([p.value for p in phase]))
-    return SessionList(
-        sessions=[
-            SessionListItem(
-                session_id=s.session_id,
-                phase=Phase(s.phase),
-                goal=s.goal,
-                narrowed_goal=s.narrowed_goal,
-                created_at=s.created_at,
-            )
-            for s in query.all()
-        ]
-    )
+    return SessionList(sessions=[session_list_item(s) for s in query.all()])
 
 
 @router.get("/sessions/{session_id}", response_model=SessionState)
