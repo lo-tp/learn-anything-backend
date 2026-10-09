@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session as DBSession
 
-from core.security import require_auth
+from core.security import require_auth, require_sign_in
 from db import Phase, Session, get_db
 
 router = APIRouter(tags=["sessions"], dependencies=[Depends(require_auth)])
@@ -71,12 +71,26 @@ def session_list_item(session: Session) -> SessionListItem:
 # --- Routes ---
 
 
-@router.get("/sessions", response_model=SessionList)
+@router.get(
+    "/sessions",
+    response_model=SessionList,
+    # History is the surface a User works in, so it requires a sign-in cookie
+    # whatever DEV_MODE says (#145): an anonymous caller gets 401, not an empty
+    # list. GET /sessions/{session_id} keeps the bounded gate — opening one
+    # Session's deck is browsing, and a Visitor is expected to do that.
+    dependencies=[Depends(require_sign_in)],
+)
 def list_sessions(
     phase: list[Phase] | None = Query(default=None),
     db: DBSession = Depends(get_db),
 ) -> SessionList:
-    """List all sessions, newest first, optionally filtered by phase(s)."""
+    """List History: every Session record, newest first, optionally filtered by
+    phase(s).
+
+    Requires a sign-in cookie (#145). Records are not scoped per User yet: every
+    signed-in caller is shown the same list (see
+    ``tests/routers/test_auth_gate.TestSessionsSharedAcrossUsers``).
+    """
     query = db.query(Session).order_by(Session.created_at.desc())
     if phase is not None:
         query = query.filter(Session.phase.in_([p.value for p in phase]))

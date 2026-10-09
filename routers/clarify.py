@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session as DBSession
 
 from core.language import DEFAULT_LANGUAGE, detect_language, has_meaningful_signal
-from core.security import require_auth
+from core.security import require_auth, require_sign_in
 from db import Phase, Session, get_db
 from graphs import clarify_graph, graph_config, pre_material_llm
 from graphs.clarify import ClarifyState
@@ -84,6 +84,12 @@ def interpret_clarify(
     "/sessions",
     response_model=ClarifyResult,
     response_model_exclude_none=True,
+    # Creating a Session is an act of ownership, so a Visitor is refused here
+    # whatever DEV_MODE says (#145). The dependency runs before the body of this
+    # function, so the refused request never reaches ``db.add`` and no Session
+    # without an owner can be written — the record the frontend's "Start New
+    # Session" would otherwise leave behind in Explore.
+    dependencies=[Depends(require_sign_in)],
 )
 def create_session(body: GoalIn, db: DBSession = Depends(get_db)) -> ClarifyResult:
     """Create a session and make the first Clarify graph call."""

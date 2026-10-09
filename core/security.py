@@ -109,7 +109,7 @@ def create_token(email: str) -> str:
     return jwt.encode(payload, _jwt_secret(), algorithm=_JWT_ALGORITHM)
 
 
-# --- Sign-in gate for learning-session endpoints (#89) ---
+# --- Sign-in gates for learning-session endpoints (#89, #145) ---
 
 
 def is_dev_mode() -> bool:
@@ -133,6 +133,20 @@ def _decode_token(request: Request) -> dict:
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
+def require_sign_in(request: Request) -> None:
+    """FastAPI dependency: require a valid sign-in token, always.
+
+    Never opened by ``DEV_MODE``. This is the gate for the endpoints that *own*
+    data — the History list (``GET /sessions``) and creating a Session
+    (``POST /sessions``), #145. A Visitor is told so rather than shown an empty
+    list, and a Session with no one who asked for it becomes impossible: the
+    refusal lands before the write. The answer is the same 401 as the bounded
+    gate's, so the client has one sign-in signal to react to (#143: the 401 *is*
+    the identity signal).
+    """
+    _decode_token(request)
+
+
 def require_auth(request: Request) -> None:
     """FastAPI dependency: require a valid sign-in token unless DEV_MODE.
 
@@ -141,10 +155,15 @@ def require_auth(request: Request) -> None:
     - Missing or invalid cookie → 401.
     - When the gate passes, no per-user scoping is applied: sessions
       remain shared across all users.
+
+    The session-work endpoints (opening a Session, the intake phases, the deck)
+    use this: their gate may open in dev so a local run can walk the phases
+    without a cookie. Anything that owns data uses :func:`require_sign_in`,
+    whatever the flag says.
     """
     if is_dev_mode():
         return
-    _decode_token(request)
+    require_sign_in(request)
 
 
 # --- Service-identity gate for the internal slides endpoint (#103) ---
