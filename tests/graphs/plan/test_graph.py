@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+from langgraph.checkpoint.memory import MemorySaver
 
 from graphs.plan.graph import build_plan_graph
+from graphs.plan.schemas import (
+    DesignOut,
+    RenderedStep,
+    RenderOut,
+    ResearchOut,
+    StepDraft,
+)
 from graphs.plan.state import PlanState
 
 
@@ -72,3 +81,82 @@ class TestPlanState:
         }
         assert state["pass_count"] == 1
         assert state["approved"] is False
+
+
+# --- External search scope (#166) ---
+
+_RESEARCH = ResearchOut(
+    unconditional_truths=["U"],
+    core_concepts=["C"],
+    standard_framing="SF",
+    common_gotchas=["G"],
+)
+
+
+def _plan_outputs(_llm, schema, _system, _human, **_bind_kwargs):
+    """The un-tooled path: design_plan, then render_plan."""
+    if schema is DesignOut:
+        return DesignOut(
+            steps=[StepDraft(title="A", description="d", depends_on=[], depth=1)]
+        )
+    return RenderOut(
+        prose_summary="S",
+        dependency_dag="graph LR\n  s0[A]",
+        steps=[
+            RenderedStep(
+                id="s0", letter="A", title="A", description="d", depends_on=[], depth=1
+            )
+        ],
+    )
+
+
+def _run_plan(graph) -> dict:
+    return graph.invoke(
+        {
+            "goal": "Learn calculus",
+            "language": "English",
+            "boundary_map": {},
+            "research": None,
+            "current_plan": None,
+            "adjustment": None,
+            "pass_count": 0,
+        },
+        {"configurable": {"thread_id": "scope-test:plan"}},
+    )
+
+
+class TestSearchToolScope:
+    """#166: the external search tool reaches research_topic and nothing else."""
+
+    def test_search_tools_reach_only_research_topic(self):
+        tools = [MagicMock(), MagicMock()]
+        consulted: list[int] = []
+
+        def loader():
+            consulted.append(1)
+            return tools
+
+        graph = build_plan_graph(
+            _make_llm(), checkpointer=MemorySaver(), search_tools=loader
+        )
+
+        grounded: list = []
+        with (
+            patch(
+                "graphs.plan.nodes.structured_invoke_with_tools",
+                side_effect=lambda llm, schema, system, human, offered: grounded.append(
+                    offered
+                )
+                or _RESEARCH,
+            ),
+            patch(
+                "graphs.plan.nodes.structured_invoke", side_effect=_plan_outputs
+            ) as untooled_spy,
+        ):
+            result = _run_plan(graph)
+
+        assert result["current_plan"]["steps"][0]["id"] == "s0"  # the graph ran
+        assert grounded == [tools]  # one grounded call: research_topic's
+        assert consulted == [1]  # and only it consulted the boundary
+        # design_plan and render_plan went through the un-tooled path.
+        assert [c.args[1] for c in untooled_spy.call_args_list] == [DesignOut, RenderOut]

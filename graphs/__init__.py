@@ -3,6 +3,7 @@
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 
+from core.external_tools import external_search_tools
 from core.llm import llm
 from core.mock_llm import MockChatModel, is_mock_mode
 
@@ -30,7 +31,19 @@ else:
 
 clarify_graph = build_clarify_graph(pre_material_llm, checkpointer=checkpointer)
 probe_graph = build_probe_graph(pre_material_llm, checkpointer=checkpointer)
-plan_graph = build_plan_graph(pre_material_llm, checkpointer=checkpointer)
+
+# External search (#166) reaches one node: the plan graph's research_topic.
+# No other graph is handed a search tool, and internal tools never come through
+# this boundary — they are in-process functions (see graphs/material).
+# Mock mode (#118) is wired with none at all, so a mock run has no path to the
+# network to forget about. The boundary checks the flag too, deliberately: this
+# wiring is what makes it structural, the boundary's own check is what keeps any
+# other caller honest. A real run with no Tavily key, or one where Tavily
+# cannot be reached, gets no search and a plan built exactly as before.
+plan_search_tools = None if is_mock_mode() else external_search_tools
+plan_graph = build_plan_graph(
+    pre_material_llm, checkpointer=checkpointer, search_tools=plan_search_tools
+)
 
 # The Material graph uses the checkpointer for per-step in-process resume
 # (one thread per step: "session_id:material:step_id"). On server restart the

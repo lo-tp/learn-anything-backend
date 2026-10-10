@@ -5,9 +5,10 @@ from __future__ import annotations
 from langchain_core.language_models import BaseChatModel
 from langgraph.types import interrupt
 
+from core.external_tools import SearchToolLoader
 from core.language import DEFAULT_LANGUAGE, language_instruction
 
-from ..common import structured_invoke
+from ..common import structured_invoke, structured_invoke_with_tools
 from .prompts import (
     DESIGN_PLAN_INITIAL_SYSTEM,
     DESIGN_PLAN_REFINE_SYSTEM,
@@ -18,15 +19,24 @@ from .schemas import DesignOut, RenderOut, ResearchOut
 from .state import PlanState
 
 
-def make_research_topic(llm: BaseChatModel):
-    """Scope the field: core concepts, first principles, framing, gotchas."""
+def make_research_topic(
+    llm: BaseChatModel, search_tools: SearchToolLoader | None = None
+):
+    """Scope the field: core concepts, first principles, framing, gotchas.
+
+    ``search_tools`` is the external-search boundary (#166): a callable because
+    the MCP handshake belongs to the first search, not to graph construction.
+    An empty list — mock mode, no Tavily key, or an unreachable Tavily — means
+    this node behaves exactly as it did before external tools existed.
+    """
 
     def research_topic(state: PlanState) -> dict:
-        out = structured_invoke(
+        out = structured_invoke_with_tools(
             llm,
             ResearchOut,
             RESEARCH_TOPIC_SYSTEM,
             f"Goal: {state.get('goal', '')}",
+            list(search_tools()) if search_tools is not None else [],
         )
         return {
             "research": {
