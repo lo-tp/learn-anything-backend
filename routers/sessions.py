@@ -1,4 +1,10 @@
-"""Session status routes: state & progress read-back."""
+"""Session read routes: the list and one Session's state & progress.
+
+Both are public reads (#178): a Visitor browses the same list and the same
+deck as a User, so this router carries no sign-in dependency and the flag
+never opens or closes it. Ownership begins at the write — see
+``routers.clarify`` (creating a Session) and ``routers.plan`` (its plan).
+"""
 
 from datetime import UTC, datetime
 
@@ -6,10 +12,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 from sqlalchemy.orm import Session as DBSession
 
-from core.security import require_auth, require_sign_in
 from db import Phase, Session, get_db
 
-router = APIRouter(tags=["sessions"], dependencies=[Depends(require_auth)])
+router = APIRouter(tags=["sessions"])
 
 
 # --- Schemas ---
@@ -56,8 +61,12 @@ def session_list_item(session: Session) -> SessionListItem:
     """Build one list item from a ``Session`` row.
 
     The only place this shape is built: ``routers.explore`` renders the same
-    item for the public Explore feed, so a field added here is added there too
-    — and the generated client types stay authoritative for both surfaces.
+    item for the Explore feed, so a field added here is added there too — and
+    the generated client types stay authoritative for both surfaces.
+
+    Both surfaces are public reads, so this shape deliberately carries no owner
+    identity — no email, display name, or user id (#144). A field added here is
+    a field every Visitor can read.
     """
     return SessionListItem(
         session_id=session.session_id,
@@ -74,22 +83,27 @@ def session_list_item(session: Session) -> SessionListItem:
 @router.get(
     "/sessions",
     response_model=SessionList,
-    # History is the surface a User works in, so it requires a sign-in cookie
-    # whatever DEV_MODE says (#145): an anonymous caller gets 401, not an empty
-    # list. GET /sessions/{session_id} keeps the bounded gate — opening one
-    # Session's deck is browsing, and a Visitor is expected to do that.
-    dependencies=[Depends(require_sign_in)],
 )
 def list_sessions(
     phase: list[Phase] | None = Query(default=None),
     db: DBSession = Depends(get_db),
 ) -> SessionList:
-    """List History: every Session record, newest first, optionally filtered by
-    phase(s).
+    """List Sessions: every Session record, newest first, optionally filtered
+    by phase(s).
 
-    Requires a sign-in cookie (#145). Records are not scoped per User yet: every
-    signed-in caller is shown the same list (see
-    ``tests/routers/test_auth_gate.TestSessionsSharedAcrossUsers``).
+    A public read (#178): a Visitor is answered the same list as a User, and no
+    cap is applied — the surfaces that show this list have no pager (#143), so
+    everything listed has to be in the answer. Which phases to show is the
+    caller's question, not a server-side policy: the app asks for the Sessions
+    that reached materials, and nothing hides the rest from a Visitor.
+
+    The Explore feed (``routers.explore``) is the other list surface, and is
+    uncapped for the same reason; it stays a separate route because the two are
+    expected to diverge.
+
+    Records are not scoped per User yet: every caller is shown the same list
+    (see ``tests/routers/test_auth_gate.TestSessionsSharedAcrossUsers``), and
+    the payload carries no owner identity.
     """
     query = db.query(Session).order_by(Session.created_at.desc())
     if phase is not None:
@@ -99,7 +113,11 @@ def list_sessions(
 
 @router.get("/sessions/{session_id}", response_model=SessionState)
 def get_session(session_id: str, db: DBSession = Depends(get_db)) -> SessionState:
-    """Get current session state & progress."""
+    """Get current session state & progress.
+
+    A public read (#178): opening one Session's deck is browsing, which is what
+    a Visitor does (ADR-0004).
+    """
     session = db.get(Session, session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
