@@ -50,7 +50,7 @@ Copy `.env.example` to `.env` and adjust as needed:
 | `SANDBOX_SERVICE_TOKEN` | Shared token for the internal `/slides` gate (#103) | — |
 | `JWT_SECRET` | Shared sign-in token secret; **must match the frontend** | — |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `LLM_MODEL` | OpenAI-compatible LLM endpoint | `gpt-4o-mini` at api.openai.com |
-| `DEV_MODE` | `true`/`1` skips the sign-in gate on session endpoints | off |
+| `DEV_MODE` | `true`/`1` skips the sign-in gate on the Session **write** endpoints (the reads are public — #178) | off |
 | `MOCK_LLM` | `true`/`1` runs the pre-material phases without an LLM, on an in-memory DB | off |
 | `LA_PROMPTS_STUB` | `1` uses the public prompt stubs when `prompts/` is not checked out | off |
 | `MAX_PROBE_QUESTIONS` | Max questions per probe session | `10` |

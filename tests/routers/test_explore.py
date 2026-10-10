@@ -1,14 +1,19 @@
-"""Unit tests for routers/explore.py — the Explore feed (#144).
+"""Unit tests for routers/explore.py — the Explore feed (#144, #178).
 
-Acceptance criteria (issue #144):
+Acceptance criteria (issue #144, uncapped by issue #178):
 - An unauthenticated request for the public list returns the newest-first
-  list, capped at 20.
+  list of every Session that reached materials — no cap (#178).
 - Only Sessions that reached materials appear; Sessions still in intake
   (clarifying, probing, planning, reviewing) are excluded.
 - The payload carries no owner identity: no email, no display name, no user id.
 - The list shape matches the existing Session list item, so the generated
   client types stay authoritative.
 - Verified with a request that sends no cookie at all.
+
+The feed deliberately stays its own endpoint rather than being folded into
+``GET /sessions?phase=…``: the two surfaces are expected to diverge (Explore
+is a curated public feed, History is a User's own list), so their contracts are
+tested separately here and in ``test_sessions.py``.
 """
 
 from __future__ import annotations
@@ -123,7 +128,9 @@ class TestPhaseFilter:
         assert client.get("/explore/sessions").json() == {"sessions": []}
 
 
-class TestOrderAndCap:
+class TestOrderAndNoCap:
+    """Newest first, and every eligible Session is in the answer (#178)."""
+
     def test_newest_first(self, client, db, make_session):
         for i in range(3):
             make_session(
@@ -136,9 +143,11 @@ class TestOrderAndCap:
         resp = client.get("/explore/sessions")
         assert _goal_list(resp.json()) == ["goal 2", "goal 1", "goal 0"]
 
-    def test_capped_at_twenty_newest(self, client, db, make_session):
-        # 23 eligible Sessions, plus 5 newer intake Sessions that must
-        # neither appear nor consume a slot.
+    def test_the_feed_is_not_capped(self, client, db, make_session):
+        # The Explore surface has no pager (#143), so a cap is not a paused
+        # feed but a lost one: #178 removes it. 23 eligible Sessions — well
+        # past the twenty this route used to answer — plus 5 newer intake
+        # Sessions that must neither appear nor consume a slot.
         for i in range(23):
             make_session(
                 session_id=f"material-{i:02d}",
@@ -156,8 +165,8 @@ class TestOrderAndCap:
 
         resp = client.get("/explore/sessions")
         goals = _goal_list(resp.json())
-        assert len(goals) == 20
-        assert goals == [f"material {i:02d}" for i in range(22, 2, -1)]
+        assert len(goals) == 23
+        assert goals == [f"material {i:02d}" for i in range(22, -1, -1)]
 
 
 class TestNoOwnerIdentity:
