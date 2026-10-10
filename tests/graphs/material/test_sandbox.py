@@ -9,15 +9,22 @@ import httpx
 import pytest
 
 from graphs.material.sandbox import (
+    MAX_BRACE_APPEND,
     MAX_MATERIAL_ATTEMPTS,
+    MAX_SLIDE_SELF_REPAIR_TURNS,
     SLIDE_EXTRA_BODY_PARAMS,
     SLIDE_REASONING_EFFORT,
     SLIDE_SAMPLING_PROFILES,
     _compile_slide,
     _placeholder_slide_jsx,
+    _strip_markdown_fences,
+    _unbalanced_open_braces,
+    classify_compile_error,
     compile_error_for_feedback,
+    deterministic_repair,
     slide_sampling_bind_kwargs,
     slide_sampling_for_attempt,
+    validate_jsx,
 )
 
 
@@ -240,3 +247,276 @@ class TestCompileSlide:
         code, error = _compile_slide("original")
         assert code == "original"
         assert error == ""
+
+
+# --- Deterministic repairs (run before a failure is reported) ---
+
+
+class TestStripMarkdownFences:
+    def test_no_fences_unchanged(self):
+        code = "export default function S() { return null; }"
+        assert _strip_markdown_fences(code) == code
+
+    def test_strips_fenced_block_with_language_tag(self):
+        code = "```tsx\nexport default function S() { return null; }\n```"
+        assert _strip_markdown_fences(code) == (
+            "export default function S() { return null; }"
+        )
+
+    def test_strips_fenced_block_without_language_tag(self):
+        code = "```\nexport default function S() { return null; }\n```"
+        assert _strip_markdown_fences(code) == (
+            "export default function S() { return null; }"
+        )
+
+    def test_drops_prose_before_the_block(self):
+        code = "Here is the slide:\n```tsx\nconst x = 1;\n```"
+        assert _strip_markdown_fences(code) == "const x = 1;"
+
+    def test_drops_prose_after_the_block(self):
+        code = "```tsx\nconst x = 1;\n```\nHope that helps!"
+        assert _strip_markdown_fences(code) == "const x = 1;"
+
+    def test_single_unterminated_fence_unchanged(self):
+        code = "const x = `a`;\nconst y = 1;"
+        # One backtick-delimited template literal, no real fence pair.
+        assert _strip_markdown_fences(code) == code
+
+    def test_only_one_fence_marker_unchanged(self):
+        code = "const x = 1;\n```"
+        # A lone trailing ``` with no opening block is not a pair.
+        assert _strip_markdown_fences(code) == code
+
+    def test_empty_input(self):
+        assert _strip_markdown_fences("") == ""
+
+
+class TestUnbalancedOpenBraces:
+    def test_balanced_is_zero(self):
+        assert _unbalanced_open_braces("{ a: { b: 1 } }") == 0
+
+    def test_one_unclosed_open(self):
+        assert _unbalanced_open_braces("function S() { return <div>") == 1
+
+    def test_excess_closers_is_negative(self):
+        assert _unbalanced_open_braces("} } {") < 0
+
+    def test_ignores_braces_in_single_quotes(self):
+        assert _unbalanced_open_braces("const s = '}';") == 0
+
+    def test_ignores_braces_in_double_quotes(self):
+        assert _unbalanced_open_braces('const s = "{";') == 0
+
+    def test_ignores_braces_in_template_literals(self):
+        assert _unbalanced_open_braces("const s = `a ${b} c`; ") == 0
+
+    def test_ignores_line_comment_braces(self):
+        assert _unbalanced_open_braces("const x = 1; // { ") == 0
+
+    def test_ignores_block_comment_braces(self):
+        assert _unbalanced_open_braces("/* } } } */ const x = 1;") == 0
+
+    def test_unclosed_inside_a_component(self):
+        code = "export default function S() { return <div className='a'>"
+        # One open for the function body, plus the JSX has no unclosed brace
+        # here (className is a string). Expect 1.
+        assert _unbalanced_open_braces(code) == 1
+
+    def test_line_comment_ending_at_newline_is_skipped(self):
+        # A line comment holding a brace, then balanced code after the newline.
+        code = "const a = 1; // {\nconst b = {x: 1};"
+        assert _unbalanced_open_braces(code) == 0
+
+    def test_escaped_quote_in_string_is_skipped(self):
+        # An escaped quote does not end the string, so the trailing brace is
+        # still matched.
+        code = 'const s = "a\\"b"; const o = {}'
+        assert _unbalanced_open_braces(code) == 0
+
+
+class TestDeterministicRepair:
+    def test_clean_code_is_unchanged(self):
+        code = "export default function S() { return <div />; }"
+        repaired, repairs = deterministic_repair(code)
+        assert repaired == code
+        assert repairs == []
+
+    def test_strips_fences_and_reports(self):
+        code = "```tsx\nexport default function S() { return <div />; }\n```"
+        repaired, repairs = deterministic_repair(code)
+        assert repaired == "export default function S() { return <div />; }"
+        assert "strip_markdown_fences" in repairs
+
+    def test_appends_missing_braces_and_reports(self):
+        code = "export default function S() { return <div>"
+        repaired, repairs = deterministic_repair(code)
+        assert repaired.endswith("}")
+        assert "balance_braces" in repairs
+
+    def test_does_not_touch_balanced_braces(self):
+        code = "export default function S() { return <div />; }"
+        _, repairs = deterministic_repair(code)
+        assert "balance_braces" not in repairs
+
+    def test_both_repairs_together(self):
+        code = "```tsx\nexport default function S() { return <div>\n```"
+        # Fence strip yields `export default function S() { return <div>`;
+        # that has one unclosed brace, which balance_braces then appends.
+        repaired, repairs = deterministic_repair(code)
+        assert "strip_markdown_fences" in repairs
+        assert "balance_braces" in repairs
+        assert repaired.endswith("}")
+
+    def test_brace_balance_is_capped(self):
+        # Far more open than close: only up to MAX_BRACE_APPEND are appended.
+        code = "function f("
+        code += "{" * (MAX_BRACE_APPEND + 5)
+        repaired, _ = deterministic_repair(code)
+        appended = repaired.count("}") - code.count("}")
+        assert appended == MAX_BRACE_APPEND
+
+    def test_does_not_repair_excess_closers(self):
+        # Excess closers are not (dangerously) deleted.
+        code = "} const x = 1;}"
+        _, repairs = deterministic_repair(code)
+        assert "balance_braces" not in repairs
+
+    def test_returns_fresh_string(self):
+        code = "```tsx\nx\n```"
+        a, _ = deterministic_repair(code)
+        # Strings are immutable; ensure we did not mutate the input object.
+        assert deterministic_repair(code)[0] == a
+
+
+# --- validate_jsx: the self-repair tool bound to write_slide ---
+
+
+class TestValidateJsx:
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_success(self, mock_compile):
+        mock_compile.return_value = ("compiled", "")
+        code = "export default function S() { return <div />; }"
+        result = validate_jsx(code)
+        assert result["ok"] is True
+        assert result["compiled_code"] == "compiled"
+        assert result["source"] == code
+        assert result["error"] == ""
+        assert result["repairs"] == []
+
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_success_after_deterministic_repair(self, mock_compile):
+        # The raw (fenced) code fails to compile; the fence-stripped repair
+        # then compiles. Two sandbox calls, in that order.
+        mock_compile.side_effect = [(None, "syntax error"), ("compiled", "")]
+        code = "```tsx\nexport default function S() { return <div />; }\n```"
+        result = validate_jsx(code)
+        assert result["ok"] is True
+        # The source is the fence-stripped version that was compiled.
+        assert result["source"] == "export default function S() { return <div />; }"
+        assert "strip_markdown_fences" in result["repairs"]
+
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_valid_slide_with_apostrophe_in_text_is_not_corrupted(self, mock_compile):
+        """An apostrophe in JSX *text* (e.g. ``Let's``) is not a string
+        delimiter. The raw code is valid, so validate_jsx must compile it as-is
+        and return it unchanged — never appending a spurious closing brace.
+        """
+        code = "export default function S() { return <div>Let's go</div>; }"
+        mock_compile.return_value = ("compiled", "")
+        result = validate_jsx(code)
+        assert result["ok"] is True
+        assert result["source"] == code  # not corrupted
+        assert result["repairs"] == []
+        # Compiled the raw code once — no repair recompile.
+        assert mock_compile.call_count == 1
+        assert mock_compile.call_args[0][0] == code
+
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_failure_returns_reduced_error(self, mock_compile):
+        mock_compile.return_value = (None, "syntax error at line 3")
+        result = validate_jsx("bad jsx")
+        assert result["ok"] is False
+        assert result["compiled_code"] is None
+        assert result["error"] == "syntax error at line 3"
+        assert result["source"] == "bad jsx"
+
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_failure_reduces_transport_wrapper(self, mock_compile):
+        raw = (
+            "Transport/HTTP error: Client error '400 code must declare "
+            "`export default`' for url 'http://localhost:3001/api/compile' "
+            "For more information check: https://developer.mozilla.org"
+        )
+        mock_compile.return_value = (None, raw)
+        result = validate_jsx("bad")
+        assert result["ok"] is False
+        assert result["error"] == "400 code must declare `export default`"
+        # The raw transport wrapper is not echoed.
+        assert "Transport/HTTP error" not in result["error"]
+
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_records_repairs_on_failure(self, mock_compile):
+        mock_compile.return_value = (None, "still broken")
+        code = "```tsx\nfunction S() { return <div>\n```"
+        result = validate_jsx(code)
+        assert result["ok"] is False
+        assert "strip_markdown_fences" in result["repairs"]
+        assert "balance_braces" in result["repairs"]
+
+
+# --- Failure-class classifier (supports the skip-rate measurement) ---
+
+
+class TestClassifyCompileError:
+    def test_sandbox_timeout(self):
+        assert classify_compile_error("Request timed out after 30s") == "sandbox_timeout"
+        assert classify_compile_error("504 Gateway Timeout") == "sandbox_timeout"
+
+    def test_unknown_component(self):
+        assert (
+            classify_compile_error("could not resolve `./MyWidget`")
+            == "unknown_component"
+        )
+        assert (
+            classify_compile_error("no matching export `Card` from `lib`")
+            == "unknown_component"
+        )
+        assert (
+            classify_compile_error("`Foo` is not defined") == "unknown_component"
+        )
+
+    def test_truncated_output(self):
+        assert classify_compile_error("Unexpected eof") == "truncated_output"
+        assert classify_compile_error("unexpected end of file") == "truncated_output"
+
+    def test_syntax_error(self):
+        assert (
+            classify_compile_error(
+                '500 Build failed: ERROR: Expected "}" but found ")"'
+            )
+            == "syntax_error"
+        )
+        assert classify_compile_error("syntax error at line 3") == "syntax_error"
+
+    def test_other(self):
+        assert classify_compile_error("some opaque failure") == "other"
+
+    def test_priority_timeout_wins_over_syntax(self):
+        # A timeout mentioning a parse detail still classifies as a timeout.
+        assert (
+            classify_compile_error("timed out while parsing JSX")
+            == "sandbox_timeout"
+        )
+
+
+# --- Self-repair bound ---
+
+
+class TestMaxSelfRepairTurns:
+    def test_is_a_non_negative_int(self):
+        assert isinstance(MAX_SLIDE_SELF_REPAIR_TURNS, int)
+        assert MAX_SLIDE_SELF_REPAIR_TURNS >= 0
+
+    def test_default_is_two(self):
+        # The unconfigured default allows two repair turns (three writes).
+        assert MAX_SLIDE_SELF_REPAIR_TURNS == 2

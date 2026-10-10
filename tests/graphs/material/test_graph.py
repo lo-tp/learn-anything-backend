@@ -162,6 +162,14 @@ class TestStageTimingAccumulation:
                 side_effect=lambda llm, lang, opts: opts,
             ),
             patch("graphs.material.nodes._compile_slide", return_value=("code", "")),
+            # Self-repair validates on the first pass (no repair turns).
+            patch(
+                "graphs.material.nodes.validate_jsx",
+                side_effect=lambda code: {
+                    "ok": True, "compiled_code": "code", "source": code,
+                    "error": "", "repairs": [],
+                },
+            ),
         ):
             config: RunnableConfig = {
                 "configurable": {"thread_id": "timing-e2e"},

@@ -19,6 +19,15 @@ logger = logging.getLogger(__name__)
 SANDBOX_URL = os.getenv("SANDBOX_URL", "http://localhost:8080")
 _COMPILE_TIMEOUT_S = 30.0
 MAX_MATERIAL_ATTEMPTS = max(1, int(os.getenv("MAX_MATERIAL_ATTEMPTS", "3")))
+# Bounded self-repair turns: how many model-driven repair turns a single
+# write_slide attempt makes against ``validate_jsx`` before handing off to the
+# outer retry routing (MAX_MATERIAL_ATTEMPTS). 0 disables the inner loop.
+MAX_SLIDE_SELF_REPAIR_TURNS = max(
+    0, int(os.getenv("MAX_SLIDE_SELF_REPAIR_TURNS", "2"))
+)
+# Safety cap on how many closing braces ``balance_braces`` may append to a
+# truncated slide; beyond this the output is garbled, not merely truncated.
+MAX_BRACE_APPEND = 10
 
 # --- Slide-generation sampling profiles ---
 # One profile per write attempt. All attempts use the same deterministic
@@ -162,6 +171,216 @@ def _compile_slide(code: str) -> tuple[str | None, str]:
         )
         return None, data["error"]
     return (data.get("code") or code), ""
+
+
+# --- Self-repair tool (validate_jsx) and deterministic repairs ---
+#
+# ``validate_jsx`` is the tool the ``write_slide`` self-repair loop binds to:
+# the model writes JSX, the node validates it here (deterministic repairs
+# first, then a sandbox compile), and on failure the reduced error is handed
+# back to the model for a bounded repair turn. The sandbox compile is the
+# authoritative check — deterministic repairs never replace it.
+
+
+def _strip_markdown_fences(code: str) -> str:
+    """Strip a markdown code fence (```lang ... ```) if present.
+
+    Returns the inner code block if there is a fence pair, else the input
+    unchanged. Only the first opening and last closing fence are considered
+    (a slide is one block); prose before/after the block is dropped with the
+    fences. A leading short language-tag line (e.g. ``tsx``) is removed too.
+    """
+    start = code.find("```")
+    end = code.rfind("```")
+    if start == -1 or end <= start:
+        return code
+    inner = code[start + 3 : end]
+    # Drop a leading language-tag line (a short identifier followed by a newline).
+    m = re.match(r"^\s*[a-zA-Z0-9_+-]{0,10}\s*\n", inner)
+    if m:
+        inner = inner[m.end() :]
+    return inner.strip()
+
+
+def _unbalanced_open_braces(code: str) -> int:
+    """Net unclosed ``{`` minus ``}`` count, ignoring strings and comments.
+
+    Best-effort (a string-aware scan, so braces inside quotes, template
+    literals, ``//`` and ``/* */`` comments are not counted). A positive
+    result means the code has unclosed openers (the truncated-output case);
+    zero or negative means balanced or excess closers (left alone — deleting
+    closers is not a safe repair).
+    """
+    delta = 0
+    i = 0
+    n = len(code)
+    in_str: str | None = None
+    in_line_comment = False
+    in_block_comment = False
+    while i < n:
+        c = code[i]
+        nxt = code[i + 1] if i + 1 < n else ""
+        if in_line_comment:
+            if c == "\n":
+                in_line_comment = False
+            i += 1
+            continue
+        if in_block_comment:
+            if c == "*" and nxt == "/":
+                in_block_comment = False
+                i += 2
+                continue
+            i += 1
+            continue
+        if in_str is not None:
+            if c == "\\":
+                i += 2
+                continue
+            if c == in_str:
+                in_str = None
+            i += 1
+            continue
+        # Not in a string or comment.
+        if c == "/" and nxt == "/":
+            in_line_comment = True
+            i += 2
+            continue
+        if c == "/" and nxt == "*":
+            in_block_comment = True
+            i += 2
+            continue
+        if c in ("'", '"', "`"):
+            in_str = c
+            i += 1
+            continue
+        if c == "{":
+            delta += 1
+        elif c == "}":
+            delta -= 1
+        i += 1
+    return delta
+
+
+def deterministic_repair(code: str) -> tuple[str, list[str]]:
+    """Apply safe, mechanical repairs to raw slide JSX before validation.
+
+    Repairs only ever *add* structure (strip fences, append missing closers);
+    they never delete model content, so they cannot break an already-valid
+    module. Returns ``(repaired_code, names)`` where ``names`` lists the
+    repairs that actually changed the code (empty when nothing needed fixing).
+    """
+    repairs: list[str] = []
+    src = code
+
+    stripped = _strip_markdown_fences(src)
+    if stripped != src:
+        src = stripped
+        repairs.append("strip_markdown_fences")
+
+    src = src.strip()
+
+    delta = _unbalanced_open_braces(src)
+    if delta > 0:
+        n = min(delta, MAX_BRACE_APPEND)
+        src = src + "\n" + "}" * n
+        repairs.append("balance_braces")
+
+    return src, repairs
+
+
+def validate_jsx(code: str) -> dict:
+    """Validate a slide's JSX: compile it; if it fails, apply deterministic
+    repairs and retry.
+
+    The raw code is compiled *first*, so a valid slide (e.g. one whose text
+    contains apostrophes) is returned unchanged and never corrupted by a
+    repair. Only code that already failed to compile is touched by the
+    additive, best-effort deterministic repairs — which run before the
+    failure is reported to the model.
+
+    This is the tool the ``write_slide`` self-repair loop binds to. It returns
+    a structured result rather than raising:
+
+    - ``ok`` True: ``compiled_code`` is the sandbox output and ``source`` is
+      the (possibly repaired) source that compiled.
+    - ``ok`` False: ``error`` is the reduced, LLM-facing compile error.
+    - ``repairs`` lists the deterministic repairs applied to reach ``source``.
+    """
+    compiled, error = _compile_slide(code)
+    if compiled is not None:
+        return {
+            "ok": True,
+            "compiled_code": compiled,
+            "source": code,
+            "error": "",
+            "repairs": [],
+        }
+    # The raw code failed to compile: try the deterministic repairs (additive
+    # only, so they cannot break an already-valid module).
+    source, repairs = deterministic_repair(code)
+    if source != code:
+        repaired_compiled, repaired_error = _compile_slide(source)
+        if repaired_compiled is not None:
+            return {
+                "ok": True,
+                "compiled_code": repaired_compiled,
+                "source": source,
+                "error": "",
+                "repairs": repairs,
+            }
+        error = repaired_error
+    return {
+        "ok": False,
+        "compiled_code": None,
+        "source": source,
+        "error": compile_error_for_feedback(error),
+        "repairs": repairs,
+    }
+
+
+def classify_compile_error(error: str) -> str:
+    """Best-effort failure class for a reduced slide compile error.
+
+    One of ``sandbox_timeout``, ``unknown_component``, ``truncated_output``,
+    ``syntax_error``, ``other``. Makes slide-skip rates measurable by class
+    (the C1.2 failure-class classifier builds on this).
+    """
+    e = error.lower()
+    if any(t in e for t in ("timeout", "timed out", "deadline", "gateway timeout")):
+        return "sandbox_timeout"
+    if any(
+        t in e
+        for t in (
+            "could not resolve",
+            "no matching export",
+            "not exported",
+            "is not exported",
+            "module not found",
+            "cannot find module",
+            "is not defined",
+            "cannot find name",
+        )
+    ):
+        return "unknown_component"
+    if any(
+        t in e for t in ("unexpected eof", "unexpected end", "end of file", "eof")
+    ):
+        return "truncated_output"
+    if any(
+        t in e
+        for t in (
+            "syntax",
+            "expected",
+            "parse",
+            "unexpected",
+            "invalid",
+            "missing",
+            "unclosed",
+            "build failed",
+        )
+    ):
+        return "syntax_error"
+    return "other"
 
 
 # --- Placeholder slide ---
