@@ -902,7 +902,7 @@ The graph loops: generate/refine → interrupt (show plan to user) → user appr
 
 | Node | LLM task | Runs |
 |------|----------|------|
-| `research_topic` | Map the topic: core concepts, first principles, standard framings, common gotchas. Identify the unconditional truths. (This is the "scope the field" step from teacher.md.) | First pass only |
+| `research_topic` | Map the topic: core concepts, first principles, standard framings, common gotchas. Identify the unconditional truths. (This is the "scope the field" step from teacher.md.) It may ground itself in live web search: it is the only node in any graph that is given the external search tool — Tavily, behind its MCP server (`core/external_tools.py`, #166). No search configured, or the server unreachable, and it runs as before. | First pass only |
 | `design_plan` | Given research + boundary_map + current_plan (baseline, if refining) + adjustment (if refining): determine which truths the learner already has, build the dependency-ordered step list from their boundary to the goal. If a `current_plan` exists, use it as the starting structure and apply the adjustment (add/remove/reorder steps, adjust depth). Each step is small, focused, and explicitly dependent on prior steps. | Every pass |
 | `render_plan` | Format the plan: write the prose summary (why this order, given their starting point), generate the Mermaid DAG, assign step IDs and metadata. | Every pass |
 

@@ -4,15 +4,18 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel
 
 from graphs.common import (
+    _MAX_TOOL_CALL_ROUNDS,
     structured_invoke,
     structured_invoke_messages,
+    structured_invoke_with_tools,
     unknown_option,
     with_unknown_option,
 )
+from tests.tool_shapes import mcp_shaped_tool as _mcp_shaped_tool
 
 # --- structured_invoke ---
 
@@ -169,3 +172,142 @@ class TestWithUnknownOption:
         with self._patch_unknown("Je ne sais pas"):
             result = with_unknown_option(MagicMock(), "French", ["A"])
         assert result == ["A", "Je ne sais pas"]
+
+
+# --- structured_invoke_with_tools (#166) ---
+
+
+def _asking_for_a_tool(name: str = "tavily_search") -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": name, "args": {"query": "calculus pedagogy"}, "id": "c1"}],
+    )
+
+
+class TestStructuredInvokeWithTools:
+    def test_no_tools_is_the_plain_structured_path(self):
+        """Mock mode / search off: nothing is bound, the old path is unchanged."""
+        llm = MagicMock()
+        with patch(
+            "graphs.common.structured_invoke_messages",
+            return_value=_DummySchema(value="x"),
+        ) as structured:
+            result = structured_invoke_with_tools(
+                llm, _DummySchema, "sys", "human", []
+            )
+        assert result.value == "x"
+        llm.bind_tools.assert_not_called()
+        assert structured.call_args[0][2] == [
+            SystemMessage(content="sys"),
+            HumanMessage(content="human"),
+        ]
+
+    def test_the_tools_are_offered_to_the_model(self):
+        llm = MagicMock()
+        calls: list = []
+        tool = _mcp_shaped_tool("tavily_search", calls, "no results")
+        llm.bind_tools.return_value.invoke.return_value = AIMessage(content="ok")
+        with patch(
+            "graphs.common.structured_invoke_messages",
+            return_value=_DummySchema(value="x"),
+        ):
+            structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool])
+        llm.bind_tools.assert_called_once_with([tool])
+
+    def test_the_model_may_answer_without_searching(self):
+        llm = MagicMock()
+        calls: list = []
+        tool = _mcp_shaped_tool("tavily_search", calls, "unused")
+        llm.bind_tools.return_value.invoke.return_value = AIMessage(content="known")
+        with patch(
+            "graphs.common.structured_invoke_messages",
+            return_value=_DummySchema(value="x"),
+        ):
+            structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool])
+        assert calls == []
+        assert llm.bind_tools.return_value.invoke.call_count == 1
+
+    def test_search_results_go_back_to_the_model_before_the_answer(self):
+        """The grounding the issue asks for: ask, search, then answer."""
+        llm = MagicMock()
+        calls: list = []
+        tool = _mcp_shaped_tool("tavily_search", calls, "how the field is framed")
+        # First turn: the model asks to search. Second: it has nothing to add.
+        llm.bind_tools.return_value.invoke.side_effect = [
+            _asking_for_a_tool(),
+            AIMessage(content="enough"),
+        ]
+        with patch(
+            "graphs.common.structured_invoke_messages",
+            return_value=_DummySchema(value="x"),
+        ) as structured:
+            structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool])
+
+        assert calls == ["calculus pedagogy"]
+        messages = structured.call_args[0][2]
+        assert isinstance(messages[2], AIMessage)  # the tool request
+        assert isinstance(messages[3], ToolMessage)
+        assert messages[3].tool_call_id == "c1"
+        assert "how the field is framed" in str(messages[3].content)
+
+    def test_a_failing_search_does_not_break_the_answer(self):
+        """Search is optional: a dead Tavily must not fail the request."""
+        llm = MagicMock()
+        calls: list = []
+        tool = _mcp_shaped_tool("tavily_search", calls, ConnectionError("down"))
+        llm.bind_tools.return_value.invoke.side_effect = [
+            _asking_for_a_tool(),
+            AIMessage(content="answer anyway"),
+        ]
+        with patch(
+            "graphs.common.structured_invoke_messages",
+            return_value=_DummySchema(value="x"),
+        ) as structured:
+            result = structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool])
+
+        assert result.value == "x"
+        tool_message = structured.call_args[0][2][3]
+        assert isinstance(tool_message, ToolMessage)
+        assert tool_message.status == "error"
+
+    def test_a_tool_name_the_app_never_offered_is_reported_not_fatal(self):
+        llm = MagicMock()
+        calls: list = []
+        tool = _mcp_shaped_tool("tavily_search", calls, "unused")
+        llm.bind_tools.return_value.invoke.side_effect = [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "tavily_crawl", "args": {"url": "x"}, "id": "c9"}
+                ],
+            ),
+            AIMessage(content="answer anyway"),
+        ]
+        with patch(
+            "graphs.common.structured_invoke_messages",
+            return_value=_DummySchema(value="x"),
+        ) as structured:
+            result = structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool])
+        assert result.value == "x"
+        assert calls == []
+        tool_message = structured.call_args[0][2][3]
+        assert tool_message.status == "error"
+        assert "tavily_crawl" in str(tool_message.content)
+
+    def test_tool_use_is_bounded(self):
+        """A model that keeps searching must not spin the request forever."""
+        llm = MagicMock()
+        calls: list = []
+        tool = _mcp_shaped_tool("tavily_search", calls, "more")
+        llm.bind_tools.return_value.invoke.side_effect = lambda _messages: (
+            _asking_for_a_tool()
+        )
+        with patch(
+            "graphs.common.structured_invoke_messages",
+            return_value=_DummySchema(value="x"),
+        ) as structured:
+            structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool])
+        assert len(calls) == _MAX_TOOL_CALL_ROUNDS
+        assert llm.bind_tools.return_value.invoke.call_count == _MAX_TOOL_CALL_ROUNDS
+        # The answer is still produced over the accumulated history.
+        assert len(structured.call_args[0][2]) == 2 + 2 * _MAX_TOOL_CALL_ROUNDS
