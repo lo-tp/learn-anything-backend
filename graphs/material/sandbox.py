@@ -338,47 +338,115 @@ def validate_jsx(code: str) -> dict:
     }
 
 
-def classify_compile_error(error: str) -> str:
-    """Best-effort failure class for a reduced slide compile error.
+# --- Slide failure classes (C1.2) ---
+#
+# The closed set of classes a failed slide compile attempt maps to. Every
+# attempt maps to exactly one; ``other`` is the honest remainder for an error
+# that carries no signal (a bare ``500 Internal Server Error``, for example).
+# This is the taxonomy ``scripts/classify_slide_failures.py`` reports over
+# persisted attempts, and the classes ``compile_slide`` stamps on live
+# failures — one taxonomy, so the offline report and the live traces agree.
+SLIDE_FAILURE_CLASSES: tuple[str, ...] = (
+    "syntax_error",
+    "unknown_component",
+    "truncated_output",
+    "sandbox_timeout",
+    "content_spec_invalid",
+    "other",
+)
 
-    One of ``sandbox_timeout``, ``unknown_component``, ``truncated_output``,
-    ``syntax_error``, ``other``. Makes slide-skip rates measurable by class
-    (the C1.2 failure-class classifier builds on this).
+# Tokens per class, lower-cased, matched against the reduced error. Classes are
+# tested in the order of the checks in ``classify_compile_error``: specific
+# signals before generic ones, because an esbuild diagnostic always opens with
+# "Build failed" and a sandbox gate rejection can read like a syntax complaint.
+_TIMEOUT_TOKENS: tuple[str, ...] = (
+    "timeout",
+    "timed out",
+    "deadline",
+    "gateway timeout",
+)
+# A name the sandbox cannot resolve — at build time (an import it cannot
+# satisfy) or at render time (a bare identifier the module never declared).
+_UNKNOWN_COMPONENT_TOKENS: tuple[str, ...] = (
+    "could not resolve",
+    "no matching export",
+    "not exported",
+    "is not exported",
+    "module not found",
+    "cannot find module",
+    "is not defined",
+    "cannot find name",
+)
+# The sandbox's content gate rejecting what came back *as a slide*: too short
+# to be a slide, not a module, default export is not a component, renders
+# nothing, or threw while being rendered headlessly. (A gate throw that names an
+# unresolvable identifier was already claimed by _UNKNOWN_COMPONENT_TOKENS.)
+_CONTENT_SPEC_TOKENS: tuple[str, ...] = (
+    "invalid json body",
+    "must be a non-empty string",
+    "must be at least",
+    "code must declare",
+    "default export must be a function",
+    "renders empty",
+    "component failed the gate",
+)
+# The parser ran out of input: the model's answer was cut off mid-module. Note
+# that esbuild's "Unterminated string literal" is deliberately NOT here — the
+# persisted occurrences are complete modules with a quoting bug inside a math
+# string, not a truncated answer, and they belong with the syntax errors.
+_TRUNCATED_TOKENS: tuple[str, ...] = (
+    "unexpected eof",
+    "unexpected end",
+    "end of file",
+    "eof",
+)
+_SYNTAX_TOKENS: tuple[str, ...] = (
+    "syntax",
+    "expected",
+    "parse",
+    "unexpected",
+    "invalid",
+    "missing",
+    "unclosed",
+    "build failed",
+)
+
+
+def classify_compile_error(error: str) -> str:
+    """The failure class for a reduced slide compile error.
+
+    Returns exactly one of ``SLIDE_FAILURE_CLASSES``:
+
+    - ``sandbox_timeout``: the compile never came back (transport/timeout, a
+      gateway timeout) — nothing is known about the slide itself.
+    - ``unknown_component``: a name the sandbox cannot resolve, at build time
+      ("could not resolve", "no matching export") or at render time
+      ("``Foo`` is not defined").
+    - ``content_spec_invalid``: the content gate rejected what the model
+      returned *as a slide* — too short, not a module (no ``export
+      default``), default export is not a component, renders empty, or threw
+      while rendering. The parser did not reject the code.
+    - ``truncated_output``: the parser hit the end of the input: the model's
+      answer was cut off mid-module.
+    - ``syntax_error``: esbuild rejected the source ("Build failed with 1
+      error: ...", "not valid inside a JSX element").
+    - ``other``: the error carries no usable signal.
+
+    Best-effort but total: an unrecognised error is ``other``, never a raise.
+    Makes slide-skip rates measurable by class; the C1.2 classifier
+    (``scripts/classify_slide_failures.py``) reports it over persisted
+    attempts.
     """
     e = error.lower()
-    if any(t in e for t in ("timeout", "timed out", "deadline", "gateway timeout")):
+    if any(t in e for t in _TIMEOUT_TOKENS):
         return "sandbox_timeout"
-    if any(
-        t in e
-        for t in (
-            "could not resolve",
-            "no matching export",
-            "not exported",
-            "is not exported",
-            "module not found",
-            "cannot find module",
-            "is not defined",
-            "cannot find name",
-        )
-    ):
+    if any(t in e for t in _UNKNOWN_COMPONENT_TOKENS):
         return "unknown_component"
-    if any(
-        t in e for t in ("unexpected eof", "unexpected end", "end of file", "eof")
-    ):
+    if any(t in e for t in _CONTENT_SPEC_TOKENS):
+        return "content_spec_invalid"
+    if any(t in e for t in _TRUNCATED_TOKENS):
         return "truncated_output"
-    if any(
-        t in e
-        for t in (
-            "syntax",
-            "expected",
-            "parse",
-            "unexpected",
-            "invalid",
-            "missing",
-            "unclosed",
-            "build failed",
-        )
-    ):
+    if any(t in e for t in _SYNTAX_TOKENS):
         return "syntax_error"
     return "other"
 
