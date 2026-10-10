@@ -169,39 +169,65 @@ class TestWriteSlide:
         base.update(overrides)  # type: ignore[arg-type]
         return base
 
-    def test_returns_jsx_and_resets_error(self):
-        llm = _make_llm()
-        mock_out = SlideOut(code="export default function S() {}")
-        with patch(
-            "graphs.material.nodes.structured_invoke_messages", return_value=mock_out
-        ):
-            node = make_write_slide(llm)
-            result = node(self._state(last_compile_error="old error"))
+    @staticmethod
+    def _validate_ok(source: str) -> dict:
+        return {
+            "ok": True, "compiled_code": "compiled", "source": source,
+            "error": "", "repairs": [],
+        }
 
+    @staticmethod
+    def _validate_fail(error: str, source: str, repairs=None) -> dict:
+        return {
+            "ok": False, "compiled_code": None, "source": source,
+            "error": error, "repairs": repairs or [],
+        }
+
+    def _run(self, state: MaterialState, writes, validates):
+        """Run write_slide with scripted LLM writes and validate_jsx results.
+
+        Returns ``(result, invoke_mock)`` so tests can assert on the LLM calls
+        (one call per write/repair turn) and on the node output.
+        """
+        with (
+            patch(
+                "graphs.material.nodes.structured_invoke_messages",
+                side_effect=writes,
+            ) as mock_invoke,
+            patch("graphs.material.nodes.validate_jsx", side_effect=validates),
+        ):
+            node = make_write_slide(_make_llm())
+            result = node(state)
+        return result, mock_invoke
+
+    def test_returns_jsx_and_resets_error(self):
+        result, invoke = self._run(
+            self._state(last_compile_error="old error"),
+            writes=[SlideOut(code="export default function S() {}")],
+            validates=[self._validate_ok("export default function S() {}")],
+        )
         assert result["current_slide_jsx"] == "export default function S() {}"
         assert result["last_compile_error"] is None
         assert result["attempts_by_slide"] == [1]
         assert result["current_slide_prompt"] is not None
+        # A first-pass compile needs no repair turn.
+        assert invoke.call_count == 1
 
     def test_increments_attempts(self):
-        llm = _make_llm()
-        mock_out = SlideOut(code="export default function S() {}")
-        with patch(
-            "graphs.material.nodes.structured_invoke_messages", return_value=mock_out
-        ):
-            node = make_write_slide(llm)
-            result = node(self._state(attempts_by_slide=[2]))
+        result, _ = self._run(
+            self._state(attempts_by_slide=[2]),
+            writes=[SlideOut(code="export default function S() {}")],
+            validates=[self._validate_ok("export default function S() {}")],
+        )
         assert result["attempts_by_slide"] == [3]
 
     def _kwargs_for_attempt(self, attempts_by_slide: list[int]):
-        llm = _make_llm()
-        mock_out = SlideOut(code="export default function S() {}")
-        with patch(
-            "graphs.material.nodes.structured_invoke_messages", return_value=mock_out
-        ) as mock_invoke:
-            node = make_write_slide(llm)
-            node(self._state(attempts_by_slide=attempts_by_slide))
-        return mock_invoke.call_args.kwargs
+        _, invoke = self._run(
+            self._state(attempts_by_slide=attempts_by_slide),
+            writes=[SlideOut(code="export default function S() {}")],
+            validates=[self._validate_ok("export default function S() {}")],
+        )
+        return invoke.call_args.kwargs
 
     def test_first_attempt_uses_creative_profile(self):
         from graphs.material.sandbox import slide_sampling_bind_kwargs
@@ -252,14 +278,12 @@ class TestWriteSlide:
             assert "reasoning_effort" not in kwargs.get("extra_body", {})
 
     def _human_content(self, **state_overrides) -> str:
-        llm = _make_llm()
-        mock_out = SlideOut(code="export default function S() {}")
-        with patch(
-            "graphs.material.nodes.structured_invoke_messages", return_value=mock_out
-        ) as mock_invoke:
-            node = make_write_slide(llm)
-            node(self._state(**state_overrides))
-        return mock_invoke.call_args[0][2][-1].content
+        _, invoke = self._run(
+            self._state(**state_overrides),
+            writes=[SlideOut(code="export default function S() {}")],
+            validates=[self._validate_ok("export default function S() {}")],
+        )
+        return invoke.call_args[0][2][-1].content
 
     def test_retry_prompt_includes_sanitized_compile_error(self):
         human_content = self._human_content(
@@ -270,7 +294,7 @@ class TestWriteSlide:
                 "For more information check: https://developer.mozilla.org"
             ),
         )
-        # The meaningful message is fed back...
+        # The carried-over error from a prior attempt is fed back...
         assert "failed to compile" in human_content
         assert "code must declare `export default`" in human_content
         # ...but the raw transport wrapper is not echoed.
@@ -282,13 +306,11 @@ class TestWriteSlide:
         assert "failed to compile" not in human_content
 
     def test_records_stage_timing(self):
-        llm = _make_llm()
-        mock_out = SlideOut(code="export default function S() {}")
-        with patch(
-            "graphs.material.nodes.structured_invoke_messages", return_value=mock_out
-        ):
-            node = make_write_slide(llm)
-            result = node(self._state())
+        result, _ = self._run(
+            self._state(),
+            writes=[SlideOut(code="export default function S() {}")],
+            validates=[self._validate_ok("export default function S() {}")],
+        )
 
         (timing,) = result["stage_timings"]
         assert timing["stage"] == "write_slide"
@@ -296,6 +318,135 @@ class TestWriteSlide:
             "step_id": "s1", "slide_index": 1, "attempt": 1,
         }
         assert timing["duration_seconds"] >= 0
+
+    # --- Bounded self-repair loop ---
+
+    def test_repairs_then_succeeds(self):
+        """First validation fails, a repair turn is issued, second passes."""
+        result, invoke = self._run(
+            self._state(),
+            writes=[
+                SlideOut(code="broken v1"),
+                SlideOut(code="fixed v2"),
+            ],
+            validates=[
+                self._validate_fail("syntax error at line 2", "broken v1"),
+                self._validate_ok("fixed v2"),
+            ],
+        )
+        assert result["current_slide_jsx"] == "fixed v2"
+        assert result["last_compile_error"] is None
+        # One initial write + one repair turn.
+        assert invoke.call_count == 2
+
+    def test_exhausts_self_repair_and_carries_error(self):
+        """All validations fail: one initial write + MAX repair turns, then
+        the last reduced error is carried to the outer retry routing."""
+        from graphs.material.sandbox import MAX_SLIDE_SELF_REPAIR_TURNS
+
+        n = MAX_SLIDE_SELF_REPAIR_TURNS
+        result, invoke = self._run(
+            self._state(),
+            writes=[SlideOut(code=f"v{i}") for i in range(n + 1)],
+            validates=[
+                self._validate_fail(f"error {i}", f"v{i}")
+                for i in range(n + 1)
+            ],
+        )
+        assert result["last_compile_error"] == f"error {n}"
+        # Final JSX is the last repair's output.
+        assert result["current_slide_jsx"] == f"v{n}"
+        assert invoke.call_count == n + 1
+
+    def test_deterministic_repair_source_is_stored(self):
+        """When validate_jsx applies a deterministic repair, the repaired
+        source it reports is what gets stored (not the raw model output)."""
+        result, _ = self._run(
+            self._state(),
+            writes=[SlideOut(code="```tsx\nraw\n```")],
+            validates=[{
+                "ok": True, "compiled_code": "compiled", "source": "raw",
+                "error": "", "repairs": ["strip_markdown_fences"],
+            }],
+        )
+        assert result["current_slide_jsx"] == "raw"
+        assert result["last_compile_error"] is None
+
+    def test_no_repair_turn_when_first_validation_passes(self):
+        _, invoke = self._run(
+            self._state(),
+            writes=[SlideOut(code="good")],
+            validates=[self._validate_ok("good")],
+        )
+        assert invoke.call_count == 1
+
+    def test_repair_turn_prompt_includes_reduced_error_and_jsx(self):
+        _, invoke = self._run(
+            self._state(),
+            writes=[SlideOut(code="broken"), SlideOut(code="fixed")],
+            validates=[
+                self._validate_fail(
+                    "400 code must declare `export default`", "broken"
+                ),
+                self._validate_ok("fixed"),
+            ],
+        )
+        # The repair turn is the second LLM call; its human message carries
+        # the reduced error, the failed JSX, and a repair instruction.
+        repair_human = invoke.call_args_list[1][0][2][-1].content
+        assert "failed to validate" in repair_human
+        assert "code must declare `export default`" in repair_human
+        assert "broken" in repair_human
+
+    def test_repair_turn_prompt_reports_deterministic_repairs(self):
+        _, invoke = self._run(
+            self._state(),
+            writes=[SlideOut(code="broken"), SlideOut(code="fixed")],
+            validates=[
+                self._validate_fail(
+                    "syntax error at line 2", "stripped", repairs=["balance_braces"]
+                ),
+                self._validate_ok("fixed"),
+            ],
+        )
+        repair_human = invoke.call_args_list[1][0][2][-1].content
+        assert "balance_braces" in repair_human
+
+    def test_includes_established_concepts_in_initial_prompt(self):
+        _, invoke = self._run(
+            self._state(
+                established_concepts=[{"title": "Prior", "key_points": ["fact1"]}]
+            ),
+            writes=[SlideOut(code="x")],
+            validates=[self._validate_ok("x")],
+        )
+        human = invoke.call_args[0][2][-1].content
+        assert "Prior" in human
+        assert "fact1" in human
+
+    def test_repair_turn_includes_established_concepts(self):
+        _, invoke = self._run(
+            self._state(
+                established_concepts=[{"title": "Prior", "key_points": ["fact1"]}]
+            ),
+            writes=[SlideOut(code="broken"), SlideOut(code="fixed")],
+            validates=[
+                self._validate_fail("syntax error", "broken"),
+                self._validate_ok("fixed"),
+            ],
+        )
+        repair_human = invoke.call_args_list[1][0][2][-1].content
+        assert "Prior" in repair_human
+
+    def test_odd_backticks_are_tolerated_not_fatal(self):
+        # An odd number of backticks (possible broken template literal) is
+        # logged, not fatal: the JSX is still returned.
+        result, _ = self._run(
+            self._state(),
+            writes=[SlideOut(code="const x = `a;")],  # one backtick
+            validates=[self._validate_ok("const x = `a;")],
+        )
+        assert result["current_slide_jsx"] == "const x = `a;"
 
 
 # --- make_compile_slide ---
@@ -339,6 +490,16 @@ class TestCompileSlide:
         assert "slide_index" not in result  # stays at 0 for retry
         assert len(result["failed_attempts"]) == 1
         assert result["failed_attempts"][0]["error"] == "syntax error"
+
+    @patch("graphs.material.nodes._compile_slide")
+    def test_failed_attempt_is_tagged_with_failure_class(self, mock_compile):
+        # The failure class rides along on the failed attempt so skip rates
+        # are measurable by class (C1.2 builds on this).
+        mock_compile.return_value = (None, "could not resolve `./Widget`")
+        node = make_compile_slide(MagicMock())
+        result = node(self._state())
+
+        assert result["failed_attempts"][0]["failure_class"] == "unknown_component"
 
     @patch("graphs.material.nodes._compile_slide")
     def test_exhausted_when_placeholder_also_fails(self, mock_compile):
@@ -457,6 +618,35 @@ class TestWriteQuestions:
         assert q["text"] == "Q1?"
         assert q["correct_index"] == 0
         assert "I don't know" in q["options"]
+
+    def test_includes_established_concepts_in_prompt(self):
+        llm = MagicMock()
+        mock_out = QuestionsOut(
+            questions=[
+                QuestionDraft(
+                    text=f"Q{i}?", options=["A", "B"], correct_index=0, explanation="e"
+                )
+                for i in range(3)
+            ]
+        )
+        with (
+            patch("graphs.material.nodes.structured_invoke", return_value=mock_out),
+            patch(
+                "graphs.material.nodes.with_unknown_option",
+                side_effect=lambda llm, lang, opts: opts,
+            ),
+        ):
+            node = make_write_questions(llm)
+            node(
+                {
+                    "step": {"id": "s1", "title": "T", "description": "d"},
+                    "established_concepts": [
+                        {"title": "Prior", "key_points": ["fact1"]}
+                    ],
+                    "learner_context": {},
+                    "language": "English",
+                }
+            )
 
     def test_question_ids_are_sequential(self):
         llm = MagicMock()
