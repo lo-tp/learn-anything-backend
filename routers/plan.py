@@ -1,5 +1,9 @@
 """Plan phase endpoints: generate, adjust, approve, and material polling.
 
+The writes here are gated per route (#178); ``GET /sessions/{session_id}/materials``
+— the generated deck — is a public read and declares no gate. Ownership begins
+at the write, not the read.
+
 Approving the plan schedules ``generate_materials`` as a FastAPI background
 task: a per-step driver that commits one ``StepMaterial`` row (plus one
 ``SlideContent`` row per slide and ``FailedSlide`` rows for failed attempts)
@@ -51,7 +55,13 @@ from graphs import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["plan"], dependencies=[Depends(require_auth)])
+router = APIRouter(tags=["plan"])
+
+# The plan writes keep the DEV_MODE-bounded gate (#89): a local run can walk
+# the phases without a cookie, production asks for one. It is declared per route
+# rather than on the router because this router also serves the deck read —
+# `GET /sessions/{session_id}/materials` — which is a public read (#178).
+GATE_THE_WRITES = [Depends(require_auth)]
 
 # One lock per session: a double-approve must not race check-then-insert on
 # the shared in-memory SQLite connection. The guard protects lock creation.
@@ -505,6 +515,7 @@ def _persist_plan(
 @router.post(
     "/sessions/{session_id}/plan/generate",
     response_model=PlanOut,
+    dependencies=GATE_THE_WRITES,
 )
 def generate_plan(session_id: str, db: DBSession = Depends(get_db)) -> PlanOut:
     """Trigger plan generation."""
@@ -575,6 +586,7 @@ def generate_plan(session_id: str, db: DBSession = Depends(get_db)) -> PlanOut:
 @router.post(
     "/sessions/{session_id}/plan/adjust",
     response_model=PlanOut,
+    dependencies=GATE_THE_WRITES,
 )
 def adjust_plan(
     session_id: str, body: AdjustIn, db: DBSession = Depends(get_db)
@@ -648,6 +660,7 @@ def adjust_plan(
     "/sessions/{session_id}/plan/approve",
     response_model=ApproveOut,
     status_code=202,
+    dependencies=GATE_THE_WRITES,
 )
 def approve_plan(
     session_id: str,
@@ -720,6 +733,7 @@ def approve_plan(
     "/dev/sessions/{session_id}/regenerate",
     response_model=ApproveOut,
     status_code=202,
+    dependencies=GATE_THE_WRITES,
 )
 def dev_regenerate(
     session_id: str,
@@ -780,7 +794,11 @@ def dev_regenerate(
     response_model=MaterialsOut,
 )
 def get_materials(session_id: str, db: DBSession = Depends(get_db)) -> MaterialsOut:
-    """Poll material generation progress with full content."""
+    """Poll material generation progress with full content.
+
+    A public read (#178): this is the deck itself, and a Visitor opens it by
+    address (ADR-0004). No sign-in dependency is declared on this route.
+    """
     session = _get_session_or_404(db, session_id)
 
     try:
