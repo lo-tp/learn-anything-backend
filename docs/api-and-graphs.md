@@ -240,6 +240,7 @@ material_graph = material_graph_fn()
 |--------|------|---------|
 | `POST` | `/sessions` | Create session, start goal capture |
 | `GET` | `/sessions` | List all sessions (newest first), optionally filtered by one or more `?phase=` values |
+| `GET` | `/explore/sessions` | The public Explore feed: Sessions that reached materials, newest first |
 | `GET` | `/sessions/{id}` | Get current session state & progress |
 | `POST` | `/sessions/{id}/clarify` | Submit clarification answer (if goal was too broad) |
 
@@ -273,11 +274,25 @@ material_graph = material_graph_fn()
 |--------|------|---------|
 | `GET` | `/slides/{slide_id}` | Fetch raw slide JSX by globally-unique ID (internal — the client never calls this) |
 
+### Auth
+
+Three gates, and which one a route uses is stated in its heading below (#178 moved the gate off the Session reads and onto the writes — ownership begins at the write):
+
+| Gate | Behaviour | Routes |
+|------|-----------|--------|
+| none | answered whatever `DEV_MODE` says | `GET /sessions`, `GET /explore/sessions`, `GET /sessions/{id}`, `GET /sessions/{id}/materials` |
+| `require_auth` | `401` for a Visitor when `DEV_MODE` is off, open when it is on, so a local run can walk the phases without a cookie (#89) | `POST /sessions/{id}/clarify`, `POST /sessions/{id}/probe`, plan `generate`/`adjust`/`approve`, `POST /dev/sessions/{id}/regenerate` |
+| always on, `DEV_MODE` never opens it | `401` | `POST /sessions` — a Session with no one who asked for it is impossible (#145); `/auth/me`, `/review/*` — user-scoped, not public records; `GET /slides/{id}` — requires `X-Service-Token` (#103) |
+
+`DEV_MODE` is read per request, never at import.
+
 ### Endpoint details
 
 #### `GET /sessions`
 
-Lists all sessions, newest `created_at` first. Filter with a repeatable `phase` query parameter (OR semantics), e.g. `GET /sessions?phase=generating&phase=probing`. An invalid phase value returns `422` (enum validation).
+**Auth:** none — a public read (#178). A Visitor is answered the same list as a signed-in User, and the payload carries no owner identity.
+
+Lists all sessions, newest `created_at` first. Filter with a repeatable `phase` query parameter (OR semantics), e.g. `GET /sessions?phase=generating&phase=probing`. An invalid phase value returns `422` (enum validation). Nothing is capped: the surfaces that render this list have no pager.
 
 ```json
 // Response
@@ -296,6 +311,27 @@ Lists all sessions, newest `created_at` first. Filter with a repeatable `phase` 
       "goal": "I want to learn integration by parts.",
       "narrowed_goal": null,
       "created_at": "2026-09-10T15:30:00Z"
+    }
+  ]
+}
+```
+
+#### `GET /explore/sessions`
+
+**Auth:** none — a public read, and this router has never asked for a cookie (#144).
+
+The Explore feed: the Sessions that reached material generation (`generating`, `executing`, `complete`), newest `created_at` first, **uncapped** (#178 — this surface has no pager, so a cap drops Sessions outright rather than deferring them; the route used to answer twenty). No `?phase=` parameter: which phases qualify is this feed's own server-side rule (`MATERIAL_PHASES`), kept in step with the phases the app requests from `GET /sessions` until the two surfaces genuinely diverge — which is why they are separate routes, not one. Same `SessionList` / `SessionListItem` schema as `GET /sessions`, and no owner identity in the payload.
+
+```json
+// Response — identical shape to GET /sessions
+{
+  "sessions": [
+    {
+      "session_id": "ghi789",
+      "phase": "complete",
+      "goal": "I want to learn reservoir computing.",
+      "narrowed_goal": "Echo-state networks: what they compute and how to train them.",
+      "created_at": "2026-09-12T09:15:00Z"
     }
   ]
 }
@@ -484,6 +520,8 @@ If generation fails, the session lands in the `error` phase (terminal — the us
 
 #### `GET /sessions/{id}/materials`
 
+**Auth:** none — a public read (#178). The generated deck is the Session's public record; the plan writes above it are gated.
+
 Poll material generation progress. Each generated step carries its **summary** plus an **items** array — slide items (`slide_id` only; the JSX lives in the domain DB / sandbox service) in slide order, then question items in question order. `generated_steps` is in plan step order (deterministic).
 
 ```json
@@ -614,6 +652,8 @@ Submit all answers for the step in one batch. No LLM — deterministic index com
 ```
 
 #### `GET /sessions/{id}`
+
+**Auth:** none — a public read (#178): opening one Session's deck by address is browsing.
 
 ```json
 // Response

@@ -26,9 +26,10 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 # ``.env`` (loaded via ``load_dotenv()`` in ``llm.py`` during test imports)
 # may carry a real ``JWT_SECRET``, which must not change auth test behavior.
 os.environ["JWT_SECRET"] = "test-secret"
-# Session endpoints default to gated (DEV_MODE off); the business-logic tests
-# exercise endpoints with the gate open. The auth-gate behaviour itself is
-# tested in test_auth_gate.py with DEV_MODE explicitly toggled.
+# DEV_MODE is pinned on: the business-logic tests walk the session writes
+# through the DEV_MODE-bounded gate without a cookie. The gate's own behaviour,
+# and the fact that the Session reads are public whatever the flag says (#178),
+# is tested in test_auth_gate.py with DEV_MODE explicitly toggled.
 os.environ["DEV_MODE"] = "true"
 
 import pytest

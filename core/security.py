@@ -136,13 +136,14 @@ def _decode_token(request: Request) -> dict:
 def require_sign_in(request: Request) -> None:
     """FastAPI dependency: require a valid sign-in token, always.
 
-    Never opened by ``DEV_MODE``. This is the gate for the endpoints that *own*
-    data — the History list (``GET /sessions``) and creating a Session
-    (``POST /sessions``), #145. A Visitor is told so rather than shown an empty
-    list, and a Session with no one who asked for it becomes impossible: the
-    refusal lands before the write. The answer is the same 401 as the bounded
-    gate's, so the client has one sign-in signal to react to (#143: the 401 *is*
-    the identity signal).
+    Never opened by ``DEV_MODE``. This is the gate for the one endpoint that
+    brings a Session into existence — ``POST /sessions``, #145. A Session with
+    no one who asked for it becomes impossible: the refusal lands before the
+    write. The answer is the same 401 as the bounded gate's, so the client has
+    one sign-in signal to react to (#143: the 401 *is* the identity signal).
+
+    The Session **reads** use neither gate: the list, one Session's state and
+    its materials are public (#178), and ownership begins at the write.
     """
     _decode_token(request)
 
@@ -156,10 +157,11 @@ def require_auth(request: Request) -> None:
     - When the gate passes, no per-user scoping is applied: sessions
       remain shared across all users.
 
-    The session-work endpoints (opening a Session, the intake phases, the deck)
-    use this: their gate may open in dev so a local run can walk the phases
-    without a cookie. Anything that owns data uses :func:`require_sign_in`,
-    whatever the flag says.
+    The Session **write** endpoints use this — the intake phases (clarify,
+    probe) and the plan writes — so a local run can walk the phases without a
+    cookie. It is declared per route where a router also serves a public read
+    (``routers.plan``, #178). Anything that creates data uses
+    :func:`require_sign_in`, whatever the flag says.
     """
     if is_dev_mode():
         return
