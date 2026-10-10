@@ -146,6 +146,7 @@ If any check fails, the push is blocked. On a fresh clone, run `make install-hoo
 ├── db/                 # SQLAlchemy models & session
 ├── alembic/            # Database migrations
 ├── scripts/pre-push    # Tracked pre-push hook script
+├── scripts/*.py        # One-shot DB analysis scripts (run directly: python scripts/<name>.py)
 ├── tests/              # Unit tests (mirrors graphs/ structure)
 └── Makefile            # Dev workflow targets
 ```
@@ -158,3 +159,5 @@ make coverage   # run with coverage report
 ```
 
 Tests live in `tests/graphs/<name>/` and mirror the `graphs/<name>/` implementation structure.
+Tests for the one-shot scripts live in `tests/scripts/`; real sampled output checked in
+for them lives in `tests/fixtures/`.

@@ -13,6 +13,7 @@ from graphs.material.sandbox import (
     MAX_MATERIAL_ATTEMPTS,
     MAX_SLIDE_SELF_REPAIR_TURNS,
     SLIDE_EXTRA_BODY_PARAMS,
+    SLIDE_FAILURE_CLASSES,
     SLIDE_REASONING_EFFORT,
     SLIDE_SAMPLING_PROFILES,
     _compile_slide,
@@ -501,12 +502,92 @@ class TestClassifyCompileError:
     def test_other(self):
         assert classify_compile_error("some opaque failure") == "other"
 
+    def test_content_spec_invalid_is_the_sandbox_content_gate(self):
+        # Real 400 responses from the sandbox gate (learn-anything-sandbox
+        # app/api/compile/route.ts): the parser never rejected the code, what
+        # came back is not a slide.
+        assert (
+            classify_compile_error("400 code must be at least 40 characters")
+            == "content_spec_invalid"
+        )
+        assert (
+            classify_compile_error("400 code must declare `export default`")
+            == "content_spec_invalid"
+        )
+        assert (
+            classify_compile_error(
+                "400 component renders empty or whitespace-only markup"
+            )
+            == "content_spec_invalid"
+        )
+        assert (
+            classify_compile_error(
+                "400 component failed the gate: default export must be a "
+                "function (a React component)"
+            )
+            == "content_spec_invalid"
+        )
+        # A render that throws on a props-less render is a contract violation.
+        assert (
+            classify_compile_error(
+                "400 component failed the gate: Cannot read properties of "
+                "undefined (reading 'page')"
+            )
+            == "content_spec_invalid"
+        )
+        assert classify_compile_error("400 invalid JSON body") == (
+            "content_spec_invalid"
+        )
+
+    def test_gate_rejection_naming_an_unresolved_name_is_unknown_component(self):
+        # Same gate, different cause: the throw names a name the module never
+        # declared, which is the unknown-component case, not a contract one.
+        assert (
+            classify_compile_error(
+                "400 component failed the gate: arrowRowStyle is not defined"
+            )
+            == "unknown_component"
+        )
+
+    def test_unterminated_string_is_a_syntax_error_not_truncation(self):
+        # Checked against persisted attempts: the "Unterminated string literal"
+        # rows are complete modules with a quoting bug inside a math string, so
+        # only the parser running out of input counts as truncation.
+        assert (
+            classify_compile_error(
+                "500 Build failed with 1 error: compile.tsx:270:56: ERROR: "
+                'Unterminated string literal'
+            )
+            == "syntax_error"
+        )
+
     def test_priority_timeout_wins_over_syntax(self):
         # A timeout mentioning a parse detail still classifies as a timeout.
         assert (
             classify_compile_error("timed out while parsing JSX")
             == "sandbox_timeout"
         )
+
+    def test_every_class_in_the_taxonomy_is_reachable(self):
+        """The closed set the C1.2 report prints, and every entry is reachable.
+
+        The sample strings are real persisted errors (see
+        tests/fixtures/slide_failure_attempts.json); ``other`` is the residual.
+        """
+        samples = {
+            "syntax_error": '500 Build failed with 1 error: ERROR: Unexpected ">"',
+            "unknown_component": "400 component failed the gate: Bin is not defined",
+            "truncated_output": (
+                '500 Build failed: ERROR: Unexpected end of file before a '
+                'closing "MathJaxContext" tag'
+            ),
+            "sandbox_timeout": "Transport/HTTP error: Read timed out.",
+            "content_spec_invalid": "400 code must declare `export default`",
+            "other": "500 Internal Server Error",
+        }
+        assert set(samples) == set(SLIDE_FAILURE_CLASSES)
+        for failure_class, error in samples.items():
+            assert classify_compile_error(error) == failure_class
 
 
 # --- Self-repair bound ---
