@@ -16,15 +16,26 @@ Fetch and edit them via `gh` against `lo-tp/learn-anything-frontend` (e.g. `gh a
 
 ## Shipping
 
-`main` is checked (ruff, pyright, pytest) and never builds an image. Merging `main`
-into `release` is the act that ships: the image is built, its smoke step asserts
-`/health`, it is published under a `sha-<commit>` tag, and
-`lo-tp/learn-anything-infra` pins the digest and deploys it — migrations first,
-without a human step in between. `release` is protected and moves only by merging
-`main` into it.
+This repo follows Git Flow, adapted to its pipeline:
 
-So: never commit directly to `release`, and never expect a push to `main` to change
-what is serving. What production runs is recorded in that infrastructure repository's
+- `main` — the stable branch. Checked (ruff, pyright, pytest); never builds
+  an image. What lands here is ready to ship.
+- `develop` — the integration branch. All development work happens here;
+  feature work never lands on `main` directly.
+- `feature/<slug>` — cut from `develop` for each feature or ticket; merged
+  back into `develop` when done.
+- `hotfix/<slug>` — cut from `main` when what is serving is broken; merged
+  back into `main` and into `develop`.
+- `release` — this repo's release step is a persistent protected branch,
+  not a per-release branch: merging `main` into `release` is the act that
+  ships. The image is built, its smoke step asserts `/health`, it is
+  published under a `sha-<commit>` tag, and `lo-tp/learn-anything-infra`
+  pins the digest and deploys it — migrations first, without a human step
+  in between.
+
+So: feature work flows `feature/<slug>` → `develop` → `main`, hotfixes flow
+`hotfix/<slug>` → `main` + `develop`, nothing lands on `release` directly, and
+never expect a push to `main` to change what is serving. What production runs is recorded in that infrastructure repository's
 `manifests/overlays/prod/kustomization.yaml`; reverting that pin commit is the
 rollback. A migration that has run does not run backwards — a rollback across a
 migration is a fix-forward.
