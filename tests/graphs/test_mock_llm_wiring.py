@@ -12,11 +12,13 @@ Acceptance criteria:
 from __future__ import annotations
 
 import importlib
+from unittest.mock import patch
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
 import graphs
+from core.external_tools import external_search_tools
 from core.llm import llm
 from core.mock_llm import MockChatModel
 from graphs import graph_config
@@ -65,6 +67,54 @@ class TestWiringSeam:
         finally:
             monkeypatch.undo()
             importlib.reload(graphs)  # restore the original wiring
+
+
+# --- External search wiring (#166) ---
+
+
+def _spy_plan_graph_build(monkeypatch) -> dict:
+    """Capture what graphs/__init__.py hands build_plan_graph, then reload."""
+    import graphs.plan as plan_mod
+
+    captured: dict = {}
+    real_build = plan_mod.build_plan_graph
+
+    def spy(bound_llm, *args, **kwargs):
+        captured["kwargs"] = kwargs
+        return real_build(bound_llm, *args, **kwargs)
+
+    monkeypatch.setattr(plan_mod, "build_plan_graph", spy)
+    return captured
+
+
+class TestExternalSearchWiring:
+    """The graphs/__init__.py seam: which graph may reach external search."""
+
+    def test_plan_graph_is_wired_to_the_external_search_boundary(self, monkeypatch):
+        captured = _spy_plan_graph_build(monkeypatch)
+        importlib.reload(graphs)
+        try:
+            assert captured["kwargs"]["search_tools"] is external_search_tools
+        finally:
+            monkeypatch.undo()
+            importlib.reload(graphs)
+
+    def test_mock_mode_builds_the_plan_graph_with_no_external_search(
+        self, monkeypatch
+    ):
+        """#166: a mock run has no external-tool path to reach at all."""
+        captured = _spy_plan_graph_build(monkeypatch)
+        monkeypatch.setenv("MOCK_LLM", "1")
+        monkeypatch.setenv("TAVILY_API_KEY", "tvly-wired-key")
+        with patch("core.external_tools.MultiServerMCPClient") as client_cls:
+            importlib.reload(graphs)
+            search_tools = captured["kwargs"]["search_tools"]
+        try:
+            assert search_tools is None
+            client_cls.assert_not_called()
+        finally:
+            monkeypatch.undo()
+            importlib.reload(graphs)
 
 
 class TestCannedPipeline:

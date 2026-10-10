@@ -39,7 +39,7 @@ class TestResearchTopic:
             common_gotchas=["G1"],
         )
         with patch(
-            "graphs.plan.nodes.structured_invoke", return_value=mock_out
+            "graphs.plan.nodes.structured_invoke_with_tools", return_value=mock_out
         ):
             node = make_research_topic(llm)
             result = node({"goal": "Learn calculus"})
@@ -55,11 +55,40 @@ class TestResearchTopic:
             unconditional_truths=[], core_concepts=[], standard_framing="", common_gotchas=[]
         )
         with patch(
-            "graphs.plan.nodes.structured_invoke", return_value=mock_out
+            "graphs.plan.nodes.structured_invoke_with_tools", return_value=mock_out
         ) as mock_invoke:
             node = make_research_topic(llm)
             node({"goal": "Quantum mechanics"})
         assert "Quantum mechanics" in str(mock_invoke.call_args)
+
+    def test_nothing_is_offered_when_no_search_tool_is_available(self):
+        """The default path (#118 mock mode, no Tavily key): no external tool."""
+        llm = _make_llm()
+        mock_out = ResearchOut(
+            unconditional_truths=[], core_concepts=[], standard_framing="", common_gotchas=[]
+        )
+        with patch(
+            "graphs.plan.nodes.structured_invoke_with_tools", return_value=mock_out
+        ) as mock_invoke:
+            def no_search_tools():
+                return []
+
+            make_research_topic(llm, no_search_tools)({"goal": "g"})
+        assert mock_invoke.call_args[0][4] == []
+
+    def test_external_search_is_offered_when_available(self):
+        """#166: research_topic may call Tavily search through the MCP adapter."""
+        llm = _make_llm()
+        mock_out = ResearchOut(
+            unconditional_truths=[], core_concepts=[], standard_framing="", common_gotchas=[]
+        )
+        tools = [MagicMock()]
+        with patch(
+            "graphs.plan.nodes.structured_invoke_with_tools", return_value=mock_out
+        ) as mock_invoke:
+            make_research_topic(llm, lambda: tools)({"goal": "g"})
+        assert mock_invoke.call_args[0][4] == tools
+        llm.bind_tools.assert_not_called()  # the node never binds by itself
 
 
 # --- make_design_plan ---
