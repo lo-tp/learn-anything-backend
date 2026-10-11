@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 from graphs.material.nodes import (
@@ -413,6 +414,150 @@ class TestCompileSlide:
             "step_id": "s1", "slide_index": 1, "attempt": 2,
         }
         assert timing["duration_seconds"] >= 0
+
+
+# --- make_compile_slide: preference pairs (#168) ---
+
+
+class TestCompileSlidePreferencePair:
+    """A failed-then-fixed compile is annotated by the compiler itself: the
+    JSX that failed and the JSX that fixed it are one preference pair."""
+
+    def _state(self, **overrides) -> MaterialState:
+        base: MaterialState = {
+            "step": {"id": "s1", "title": "Step 1"},
+            "slide_contents": [
+                {"title": "Slide 1", "key_points": [], "visual_hint": ""},
+            ],
+            "slide_index": 0,
+            "current_slide_jsx": "chosen_jsx",
+            "current_slide_prompt": "[{\"role\": \"system\", \"content\": \"chosen\"}]",
+            "attempts_by_slide": [2],
+        }
+        base.update(overrides)  # type: ignore[arg-type]
+        return base
+
+    @staticmethod
+    def _failed(
+        index: int, attempt: int, jsx: str, error: str, prompt: str = "[]"
+    ) -> dict:
+        """One failed-attempt record as ``compile_slide`` itself writes it."""
+        return {
+            "index": index,
+            "attempt": attempt,
+            "prompt": prompt,
+            "jsx": jsx,
+            "error": error,
+        }
+
+    @patch("graphs.material.nodes._compile_slide")
+    def test_first_attempt_success_records_nothing(self, mock_compile):
+        # Nothing was rejected, so there is no pair to record.
+        mock_compile.return_value = ("compiled_code", "")
+        node = make_compile_slide(MagicMock())
+        result = node(self._state(attempts_by_slide=[1], failed_attempts=[]))
+
+        assert result["compile_result"] == "success"
+        assert "slide_preferences" not in result
+
+    @patch("graphs.material.nodes._compile_slide")
+    def test_failed_then_fixed_records_one_pair(self, mock_compile):
+        mock_compile.return_value = ("compiled_code", "")
+        node = make_compile_slide(MagicMock())
+        prompt = json.dumps(
+            [{"role": "system", "content": "s"}, {"role": "human", "content": "h"}]
+        )
+        result = node(
+            self._state(
+                attempts_by_slide=[2],
+                failed_attempts=[self._failed(0, 1, "rejected_jsx", "syntax error", prompt)],
+            )
+        )
+
+        (pair,) = result["slide_preferences"]
+        assert pair["index"] == 0
+        assert pair["rejected_attempt"] == 1
+        assert pair["chosen_attempt"] == 2
+        assert pair["prompt_context"] == prompt
+        # Each half carries the prompt it was really written from.
+        assert pair["chosen_prompt"] == (
+            '[{"role": "system", "content": "chosen"}]'
+        )
+        assert pair["rejected_jsx"] == "rejected_jsx"
+        assert pair["rejected_error"] == "syntax error"
+        # The chosen half is the model's JSX, not the sandbox's compiled output.
+        assert pair["chosen_jsx"] == "chosen_jsx"
+
+    @patch("graphs.material.nodes._compile_slide")
+    def test_pair_is_the_attempt_this_one_superseded(self, mock_compile):
+        # Slide 1 failed twice before compiling: the pair is with the last
+        # failure, not the first one.
+        mock_compile.return_value = ("compiled_code", "")
+        node = make_compile_slide(MagicMock())
+        result = node(
+            self._state(
+                attempts_by_slide=[3],
+                failed_attempts=[
+                    self._failed(0, 1, "jsx_v1", "err_v1", "prompt_v1"),
+                    self._failed(0, 2, "jsx_v2", "err_v2", "prompt_v2"),
+                ],
+            )
+        )
+
+        (pair,) = result["slide_preferences"]
+        assert pair["rejected_attempt"] == 2
+        assert pair["chosen_attempt"] == 3
+        assert pair["prompt_context"] == "prompt_v2"
+        assert pair["chosen_prompt"] == (
+            '[{"role": "system", "content": "chosen"}]'
+        )
+        assert pair["rejected_jsx"] == "jsx_v2"
+        assert pair["rejected_error"] == "err_v2"
+
+    @patch("graphs.material.nodes._compile_slide")
+    def test_other_slides_failures_are_not_paired(self, mock_compile):
+        # Failures belong to their own slide: a slide that compiled first try
+        # has no pair even when another slide of the step failed.
+        mock_compile.return_value = ("compiled_code", "")
+        node = make_compile_slide(MagicMock())
+        result = node(
+            self._state(
+                attempts_by_slide=[1],
+                failed_attempts=[self._failed(1, 1, "other_slide_jsx", "err")],
+            )
+        )
+
+        assert "slide_preferences" not in result
+
+    @patch("graphs.material.nodes._compile_slide")
+    def test_placeholder_substitution_records_nothing(self, mock_compile):
+        # Exhausted: the compiled code is the app's placeholder, not a model
+        # choice, so nothing was preferred over the rejected JSX.
+        from graphs.material.sandbox import MAX_MATERIAL_ATTEMPTS
+
+        mock_compile.side_effect = [(None, "broken"), ("placeholder_code", "")]
+        node = make_compile_slide(MagicMock())
+        result = node(
+            self._state(
+                attempts_by_slide=[MAX_MATERIAL_ATTEMPTS],
+                failed_attempts=[
+                    self._failed(0, MAX_MATERIAL_ATTEMPTS, "rejected_jsx", "err")
+                ],
+            )
+        )
+
+        assert result["current_slide_is_placeholder"] is True
+        assert "slide_preferences" not in result
+
+    @patch("graphs.material.nodes._compile_slide")
+    def test_failed_attempt_records_its_attempt_number(self, mock_compile):
+        # The pair names the attempts it came from; the failed-attempt record
+        # has to carry the number for that to be exact.
+        mock_compile.return_value = (None, "syntax error")
+        node = make_compile_slide(MagicMock())
+        result = node(self._state(attempts_by_slide=[2]))
+
+        assert result["failed_attempts"][0]["attempt"] == 2
 
 
 # --- make_write_questions ---

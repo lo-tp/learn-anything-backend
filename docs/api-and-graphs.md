@@ -195,6 +195,27 @@ class GraphStageTiming(Base):
     created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
 
 
+class SlidePreference(Base):
+    """One compiler-annotated preference pair (#168). Offline training data —
+    nothing in the serving path reads it."""
+    __tablename__ = "slide_preferences"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True)
+    step_id: Mapped[str] = mapped_column(String)
+    slide_index: Mapped[int] = mapped_column(Integer)            # 1-based, same numbering as failed_slides.slide_index
+    rejected_attempt: Mapped[int] = mapped_column(Integer)       # which write attempt the rejected JSX came from
+    chosen_attempt: Mapped[int] = mapped_column(Integer)         # which one the fixed JSX came from
+    prompt_context: Mapped[str] = mapped_column(Text)            # JSON [{role, content}] — the exact prompt the REJECTED JSX was written from (the same value that attempt's failed_slides row holds)
+    chosen_prompt: Mapped[str] = mapped_column(Text)             # JSON [{role, content}] — the exact prompt the CHOSEN JSX was written from; equal to prompt_context when the fix happened inside one attempt (#165), otherwise it carries one extra retry instruction quoting the reduced rejected_error
+    rejected_jsx: Mapped[str] = mapped_column(Text)              # what the model wrote that failed to compile
+    rejected_error: Mapped[str] = mapped_column(Text)            # the sandbox error that rejected it — the annotator's verdict
+    chosen_jsx: Mapped[str] = mapped_column(Text)                # what it wrote that compiled
+    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
+
+    session: Mapped["Session"] = relationship(back_populates="slide_preferences")
+
+
 # --- Init ---
 
 Base.metadata.create_all(engine)
@@ -1014,6 +1035,8 @@ These live in the `MemorySaver` checkpoint, so the graph resumes from its in-mem
 | `write_questions` | Write 3-5 MCQ/TF questions testing that the step's concepts landed. Follow the option-construction procedure in teacher.md (bare claims, mutate correct → distractors, no asymmetric bolding, explanations separate). The node code assigns IDs `{step_id}_q{n}` (the LLM does not). |
 | `summarize_step` | Given the generated slides, extract 3-5 key points: definitions, formulas, core insights. Output is a compact `ConceptSummary` object stored for use by subsequent steps. |
 
+**Preference capture (#168).** A slide that failed to compile and was then fixed is a free preference pair: the same slide prompt produced JSX the sandbox rejected and JSX the sandbox accepted, so the compiler is the annotator. `compile_slide` records that pair on a successful compile — the rejected half is the failed attempt this one superseded (its prompt, its JSX, and the sandbox error from the `failed_attempts` record), the chosen half is the JSX that compiled, with the prompt each half was actually written from — into the accumulating `slide_preferences` state channel. The driver persists one `SlidePreference` row per pair at the pause immediately after that compile, in its own best-effort transaction, so a pair is as durable as the slide it describes and a step that dies later keeps what it already earned. Nothing user-visible depends on it: a first-attempt success and a placeholder substitution write nothing (a placeholder was never the model's choice), and a failed write is logged rather than allowed to cost a learner their deck. Pairs are append-only, like the timing rows: regenerating a step adds new pairs and keeps the ones that really happened.
+
 **Control flow:** Linear. Compiled **without a checkpointer** — it is one-shot per step with no interrupts, so its resume state lives in the domain DB (one committed `StepMaterial` row per step), not in graph state. Called once per step, sequentially through the plan (step 1 → step 2 → … → step N). Each call receives the **accumulated concept summaries** from all prior steps (not the full materials), so context stays small.
 
 **ConceptSummary shape:**
@@ -1118,6 +1141,7 @@ generate_materials (background task, its OWN db session, per-session lock):
 | Don't corrupt the request session | The task opens its **own** DB session (the request's is closed by the time it runs) |
 | Keep stores independent | Resume state lives in the **DB**, not the graph checkpointer — no double-stored state |
 | Stage timings | Every material stage records its wall-clock duration into graph state (`stage_timings`); the driver persists one `GraphStageTiming` row per stage execution (`graph="material"`), incrementally at each slide commit and the remainder at step finalization — append-only, so a re-run appends a fresh set of rows |
+| Preference pairs | A slide that failed then compiled leaves one `slide_preferences` row (#168) — the prompt each half was written from, both JSX candidates, and the sandbox error between them — from the graph's `slide_preferences` channel, written in its own best-effort commit at the pause after that compile. Never user-visible; a failed write is logged, not turned into a lost slide |
 | Client visibility | Poll `GET /sessions/{id}/materials` until phase flips to `executing` |
 
 **Durability / migration:** `BackgroundTasks` runs **in-process** — no retry, lost on crash/restart. That matches the in-memory MVP (everything is lost on restart anyway). When you move to Postgres and want generation to survive restarts, **swap `add_task` for a queue job** (ARQ / RQ / Celery / Dramatiq / SQS) with a worker — the `generate_materials` body stays identical, only the enqueue call changes.

@@ -33,7 +33,7 @@ db-clean:
 	podman exec learn-anything-backend-db-1 psql -U postgres -d learn_anything -c "TRUNCATE step_progress, step_materials, slide_contents, graph_stage_timings, probe_questions, plans, sessions CASCADE;"
 
 db-clean-telemetry:
-	podman exec learn-anything-backend-db-1 psql -U postgres -d learn_anything -c "TRUNCATE failed_slides, graph_stage_timings;"
+	podman exec learn-anything-backend-db-1 psql -U postgres -d learn_anything -c "TRUNCATE failed_slides, graph_stage_timings, slide_preferences;"
 
 revision:
 	$(VENV)/alembic revision --autogenerate -m "$(m)"

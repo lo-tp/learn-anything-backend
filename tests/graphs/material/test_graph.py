@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 from langchain_core.runnables import RunnableConfig
@@ -109,6 +110,106 @@ class TestMaterialState:
         }
         assert state["compile_result"] == "success"
         assert state["slide_index"] == 1
+
+
+# --- End-to-end preference-pair capture (#168) ---
+
+
+class TestPreferencePairAccumulation:
+    def test_only_the_failed_then_fixed_slide_produces_a_pair(self):
+        """Of a 3-slide step, only slide 1 needed a retry: the finished state
+        carries exactly one pair for it, and none for the others."""
+        from langgraph.checkpoint.memory import MemorySaver
+
+        llm = _make_llm()
+        graph = build_material_graph(llm, checkpointer=MemorySaver())
+
+        with (
+            patch(
+                "graphs.material.nodes.structured_invoke",
+                side_effect=[
+                    SlideContentsOut(
+                        slide_contents=[
+                            SlideContentSpec(
+                                title=t, key_points=["k"], visual_hint="v"
+                            )
+                            for t in ("A", "B", "C")
+                        ]
+                    ),
+                    QuestionsOut(
+                        questions=[
+                            QuestionDraft(
+                                text=f"Q{i}?",
+                                options=["A", "B"],
+                                correct_index=0,
+                                explanation="e",
+                            )
+                            for i in range(3)
+                        ]
+                    ),
+                    SummaryOut(key_points=["kp1"]),
+                ],
+            ),
+            patch(
+                "graphs.material.nodes.structured_invoke_messages",
+                side_effect=[
+                    SlideOut(code=jsx)
+                    for jsx in (
+                        "slide1_v1",  # rejected by the compiler
+                        "slide1_v2",  # the fix
+                        "slide2_v1",
+                        "slide3_v1",
+                    )
+                ],
+            ),
+            patch(
+                "graphs.material.nodes.with_unknown_option",
+                side_effect=lambda llm, lang, opts: opts,
+            ),
+            patch(
+                "graphs.material.nodes._compile_slide",
+                side_effect=[
+                    (None, "syntax error"),
+                    ("compiled_1", ""),
+                    ("compiled_2", ""),
+                    ("compiled_3", ""),
+                ],
+            ),
+        ):
+            config: RunnableConfig = {
+                "configurable": {"thread_id": "preference-e2e"},
+            }
+            state = graph.invoke(
+                {
+                    "step": {"id": "s1", "title": "T1", "description": "d"},
+                    "established_concepts": [],
+                    "learner_context": {},
+                    "language": "English",
+                },
+                config,
+            )
+            while state.get("__interrupt__"):
+                state = graph.invoke(Command(resume=True), config)
+
+        assert state["compile_result"] == "success"
+        (pair,) = state["slide_preferences"]
+        assert pair["index"] == 0
+        assert pair["rejected_attempt"] == 1
+        assert pair["chosen_attempt"] == 2
+        assert pair["rejected_jsx"] == "slide1_v1"
+        assert pair["chosen_jsx"] == "slide1_v2"
+        assert pair["rejected_error"] == "syntax error"
+        # Both halves keep the prompt they were really written from: today they
+        # differ by the one retry instruction, which is exactly what the pair
+        # is honest about rather than claiming away.
+        assert json.loads(pair["prompt_context"]) == json.loads(
+            state["failed_attempts"][0]["prompt"]
+        )
+        assert "failed to compile" not in pair["prompt_context"]
+        assert "failed to compile" in pair["chosen_prompt"]
+        assert json.loads(pair["chosen_prompt"])[0]["role"] == "system"
+        # The slide that failed carries the pairing, for the debug record too.
+        assert state["failed_attempts"][0]["attempt"] == 1
 
 
 # --- End-to-end stage timing accumulation ---

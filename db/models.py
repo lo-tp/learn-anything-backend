@@ -205,6 +205,9 @@ class Session(Base):
     slide_contents: Mapped[list[SlideContent]] = relationship(
         back_populates="session", cascade="all, delete"
     )
+    slide_preferences: Mapped[list[SlidePreference]] = relationship(
+        back_populates="session", cascade="all, delete"
+    )
 
 
 class ProbeQuestion(Base):
@@ -358,6 +361,62 @@ class FailedSlide(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC)
     )
+
+
+class SlidePreference(Base):
+    """One compiler-annotated preference pair: a slide that failed, then fixed.
+
+    The esbuild sandbox is the annotator. For one slide prompt the model wrote
+    JSX that did not compile and then JSX that did, which is exactly a
+    preference pair — no human labelling, no change to what the learner sees.
+    The material driver writes one row when a slide's compile succeeds after at
+    least one failed attempt for that slide (#168); a first-attempt success
+    rejected nothing, so it writes none, and neither does a slide that
+    exhausted its attempts and got a placeholder substituted — the placeholder
+    was never the model's choice.
+
+    It is offline training data (direct preference optimization): nothing in the
+    serving path reads this table, so capturing it must never cost a learner
+    their slides.
+    """
+
+    __tablename__ = "slide_preferences"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True
+    )
+    step_id: Mapped[str] = mapped_column(String)
+    # 1-based slide position, the same numbering as failed_slides.slide_index.
+    slide_index: Mapped[int] = mapped_column(Integer)
+    # Which write attempt each half came from. The pair is with the attempt this
+    # one superseded, so chosen_attempt is normally rejected_attempt + 1; both
+    # are stored because a re-run of a step can leave the numbering non-obvious.
+    rejected_attempt: Mapped[int] = mapped_column(Integer)
+    chosen_attempt: Mapped[int] = mapped_column(Integer)
+    # The exact prompt the REJECTED JSX was written from, as a JSON list of
+    # messages ({"role": "system"|"human", "content": ...}) — the same value
+    # that attempt's failed_slides row holds, so one slide prompt has one
+    # representation.
+    prompt_context: Mapped[str] = mapped_column(Text)
+    # The exact prompt the CHOSEN JSX was written from. Kept alongside
+    # prompt_context rather than reconstructed, because the two are not always
+    # equal: today every attempt after the first carries one extra instruction
+    # ("your previous version failed to compile: …"), which quotes the reduced
+    # form of rejected_error, not its raw text. Where the two columns are equal
+    # the pair really is same-prompt — which is what write_slide self-repairing
+    # inside one attempt (#165) makes every pair.
+    chosen_prompt: Mapped[str] = mapped_column(Text)
+    # The two candidates, as the model returned them (not sandbox output).
+    rejected_jsx: Mapped[str] = mapped_column(Text)
+    # The sandbox error that made it the rejected half — the annotator's verdict.
+    rejected_error: Mapped[str] = mapped_column(Text)
+    chosen_jsx: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+    session: Mapped[Session] = relationship(back_populates="slide_preferences")
 
 
 class GraphStageTiming(Base):

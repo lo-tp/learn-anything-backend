@@ -16,6 +16,7 @@ from db import (
     PlanPreference,
     Session,
     SlideContent,
+    SlidePreference,
     StepMaterial,
 )
 from routers.plan import (
@@ -834,11 +835,15 @@ def _timing(
     }
 
 
-def _two_slide_results() -> list[dict]:
+def _two_slide_results(pairs: list[dict] | None = None) -> list[dict]:
     """A 3-call interrupt/resume sequence: two slides, then the final state.
 
     Each state carries the ACCUMULATING ``stage_timings`` list (3 / 5 / 7
-    entries), exactly as the real material graph would."""
+    entries), exactly as the real material graph would. ``pairs`` is the
+    preference pairs the graph's ``compile_slide`` node would have left behind
+    (#168) — present at the pause of the slide that produced them, and carried
+    in every later state — empty by default, because both slides here compile
+    first try."""
     question = {"id": "q1", "text": "?", "options": ["A", "B"],
                 "correct_index": 0, "explanation": "e"}
     t_plan = _timing("plan_slide_contents", seconds=0.5)
@@ -850,16 +855,35 @@ def _two_slide_results() -> list[dict]:
     t_s = _timing("summarize_step", seconds=0.1)
     return [
         {"__interrupt__": object(), "slides": ["<div>1</div>"],
+         # The pair belongs to the compile that produced it, so it is already
+         # in state at this pause (#168) — and accumulates from here on.
+         "slide_preferences": list(pairs or []),
          "stage_timings": [t_plan, t_w1, t_c1]},
         {"__interrupt__": object(), "slides": ["<div>1</div>", "<div>2</div>"],
+         "slide_preferences": list(pairs or []),
          "stage_timings": [t_plan, t_w1, t_c1, t_w2, t_c2]},
         {"slides": ["<div>1</div>", "<div>2</div>"],
          "questions": [question],
          "summary": {"step_id": "s1", "title": "T1", "key_points": ["k"]},
-         "failed_attempts": [{"index": 0, "prompt": "p", "jsx": "j",
+         "failed_attempts": [{"index": 0, "attempt": 1, "prompt": "p", "jsx": "j",
                               "error": "e"}],
+         "slide_preferences": list(pairs or []),
          "stage_timings": [t_plan, t_w1, t_c1, t_w2, t_c2, t_q, t_s]},
     ]
+
+
+# One pair as graphs.material.nodes._slide_preference would produce it, for
+# slide 1 of this step: attempt 1 failed, attempt 2 compiled.
+_PREFERENCE_PAIR = {
+    "index": 0,
+    "rejected_attempt": 1,
+    "chosen_attempt": 2,
+    "prompt_context": '[{"role": "system", "content": "s"}]',
+    "chosen_prompt": '[{"role": "system", "content": "s + the retry note"}]',
+    "rejected_jsx": "<div>broken</div>",
+    "rejected_error": "syntax error",
+    "chosen_jsx": "<div>fixed</div>",
+}
 
 
 @pytest.fixture()
@@ -968,6 +992,131 @@ class TestGenerateMaterials:
         }
         assert timings[-1].duration_seconds > 0
         assert all(t.duration_seconds >= 0 for t in timings)
+
+    # --- preference pairs (#168): the compiler annotated them, the driver stores them ---
+
+    def test_a_fixed_slide_stores_exactly_one_preference_row(
+        self, db, db_engine, make_session, fake_session_factory
+    ):
+        sid = make_session(
+            session_id="a", phase=Phase.GENERATING, boundary_map={"a": {}}
+        ).session_id
+        db.add(Plan(session_id=sid, version=1, prose_summary="ps",
+                    dependency_dag="dag",
+                    steps=[{"id": "s1", "title": "T1", "description": "d",
+                            "depends_on": [], "depth": 0}],
+                    adjustments=[]))
+        db.commit()
+
+        with patch("routers.plan.material_graph") as graph:
+            graph.invoke.side_effect = _two_slide_results(
+                pairs=[dict(_PREFERENCE_PAIR)]
+            )
+            generate_materials(sid)
+
+        db.expire_all()
+        (row,) = db.query(SlidePreference).filter_by(session_id=sid).all()
+        assert (row.step_id, row.slide_index) == ("s1", 1)  # 1-based, as failed_slides
+        assert (row.rejected_attempt, row.chosen_attempt) == (1, 2)
+        assert row.prompt_context == _PREFERENCE_PAIR["prompt_context"]
+        assert row.chosen_prompt == _PREFERENCE_PAIR["chosen_prompt"]
+        assert row.rejected_jsx == "<div>broken</div>"
+        assert row.rejected_error == "syntax error"
+        assert row.chosen_jsx == "<div>fixed</div>"
+        assert row.created_at is not None
+
+        # Capturing a pair changes nothing the learner gets: the step is still
+        # complete, the slides are still there, the phase still advances.
+        step_row = db.query(StepMaterial).filter_by(
+            session_id=sid, step_id="s1").one()
+        assert step_row.is_complete is True
+        assert step_row.slides == ["a_s1_slide_1", "a_s1_slide_2"]
+        assert db.get(Session, sid).phase == Phase.EXECUTING.value
+
+    def test_a_pair_is_stored_at_its_compile_not_at_the_end_of_the_step(
+        self, db, db_engine, make_session, fake_session_factory
+    ):
+        """The pair belongs to the compile that produced it: a step that dies
+        after that slide has still left its training data behind."""
+        sid = make_session(
+            session_id="a", phase=Phase.GENERATING, boundary_map={"a": {}}
+        ).session_id
+        db.add(Plan(session_id=sid, version=1, prose_summary="ps",
+                    dependency_dag="dag",
+                    steps=[{"id": "s1", "title": "T1", "description": "d",
+                            "depends_on": [], "depth": 0}],
+                    adjustments=[]))
+        db.commit()
+
+        paused = {"__interrupt__": object(), "slides": ["<div>1</div>"],
+                  "slide_preferences": [dict(_PREFERENCE_PAIR)]}
+        with patch("routers.plan.material_graph") as graph:
+            # The step gets one slide, then the graph run dies.
+            graph.invoke.side_effect = [paused, RuntimeError("generation died")]
+            generate_materials(sid)
+
+        db.expire_all()
+        (row,) = db.query(SlidePreference).filter_by(session_id=sid).all()
+        assert (row.step_id, row.slide_index) == ("s1", 1)
+        assert row.chosen_jsx == "<div>fixed</div>"
+        # The step itself did not survive: session lands in error, as before.
+        assert db.get(Session, sid).phase == Phase.ERROR.value
+        assert db.query(StepMaterial).filter_by(
+            session_id=sid, step_id="s1").one().is_complete is False
+
+    def test_the_driver_stores_no_row_when_the_graph_leaves_no_pair(
+        self, db, db_engine, make_session, fake_session_factory
+    ):
+        sid = make_session(
+            session_id="a", phase=Phase.GENERATING, boundary_map={"a": {}}
+        ).session_id
+        db.add(Plan(session_id=sid, version=1, prose_summary="ps",
+                    dependency_dag="dag",
+                    steps=[{"id": "s1", "title": "T1", "description": "d",
+                            "depends_on": [], "depth": 0}],
+                    adjustments=[]))
+        db.commit()
+
+        with patch("routers.plan.material_graph") as graph:
+            # A first-attempt success leaves no pair in the graph state (see
+            # tests/graphs/material), so the driver has nothing to store.
+            graph.invoke.side_effect = _two_slide_results()
+            generate_materials(sid)
+
+        db.expire_all()
+        assert db.query(SlidePreference).filter_by(session_id=sid).count() == 0
+
+    def test_a_failed_preference_write_does_not_cost_the_step(
+        self, db, db_engine, make_session, fake_session_factory
+    ):
+        sid = make_session(
+            session_id="a", phase=Phase.GENERATING, boundary_map={"a": {}}
+        ).session_id
+        db.add(Plan(session_id=sid, version=1, prose_summary="ps",
+                    dependency_dag="dag",
+                    steps=[{"id": "s1", "title": "T1", "description": "d",
+                            "depends_on": [], "depth": 0}],
+                    adjustments=[]))
+        db.commit()
+
+        with (
+            patch("routers.plan.material_graph") as graph,
+            patch("routers.plan.SlidePreference") as pref,
+        ):
+            graph.invoke.side_effect = _two_slide_results(
+                pairs=[dict(_PREFERENCE_PAIR)]
+            )
+            pref.side_effect = Exception("insert failed")
+            generate_materials(sid)
+
+        db.expire_all()
+        # Offline training data failed; the generated step did not.
+        assert db.query(SlidePreference).filter_by(session_id=sid).count() == 0
+        step_row = db.query(StepMaterial).filter_by(
+            session_id=sid, step_id="s1").one()
+        assert step_row.is_complete is True
+        assert db.get(SlideContent, "a_s1_slide_1").content == "<div>1</div>"
+        assert db.get(Session, sid).phase == Phase.EXECUTING.value
 
     def test_placeholder_slide_persists_is_placeholder_flag(
         self, db, db_engine, make_session, fake_session_factory

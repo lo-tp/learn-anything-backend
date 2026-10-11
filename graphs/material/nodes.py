@@ -41,6 +41,56 @@ from .state import MaterialState
 logger = logging.getLogger(__name__)
 
 
+def _slide_preference(
+    failed_for_slide: list[dict],
+    slide_index: int,
+    chosen_jsx: str,
+    chosen_prompt: str,
+    chosen_attempt: int,
+) -> dict | None:
+    """The preference pair a fixed compile produces (#168), or None if none.
+
+    The esbuild sandbox is the annotator: on one slide prompt the model wrote
+    JSX that failed to compile and then JSX that compiled, so the compiler has
+    said which of the two it prefers. The pair is that rejected attempt — its
+    prompt, its JSX and the sandbox error that rejected it — against the JSX
+    that compiled.
+
+    ``failed_for_slide`` is this slide's failed attempts in the order they
+    happened, so the pair is with the attempt this one superseded. An empty
+    list means nothing was rejected: a first-attempt success has no pair, and
+    neither does a substituted placeholder, which is not something the model
+    chose and so is never passed here.
+
+    Both halves' prompts are recorded, because they are not always the same
+    string: ``write_slide`` appends a retry instruction to every attempt after
+    the first, quoting ``compile_error_for_feedback(error)`` — the reduced form
+    of ``rejected_error``, not its raw text. A reader should compare the two
+    columns, not reconstruct one from an approximation. Once ``write_slide``
+    self-repairs inside a single attempt (#165) they are identical.
+    """
+    if not failed_for_slide:
+        return None
+    rejected = failed_for_slide[-1]
+    return {
+        "index": slide_index,
+        # Which write attempt each half came from. The pair is with the attempt
+        # this one superseded, so this is normally chosen_attempt - 1.
+        "rejected_attempt": rejected["attempt"],
+        "chosen_attempt": chosen_attempt,
+        # The prompt the rejected JSX was written from — the same value that
+        # attempt's failed_slides row holds — and the prompt the chosen JSX was
+        # written from. See the docstring for why both are kept.
+        "prompt_context": rejected["prompt"],
+        "chosen_prompt": chosen_prompt,
+        # The two candidates, as the model wrote them, and the verdict that
+        # separated them.
+        "rejected_jsx": rejected["jsx"],
+        "rejected_error": rejected["error"],
+        "chosen_jsx": chosen_jsx,
+    }
+
+
 def _timing_entry(stage: str, context: dict, started: float) -> dict:
     """One stage_timings entry: the stage name, its context, and the wall
     time since ``started`` (time.monotonic())."""
@@ -227,7 +277,7 @@ def make_compile_slide(llm: BaseChatModel):
                 "compile_slide: step=%s, slide=%d compiled successfully",
                 state.get("step", {}).get("id"), i + 1,
             )
-            return {
+            update: dict = {
                 "slides": [compiled_code],
                 "slide_index": i + 1,
                 "compile_result": "success",
@@ -241,6 +291,21 @@ def make_compile_slide(llm: BaseChatModel):
                     )
                 ],
             }
+            # A slide that failed and then compiled is a preference pair the
+            # compiler just annotated; the driver persists it (#168). This is
+            # training data — nothing in the graph reads it back, and it does
+            # not change what the learner gets.
+            pair = _slide_preference(
+                [fa for fa in (state.get("failed_attempts") or [])
+                 if fa.get("index") == i],
+                i,
+                jsx,
+                prompt,
+                current_attempts,
+            )
+            if pair is not None:
+                update["slide_preferences"] = [pair]
+            return update
 
         logger.warning(
             "compile_slide: step=%s, slide=%d attempt %d/%d failed: %s",
@@ -249,7 +314,13 @@ def make_compile_slide(llm: BaseChatModel):
         )
         result: dict = {
             "failed_attempts": [
-                {"index": i, "prompt": prompt, "jsx": jsx, "error": error}
+                {
+                    "index": i,
+                    "attempt": current_attempts,
+                    "prompt": prompt,
+                    "jsx": jsx,
+                    "error": error,
+                }
             ],
             "last_compile_error": error,
             "stage_timings": [

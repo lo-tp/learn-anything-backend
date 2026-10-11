@@ -21,6 +21,14 @@ class MaterialState(TypedDict, total=False):
     current_slide_prompt: str | None
     last_compile_error: str | None
     failed_attempts: Annotated[list[dict], operator.add]
+    # Compiler-annotated preference pairs (#168): one entry per slide that
+    # failed to compile and then compiled, holding the prompt context, the
+    # rejected JSX with the sandbox error that rejected it, and the chosen JSX.
+    # The driver persists them to slide_preferences; nothing in the graph reads
+    # them back. Entry shape:
+    # {"index", "rejected_attempt", "chosen_attempt", "prompt_context",
+    #  "chosen_prompt", "rejected_jsx", "rejected_error", "chosen_jsx"}.
+    slide_preferences: Annotated[list[dict], operator.add]
     # Per-stage wall-clock timings accumulated by the nodes (one entry per
     # stage execution); the driver persists them to graph_stage_timings.
     # Entry shape: {"stage": str, "context": dict, "duration_seconds": float}.
