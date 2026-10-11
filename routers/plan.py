@@ -19,6 +19,12 @@ per step. The per-slide retry loop lives inside the material graph
 and persists the results. The domain DB is the resume point — a step with an
 existing ``StepMaterial`` row is skipped; a failure lands the session in the
 ``error`` phase (terminal, per design).
+
+A slide that failed to compile and was then fixed also leaves one
+``slide_preferences`` row (#168): the prompt context, the rejected JSX and the
+JSX that compiled, with the sandbox as the annotator. That table is offline
+training data — no response, phase or message depends on it, and its write is
+best-effort so it can never cost a learner their material.
 """
 
 import logging
@@ -50,6 +56,7 @@ from db import (
     Session,
     SessionFactory,
     SlideContent,
+    SlidePreference,
     StepMaterial,
     get_db,
 )
@@ -159,6 +166,54 @@ def _session_lock(session_id: str) -> threading.Lock:
 # --- Background material generation driver ---
 
 
+def _capture_slide_preferences(
+    db: DBSession, session_id: str, step_id: str, pairs: list[dict]
+) -> int:
+    """Store the preference pairs this step's compiles annotated (#168).
+
+    ``compile_slide`` pairs every slide that failed to compile with the attempt
+    that fixed it — the esbuild sandbox is the annotator, so the pair needs no
+    labelling. One row per pair: the prompt each half was written from, the two
+    JSX candidates, and the sandbox error that chose between them. It is
+    training data for offline preference optimization; a first-attempt success
+    rejected nothing and leaves no pair to store.
+
+    Called at each compile pause with the pairs not stored yet, in its own
+    transaction and best-effort: nothing in the serving path reads this table,
+    so it must not cost a learner the slide committed alongside it. Returns the
+    number of rows written, so the caller only advances past pairs it actually
+    stored.
+    """
+    try:
+        for p in pairs:
+            db.add(
+                SlidePreference(
+                    session_id=session_id,
+                    step_id=step_id,
+                    slide_index=p["index"] + 1,  # 1-based for DB, as failed_slides
+                    rejected_attempt=p["rejected_attempt"],
+                    chosen_attempt=p["chosen_attempt"],
+                    prompt_context=p["prompt_context"],
+                    chosen_prompt=p["chosen_prompt"],
+                    rejected_jsx=p["rejected_jsx"],
+                    rejected_error=p["rejected_error"],
+                    chosen_jsx=p["chosen_jsx"],
+                )
+            )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Material generation: could not store slide_preferences for "
+            "session %s step %s",
+            session_id,
+            step_id,
+        )
+        return 0
+    return len(pairs)
+
+
+
 def generate_materials(session_id: str) -> None:
     """Generate material for every plan step, one committed row per step.
 
@@ -174,7 +229,9 @@ def generate_materials(session_id: str) -> None:
     streams the graph per step and persists each slide to the DB immediately
     after it compiles, so a crash mid-step loses at most the in-flight
     slide. Orphan SlideContent/FailedSlide rows from a previous partial run
-    are cleaned up before re-invoking.
+    are cleaned up before re-invoking. ``slide_preferences`` rows are not: a
+    pair that really happened stays valid training data even if the step is
+    generated again (same append-only policy as the timing rows).
     """
     if is_mock_mode():
         return
@@ -271,7 +328,10 @@ def generate_materials(session_id: str) -> None:
                 # Stage timings from state are persisted the same way: each
                 # not-yet-saved entry becomes a GraphStageTiming row in the
                 # same transaction as the slide commit (append-only — prior
-                # attempt rows from a re-run are kept).
+                # attempt rows from a re-run are kept). Preference pairs are
+                # persisted at the same pause, but in their own best-effort
+                # transaction, so a pair that fails to store cannot take the
+                # slide with it (#168).
                 config = graph_config(session_id, f"material:{step['id']}")
                 state: dict = material_graph.invoke(
                     {
@@ -284,6 +344,7 @@ def generate_materials(session_id: str) -> None:
                 )
                 slide_ids: list[str] = []
                 timings_persisted = 0
+                pairs_persisted = 0
                 while state.get("__interrupt__"):
                     slides = state.get("slides") or []
                     n = len(slides)
@@ -318,6 +379,16 @@ def generate_materials(session_id: str) -> None:
                     # fresh list so SQLAlchemy's JSON column detects the change).
                     provisional.slides = provisional.slides + [slide_id]
                     db.commit()
+                    # A slide that failed and was just fixed is a preference
+                    # pair the compiler annotated. Stored here, next to the
+                    # slide it describes, so it survives the step crashing
+                    # later; the pair's prompt is in hand at this moment and
+                    # nowhere else once the next attempt overwrites it.
+                    pairs = list(state.get("slide_preferences") or [])
+                    if len(pairs) > pairs_persisted:
+                        pairs_persisted += _capture_slide_preferences(
+                            db, session_id, step["id"], pairs[pairs_persisted:]
+                        )
                     state = material_graph.invoke(Command(resume=True), config)
                 result = state
 
@@ -374,10 +445,11 @@ def generate_materials(session_id: str) -> None:
                 summaries.append(result["summary"])
                 logger.info(
                     "Material generation: step %s done (%d slides, %d failed "
-                    "attempts, %d questions, %.1fs)",
+                    "attempts, %d preference pairs, %d questions, %.1fs)",
                     step["id"],
                     len(slide_ids),
                     len(failed),
+                    pairs_persisted,
                     len(result["questions"]),
                     step_total,
                 )
