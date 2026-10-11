@@ -4,6 +4,13 @@ The writes here are gated per route (#178); ``GET /sessions/{session_id}/materia
 — the generated deck — is a public read and declares no gate. Ownership begins
 at the write, not the read.
 
+Approving a plan that went through the adjust loop also records one
+``plan_preferences`` row (#167): the version the learner rejected, the version
+they chose, their adjustment text, and the prompt of the design pass that
+produced the chosen version's content. That table is offline training data — no
+response, phase or message in this file depends on it, and a failed write never
+fails an approve.
+
 Approving the plan schedules ``generate_materials`` as a FastAPI background
 task: a per-step driver that commits one ``StepMaterial`` row (plus one
 ``SlideContent`` row per slide and ``FailedSlide`` rows for failed attempts)
@@ -39,6 +46,7 @@ from db import (
     GraphStageTiming,
     Phase,
     Plan,
+    PlanPreference,
     Session,
     SessionFactory,
     SlideContent,
@@ -480,6 +488,60 @@ def validate_plan(plan: dict) -> None:
         raise HTTPException(status_code=500, detail="Generated plan failed validation")
 
 
+def _capture_plan_preference(db: DBSession, plan_row: Plan, result: dict) -> None:
+    """Record the preference pair an adjust loop produced, at approve (#167).
+
+    A pair is the plan version the learner rejected, the one they chose, the
+    adjustment text that got them there, and the prompt of the design pass that
+    produced the chosen version's content — training data for offline preference
+    optimization. (The render call that formatted that content into the stored
+    body is a separate prompt and is not recorded; what matters for training is
+    that the learner's instruction and the rejected plan are in it.) Nothing
+    user-visible reads this table, so the write is best-effort: a failed insert
+    is logged, never turned into a failed approve.
+
+    No pair exists when nothing was rejected: ``prior_plan`` is in the graph
+    state only for a pass that superseded an earlier version, so approving an
+    unadjusted plan writes nothing. Nor when nothing was said: the pair is
+    instruction-conditioned, and an adjustment carrying no words regenerated the
+    plan without the learner asking for anything, so there is no instruction to
+    pair with it. The phase gate means a session approves once, but mock mode
+    leaves it in ``reviewing``, so a repeat approve must not record the same pair
+    twice.
+    """
+    rejected = result.get("prior_plan")
+    chosen = result.get("current_plan")
+    adjustment = result.get("adjustment") or ""
+    if rejected is None or chosen is None or not adjustment.strip():
+        return
+    try:
+        if (
+            db.query(PlanPreference)
+            .filter_by(session_id=plan_row.session_id)
+            .first()
+            is not None
+        ):
+            return
+        db.add(
+            PlanPreference(
+                session_id=plan_row.session_id,
+                rejected_version=plan_row.version - 1,
+                chosen_version=plan_row.version,
+                prompt_context=result.get("prompt_context") or [],
+                adjustment=adjustment,
+                rejected_plan=rejected,
+                chosen_plan=chosen,
+            )
+        )
+        db.commit()
+    except Exception:  # training data must not fail an approve
+        db.rollback()
+        logger.exception(
+            "Could not record the plan preference pair for session %s",
+            plan_row.session_id,
+        )
+
+
 def _persist_plan(
     db: DBSession,
     session: Session,
@@ -702,6 +764,9 @@ def approve_plan(
             version=existing.version,
             adjustments=existing.adjustments,
         )
+        # #167: if this plan arrived at through the adjust loop, the loop
+        # produced a preference pair. Capture it; the response is untouched.
+        _capture_plan_preference(db, existing, result)
 
     if is_mock_mode():
         # #118: mock mode never advances into slide generation — the session

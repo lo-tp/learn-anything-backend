@@ -11,6 +11,8 @@ class PlanState(TypedDict, total=False):
     boundary_map: dict  # strand -> {floor, ceiling, gap_type}
     research: dict | None  # research_topic output (first pass only)
     current_plan: dict | None  # last rendered plan (baseline + interrupt output)
+    prior_plan: dict | None  # plan the current pass superseded (None on the first pass)
+    prompt_context: list[dict] | None  # messages design_plan was conditioned on this pass
     design_steps: list[dict]  # design_plan output for the current pass
     adjustment: str | None  # user's adjustment text (refinement passes)
     pass_count: int  # how many refinement passes have occurred

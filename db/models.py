@@ -193,6 +193,9 @@ class Session(Base):
     plan: Mapped[Plan | None] = relationship(
         back_populates="session", uselist=False, cascade="all, delete"
     )
+    plan_preferences: Mapped[list[PlanPreference]] = relationship(
+        back_populates="session", cascade="all, delete"
+    )
     materials: Mapped[list[StepMaterial]] = relationship(
         back_populates="session", cascade="all, delete"
     )
@@ -242,6 +245,49 @@ class Plan(Base):
     adjustments: Mapped[list[str]] = mapped_column(JSON, default=list)
 
     session: Mapped[Session] = relationship(back_populates="plan")
+
+
+class PlanPreference(Base):
+    """One instruction-conditioned preference pair from the plan adjust loop.
+
+    Written when a learner approves a plan they had adjusted: the prompt the
+    refinement was conditioned on, the version they rejected, the version they
+    chose, and their adjustment text verbatim. It is the training data for
+    offline preference optimization — nothing in the serving path reads it, and
+    the learner sees no difference from its existence.
+
+    One row per approved plan that had been adjusted. A plan approved with no
+    adjustment rejected nothing, so there is no pair to record; a pair needs
+    both sides.
+    """
+
+    __tablename__ = "plan_preferences"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True
+    )
+    # The version numbers the app assigned to each side (plans.version and the
+    # one it replaced), so a corpus can be ordered without re-deriving them.
+    rejected_version: Mapped[int] = mapped_column(Integer)
+    chosen_version: Mapped[int] = mapped_column(Integer)
+    # The exact messages of the design pass that produced the chosen version's
+    # content, as a list of {"role": "system"|"human", "content": ...} — the
+    # same shape as failed_slides.prompt, held as JSON. It carries the goal, the
+    # boundary map, the topic research, the rejected plan and the adjustment:
+    # the instruction the pair is conditioned on. Not the render call that later
+    # formatted that content into the stored body — that one is not recorded.
+    prompt_context: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    adjustment: Mapped[str] = mapped_column(Text)
+    # Both plan versions as rendered to the learner:
+    # {prose_summary, dependency_dag, steps}.
+    rejected_plan: Mapped[dict[str, Any]] = mapped_column(JSON)
+    chosen_plan: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC)
+    )
+
+    session: Mapped[Session] = relationship(back_populates="plan_preferences")
 
 
 class StepMaterial(Base):
