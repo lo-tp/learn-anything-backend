@@ -31,6 +31,11 @@ Control flow:
 
 State (``research``, ``current_plan``, ``pass_count``) lives in the
 checkpointer across passes, keyed by ``thread_id = f"{session_id}:plan"``.
+Each ``design_plan`` pass additionally leaves ``prior_plan`` (the version it
+superseded, if any) and ``prompt_context`` (the messages it was conditioned
+on) in the state: the approve handler turns those into one preference pair for
+offline training when the learner approves an adjusted plan (#167). The graph
+never reads them back.
 """
 
 from __future__ import annotations
