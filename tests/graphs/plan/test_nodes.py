@@ -8,6 +8,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from graphs.plan.nodes import (
+    DESIGN_PLAN,
+    RENDER_PLAN,
+    RESEARCH_TOPIC,
     make_design_plan,
     make_render_plan,
     make_research_topic,
@@ -274,6 +277,7 @@ class TestReasoningBudget:
 
     def test_research_topic_thinks_within_a_budget(self):
         assert self._research_kwargs() == {
+            "stage": RESEARCH_TOPIC,
             "reasoning_effort": "low",
             "max_tokens": 3072,
         }
@@ -282,6 +286,7 @@ class TestReasoningBudget:
         """The search decision is the expensive half, so it carries the budget."""
         tools = [MagicMock()]
         assert self._research_kwargs(search_tools=lambda: tools) == {
+            "stage": RESEARCH_TOPIC,
             "reasoning_effort": "low",
             "max_tokens": 3072,
         }
@@ -294,6 +299,7 @@ class TestReasoningBudget:
         ) as mock_call:
             make_design_plan(llm)(state)
         assert mock_call.call_args.kwargs == {
+            "stage": DESIGN_PLAN,
             "reasoning_effort": "low",
             "max_tokens": 4096,
         }
@@ -315,6 +321,7 @@ class TestReasoningBudget:
         with patch("graphs.plan.nodes.structured_invoke", return_value=out) as mock_call:
             make_render_plan(llm)(state)
         assert mock_call.call_args.kwargs == {
+            "stage": RENDER_PLAN,
             "reasoning_effort": "minimal",
             "max_tokens": 6144,
         }

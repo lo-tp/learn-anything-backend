@@ -14,9 +14,15 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from core.language import DEFAULT_LANGUAGE, language_instruction
-from core.reasoning import stage_call_kwargs
+from core.reasoning import stage_call_kwargs, stage_name
 
-from ..common import structured_invoke, structured_invoke_messages, with_unknown_option
+from ..common import (
+    recorded_stage_name,
+    structured_invoke,
+    structured_invoke_messages,
+    with_model_recoveries,
+    with_unknown_option,
+)
 from .prompts import (
     _JSX_SYSTEM_PROMPT,
     PLAN_SLIDE_CONTENTS_SYSTEM,
@@ -47,13 +53,29 @@ from .state import MaterialState
 
 logger = logging.getLogger(__name__)
 
+# This graph's stages, named the qualified way every graph names a stage (#194).
+# The row spelling is derived from these by graphs.common.recorded_stage_name,
+# so a stage has one name in this file. These are also the stages
+# core/reasoning.py does *not* budget: the slide-writing ones keep their
+# reasoning effort and output caps beside the sampling ladder in sandbox.py, and
+# compile_slide calls no model at all.
+PLAN_SLIDE_CONTENTS = stage_name("material", "plan_slide_contents")
+WRITE_SLIDE = stage_name("material", "write_slide")
+COMPILE_SLIDE = stage_name("material", "compile_slide")
+WRITE_QUESTIONS = stage_name("material", "write_questions")
+SUMMARIZE_STEP = stage_name("material", "summarize_step")
 
-def _timing_entry(stage: str, context: dict, started: float) -> dict:
-    """One stage_timings entry: the stage name, its context, and the wall
-    time since ``started`` (time.monotonic())."""
+
+def _timing_entry(qualified_stage: str, context: dict, started: float) -> dict:
+    """One stage_timings entry: the stage name as the rows store it, its context,
+    and the wall time since ``started`` (time.monotonic()).
+
+    Any answer this stage had to recover rides in the context (#195), drained so
+    the next stage is not credited with this one's repair.
+    """
     return {
-        "stage": stage,
-        "context": context,
+        "stage": recorded_stage_name(qualified_stage),
+        "context": with_model_recoveries(context),
         "duration_seconds": time.monotonic() - started,
     }
 
@@ -99,6 +121,7 @@ def make_plan_slide_contents(llm: BaseChatModel):
             # output cap; see SLIDE_REASONING_EFFORT and
             # SLIDE_CONTENTS_MAX_OUTPUT_TOKENS in sandbox.py for the measurements
             # behind both (#194).
+            stage=PLAN_SLIDE_CONTENTS,
             reasoning_effort=SLIDE_REASONING_EFFORT,
             max_tokens=slide_contents_max_output_tokens(),
         )
@@ -120,7 +143,7 @@ def make_plan_slide_contents(llm: BaseChatModel):
             "attempts_by_slide": [0] * len(contents),
             "stage_timings": [
                 _timing_entry(
-                    "plan_slide_contents",
+                    PLAN_SLIDE_CONTENTS,
                     {"step_id": step.get("id"), "slide_index": None, "attempt": None},
                     started,
                 )
@@ -133,8 +156,14 @@ def make_plan_slide_contents(llm: BaseChatModel):
 def _slide_code(
     llm: BaseChatModel, messages: list[BaseMessage], bind_kwargs: dict
 ) -> str:
-    """One structured slide-writing call: return the JSX code string."""
-    out = structured_invoke_messages(llm, SlideOut, messages, **bind_kwargs)
+    """One structured slide-writing call: return the JSX code string.
+
+    The first attempt and a self-repair turn (#165) are the same stage, so the
+    name is stated here rather than threaded through both callers.
+    """
+    out = structured_invoke_messages(
+        llm, SlideOut, messages, stage=WRITE_SLIDE, **bind_kwargs
+    )
     return out.code
 
 
@@ -300,7 +329,7 @@ def make_write_slide(llm: BaseChatModel):
             "last_compile_error": last_error,
             "stage_timings": [
                 _timing_entry(
-                    "write_slide",
+                    WRITE_SLIDE,
                     {"step_id": step.get("id"), "slide_index": i + 1,
                      "attempt": new_attempts},
                     started,
@@ -346,7 +375,7 @@ def make_compile_slide(llm: BaseChatModel):
                 "current_slide_is_placeholder": False,
                 "stage_timings": [
                     _timing_entry(
-                        "compile_slide",
+                        COMPILE_SLIDE,
                         {"step_id": state.get("step", {}).get("id"),
                          "slide_index": i + 1, "attempt": current_attempts},
                         started,
@@ -374,7 +403,7 @@ def make_compile_slide(llm: BaseChatModel):
             "last_compile_error": error,
             "stage_timings": [
                 _timing_entry(
-                    "compile_slide",
+                    COMPILE_SLIDE,
                     {"step_id": state.get("step", {}).get("id"),
                      "slide_index": i + 1, "attempt": current_attempts},
                     started,
@@ -465,7 +494,7 @@ def make_write_questions(llm: BaseChatModel):
             QuestionsOut,
             system,
             "\n".join(parts),
-            **stage_call_kwargs("material.write_questions"),
+            stage=WRITE_QUESTIONS, **stage_call_kwargs(WRITE_QUESTIONS),
         )
         logger.debug(
             "write_questions: step=%s -> %d question(s) (%.1fs)",
@@ -486,7 +515,7 @@ def make_write_questions(llm: BaseChatModel):
             "questions": questions,
             "stage_timings": [
                 _timing_entry(
-                    "write_questions",
+                    WRITE_QUESTIONS,
                     {"step_id": step.get("id"), "slide_index": None, "attempt": None},
                     started,
                 )
@@ -523,7 +552,7 @@ def make_summarize_step(llm: BaseChatModel):
             SummaryOut,
             system,
             human,
-            **stage_call_kwargs("material.summarize_step"),
+            stage=SUMMARIZE_STEP, **stage_call_kwargs(SUMMARIZE_STEP),
         )
         logger.debug(
             "summarize_step: step=%s -> %d key point(s) (%.1fs)",
@@ -537,7 +566,7 @@ def make_summarize_step(llm: BaseChatModel):
             },
             "stage_timings": [
                 _timing_entry(
-                    "summarize_step",
+                    SUMMARIZE_STEP,
                     {"step_id": step.get("id"), "slide_index": None, "attempt": None},
                     started,
                 )

@@ -18,10 +18,19 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.tools import BaseTool
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from core.blocking import await_blocking
 from core.language import DEFAULT_LANGUAGE, localize_status
+from core.model_answers import (
+    ModelAnswerUnparseable,
+    ModelRecovery,
+    backend_refused_json,
+    drain_model_recoveries,
+    json_shape_spec,
+    read_json_answer,
+    record_model_recovery,
+)
 from core.reasoning import require_stage
 
 logger = logging.getLogger(__name__)
@@ -31,6 +40,12 @@ logger = logging.getLogger(__name__)
 # bound on what a tool-using step can cost: two rounds let the model search,
 # look at what came back, and search once more, and no further.
 _MAX_TOOL_CALL_ROUNDS = 2
+
+# What a recovered answer is called in a ``graph_stage_timings`` row. #195 is a
+# fault that used to end a deck in silence, so the row is where "which stage
+# leaned on the second plan, and how much repairing it needed" stops being a
+# guess from log lines.
+RECOVERED_JSON = "backend_refused_json"
 
 
 class StageTimingsState(TypedDict, total=False):
@@ -59,11 +74,22 @@ def recorded_stage_name(qualified_stage: str) -> str:
 
     A stage is named ``clarify.assess_goal`` where a graph builds its nodes and
     where its model call asks for a reasoning budget, and ``assess_goal`` in the
-    timings rows — that is what the material graph already stores there, and what
-    ``scripts/slide_analysis.py`` reads, with the graph in its own column. This
-    is the one place that maps between the two (#194 review).
+    timings rows — that is what the material graph has always stored there, and
+    what ``scripts/slide_analysis.py`` reads, with the graph in its own column.
+    This is the one place that maps between the two (#194 review), so a stage has
+    one name in the code and the row spelling is derived rather than typed out
+    again.
+
+    Whether a stage has a reasoning budget is *not* checked here. That is
+    :func:`timed_node`'s question, asked at graph-build time where a stage with
+    no budget is a mistake worth stopping; this mapping is also used by the
+    slide-writing stages and by ``compile_slide``, which name their own request
+    policy in ``graphs/material/sandbox.py`` or call no model at all.
     """
-    return require_stage(qualified_stage).split(".", 1)[1]
+    _, separator, stage = qualified_stage.partition(".")
+    if not separator or not stage:
+        raise ValueError(f"{qualified_stage!r} is not a qualified stage name")
+    return stage
 
 
 def timed_node[State](
@@ -75,10 +101,11 @@ def timed_node[State](
 
     ``stage`` is the qualified stage name —
     :func:`core.reasoning.stage_name` (``"clarify.assess_goal"``) — the same
-    constant the node passes to :func:`core.reasoning.stage_call_kwargs`. A
-    wrapper is a model call, so it must be a stage this app has a reasoning
-    budget for: ``require_stage`` makes that an error at graph-build time rather
-    than a row in the timings table that no policy knows about.
+    constant the node passes to :func:`core.reasoning.stage_call_kwargs` and to
+    the structured call itself. A wrapper is a model call, so it must be a stage
+    this app has a reasoning budget for: ``require_stage`` makes that an error at
+    graph-build time rather than a row in the timings table that no policy knows
+    about.
 
     The returned node is left un-annotated on purpose: LangGraph's node protocol
     wants a function, and a ``Callable[[State], dict]`` annotation is not one —
@@ -99,6 +126,10 @@ def timed_node[State](
     learner's, spent between requests, and recording it would make the timings
     measure the wrong thing.
     """
+    # A wrapper is a model call, so it must be a stage this app has a reasoning
+    # budget for: failing here, at graph assembly, is what keeps the timings rows
+    # and core/reasoning.py naming the same thing.
+    require_stage(stage)
     recorded_stage = recorded_stage_name(stage)
 
     def timed(state: State) -> dict:
@@ -106,6 +137,10 @@ def timed_node[State](
         try:
             result = node(state)
         except Exception:
+            # A failed stage writes no row, so its recovery (if it made one on
+            # the way to failing) is drained here rather than left to be blamed
+            # on the next stage that does write one.
+            drain_model_recoveries()
             logger.warning(
                 "%s: failed after %.1fs", stage, time.monotonic() - started, exc_info=True
             )
@@ -114,7 +149,7 @@ def timed_node[State](
         logger.debug("%s: %.1fs", stage, duration)
         entry = {
             "stage": recorded_stage,
-            "context": context(state) if context is not None else {},
+            "context": _stage_context(state, context),
             "duration_seconds": duration,
         }
         return {**result, "stage_timings": [entry]}
@@ -122,9 +157,34 @@ def timed_node[State](
     return timed
 
 
+def with_model_recoveries(context: dict) -> dict:
+    """A stage row's context, plus any answer this stage had to recover (#195).
+
+    The recoveries are *drained*, not read: they belong to the stage being
+    recorded now, and must not be counted again for the next one. A stage that
+    needed nothing gains no field at all, which is what keeps these rows readable
+    while they are queried for the ones that did.
+    """
+    recoveries = drain_model_recoveries()
+    if not recoveries:
+        return context
+    return {**context, "model_recoveries": recoveries}
+
+
+def _stage_context(state: Any, context: Callable[[Any], dict] | None) -> dict:
+    """What the caller said this execution was, attributed to the row it describes."""
+    return with_model_recoveries(dict(context(state)) if context is not None else {})
+
+
+# What a recovered answer is called in a ``graph_stage_timings`` row, and why it
+# is there: #195 is a fault that used to end a deck silently, and a stage that
+# needs this on most calls is a defect worth having a number for.
+RECOVERED_JSON = "backend_refused_json"
+
+
 def structured_invoke[Schema: BaseModel](
     llm: BaseChatModel, schema: type[Schema], system: str, human: str,
-    **bind_kwargs: Any,
+    *, stage: str, **bind_kwargs: Any,
 ) -> Schema:
     """Run the LLM with structured output and return a validated schema instance.
 
@@ -134,31 +194,139 @@ def structured_invoke[Schema: BaseModel](
     """
     return structured_invoke_messages(
         llm, schema, [SystemMessage(content=system), HumanMessage(content=human)],
-        **bind_kwargs,
+        stage=stage, **bind_kwargs,
     )
 
 
 def structured_invoke_messages[Schema: BaseModel](
     llm: BaseChatModel, schema: type[Schema], messages: list[BaseMessage],
-    **bind_kwargs: Any,
+    *, stage: str, **bind_kwargs: Any,
 ) -> Schema:
-    """Run the LLM with structured output over an explicit message list.
+    r"""Run the LLM with structured output over an explicit message list.
 
     Lets the caller build the messages once and reuse the exact same objects
     for both the call and persistence (e.g. saving the real prompt sent).
 
     ``bind_kwargs`` (e.g. ``temperature=0.1``) are applied via ``bind`` AFTER
     ``with_structured_output`` — binding before it silently drops the params.
+
+    ``stage`` names the call the way this file's caller already names it — the
+    qualified constant a pre-slide node passes to
+    :func:`core.reasoning.stage_call_kwargs`, the bare name a material node
+    already logs and records its stage under. It is not re-validated here: what
+    it is for is being able to say which call a recovered, or unreadable, answer
+    came from.
+
+    Two plans, in order (#195). The first is the one this app has always made:
+    schema enforcement, which is what makes the answer shaped as the schema says.
+    When the backend *refuses to parse what the model wrote* — it compiled a
+    grammar from the schema, the model wrote ``$\int`` through it, and the
+    backend then validated the completion as JSON and rejected it — the refusal
+    withholds the completion, so there is nothing here to fix. The second plan
+    asks for the same shape with nothing constraining the decode, reads the text
+    on this side of the wire (:mod:`core.model_answers`), repairs the escapes JSON
+    rejects, and validates the result against the same schema.
+
+    Not everything is recoverable this way, deliberately. A backend that is busy,
+    or an answer that parsed and did not fit the schema, is not a parse failure:
+    one is served by repeating the request and the other is a prompt problem, and
+    rewriting the request to guess at either is how a real failure becomes
+    invisible. Those raise unchanged.
     """
     model = llm.with_structured_output(schema)
     if bind_kwargs:
         model = model.bind(**bind_kwargs)
-    return cast(Schema, model.invoke(messages))
+    try:
+        return cast(Schema, model.invoke(messages))
+    except Exception as exc:
+        # Every failure is looked at, not swallowed: only the one class this
+        # second plan can actually answer is answered, and everything else is
+        # raised to the caller exactly as the model's transport raised it.
+        if not backend_refused_json(exc):
+            raise
+        logger.warning(
+            "%s: the backend would not parse the model's JSON (#195); "
+            "asking again for the same shape: %s",
+            stage,
+            exc,
+        )
+        return cast(
+            Schema,
+            _same_shape_unconstrained(
+                llm, schema, messages, stage=stage, refused=exc, **bind_kwargs
+            ),
+        )
+
+
+def _same_shape_unconstrained[Schema: BaseModel](
+    llm: BaseChatModel, schema: type[Schema], messages: list[BaseMessage],
+    *, stage: str, refused: Exception, **bind_kwargs: Any,
+) -> Schema:
+    r"""The second plan: the same shape, asked for without enforcing it.
+
+    The stage's own messages are sent unchanged and the shape instruction is
+    appended after them, so the language and teaching rules the stage set are
+    still the ones in effect. The stage's reasoning budget and output cap are
+    bound here too: a recovery is a model call like any other, and a fallback
+    that escaped them would be a hole in the policy #194 exists to hold.
+    """
+    model = llm.bind(**bind_kwargs) if bind_kwargs else llm
+    asked = [*messages, HumanMessage(content=_shape_instruction(schema))]
+    text = _answer_text(model.invoke(asked))
+
+    try:
+        answer = read_json_answer(text)
+    except ValueError as unreadable:
+        raise ModelAnswerUnparseable(stage, str(unreadable), text) from refused
+    try:
+        result = schema.model_validate(answer.value)
+    except ValidationError as invalid_shape:
+        raise ModelAnswerUnparseable(
+            stage, f"the answer did not fit {schema.__name__}: {invalid_shape}", text
+        ) from invalid_shape
+
+    record_model_recovery(
+        ModelRecovery(reason=RECOVERED_JSON, repaired_escapes=answer.repaired_escapes)
+    )
+    logger.warning(
+        "%s: recovered by asking without schema enforcement; %d JSON escape(s) "
+        "repaired (#195)",
+        stage,
+        answer.repaired_escapes,
+    )
+    return result
+
+
+def _shape_instruction(schema: type[BaseModel]) -> str:
+    """Ask for the shape the backend is no longer enforcing.
+
+    Phrased as a shape to copy, not a schema to describe: the one sample of an
+    unconstrained ask on this backend had the model answering with the schema
+    itself, which is valid JSON and matches nothing.
+    """
+    return (
+        "Answer with JSON only, in exactly this shape — every field present, "
+        "every value filled in, nothing written before or after the JSON. This "
+        "is the shape of an answer to copy, not a schema to describe.\n\n"
+        f"{json_shape_spec(schema)}"
+    )
+
+
+def _answer_text(response: AIMessage) -> str:
+    """The text of a model's reply, whether it came as one string or as blocks."""
+    content = response.content
+    if isinstance(content, str):
+        return content
+    parts = [
+        block.get("text", "") if isinstance(block, dict) else str(block)
+        for block in content
+    ]
+    return "\n".join(part for part in parts if part)
 
 
 def structured_invoke_with_tools[Schema: BaseModel](
     llm: BaseChatModel, schema: type[Schema], system: str, human: str,
-    tools: Sequence[BaseTool], **bind_kwargs: Any,
+    tools: Sequence[BaseTool], *, stage: str, **bind_kwargs: Any,
 ) -> Schema:
     """Run the LLM with structured output, offering it tools first.
 
@@ -194,7 +362,7 @@ def structured_invoke_with_tools[Schema: BaseModel](
             for call in asked.tool_calls:
                 messages.append(_run_tool_call(by_name, call))
     return structured_invoke_messages(
-        llm, schema, messages, **bind_kwargs
+        llm, schema, messages, stage=stage, **bind_kwargs
     )
 
 
