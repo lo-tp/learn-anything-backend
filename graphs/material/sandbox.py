@@ -30,30 +30,33 @@ MAX_SLIDE_SELF_REPAIR_TURNS = max(
 MAX_BRACE_APPEND = 10
 
 # --- Slide-generation sampling profiles ---
-# One profile per write attempt. All attempts use the same deterministic
-# profile so a slide that keeps failing to compile gets identical, stable
-# samples on every retry.
+# One profile per write attempt: attempt 1 is the most creative (higher
+# temp/top_p/top_k, looser min_p) to maximize the chance of a good first
+# draft; each outer retry steps down toward the most deterministic profile
+# so a slide that keeps failing to compile gets progressively stable
+# samples. Self-repair turns within an attempt share that attempt's
+# profile (see write_slide in nodes.py).
 #
 # temperature/top_p are standard OpenAI params, but top_k/min_p/
 # repeat_penalty are NOT part of the OpenAI API — OpenAI-compatible backends
 # (e.g. vLLM) only accept them when nested under ``extra_body``. See
 # SLIDE_EXTRA_BODY_PARAMS and slide_sampling_bind_kwargs.
 SLIDE_SAMPLING_PROFILES: tuple[dict[str, float], ...] = (
-    {  # Attempt 1
-        "temperature": 0.1,
-        "top_p": 0.5,
-        "top_k": 10,
-        "min_p": 0.1,
-        "repeat_penalty": 1.05,
+    {  # Attempt 1 — creative but reliable
+        "temperature": 0.4,
+        "top_p": 0.75,
+        "top_k": 25,
+        "min_p": 0.06,
+        "repeat_penalty": 1.02,
     },
-    {  # Attempt 2
-        "temperature": 0.1,
-        "top_p": 0.5,
-        "top_k": 10,
-        "min_p": 0.1,
-        "repeat_penalty": 1.05,
+    {  # Attempt 2 — mostly deterministic
+        "temperature": 0.2,
+        "top_p": 0.6,
+        "top_k": 15,
+        "min_p": 0.08,
+        "repeat_penalty": 1.02,
     },
-    {  # Attempt 3
+    {  # Attempt 3 — most reliable
         "temperature": 0.1,
         "top_p": 0.5,
         "top_k": 10,
