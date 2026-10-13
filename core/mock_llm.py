@@ -221,4 +221,8 @@ class MockChatModel(BaseChatModel):
         # and the language helpers are its only consumers).
         if not isinstance(schema, type) or not issubclass(schema, BaseModel):
             raise TypeError("MockChatModel schemas must be pydantic models")
-        return RunnableLambda(lambda _input: make_canned_output(schema))  # type: ignore[arg-type]
+        # ``**_`` because every node now binds a per-phase reasoning budget onto
+        # its call (#194) and LangGraph hands those kwargs through to whatever a
+        # structured-output binding ends up being. The canned answer is the same
+        # whatever the model was asked to think with.
+        return RunnableLambda(lambda _input, **_: make_canned_output(schema))  # type: ignore[arg-type]

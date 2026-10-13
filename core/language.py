@@ -32,9 +32,31 @@ from core.prompts import (
     language_instruction,  # noqa: F401  (re-exported for graph nodes)
     localize_status_system,
 )
+from core.reasoning import phase_call_kwargs
 
 #: Language used when detection is unavailable or the text has no signal.
 DEFAULT_LANGUAGE = "English"
+
+# Status lines are written in English, so a learner already writing in English
+# needs no translation at all (#194). The cache below is bounded by
+# construction, not by eviction: its keys are the fixed set of status strings
+# this app produces crossed with the languages in ``_CODE_TO_NAME``.
+_STATUS_TRANSLATIONS: dict[tuple[str, str], str] = {}
+
+
+def clear_status_translation_cache() -> None:
+    """Drop every cached status translation.
+
+    The cache is process-global, so this is the public way to empty it: tests
+    use it to stay independent of each other, and a caller that swaps the model
+    a translation came from has no other handle on it.
+    """
+    _STATUS_TRANSLATIONS.clear()
+
+
+def _needs_translation(language: str) -> bool:
+    """True when a status line actually has to be translated into ``language``."""
+    return (language or "").strip().casefold() != DEFAULT_LANGUAGE.casefold()
 
 # Below this length ``langid`` is unreliable (it returns its default 'en'
 # sentinel). Short text is routed to the LLM fallback instead; short *reply*
@@ -161,7 +183,9 @@ def _llm_detect(text: str, llm: BaseChatModel | None) -> str:
     try:
         out = cast(
             _LanguageDetectionOut,
-            llm.with_structured_output(_LanguageDetectionOut).invoke(
+            llm.with_structured_output(_LanguageDetectionOut)
+            .bind(**phase_call_kwargs("language.detect"))
+            .invoke(
                 [
                     SystemMessage(content=DETECT_LANGUAGE_SYSTEM),
                     HumanMessage(content=text),
@@ -184,16 +208,32 @@ def localize_status(llm: BaseChatModel | None, language: str, english: str) -> s
     a router rather than a domain node. Returns the original English string if
     ``llm`` is unavailable or the call fails, so a status message is always
     returned.
+
+    Two cases cost no model call (#194): the learner is already writing in
+    English — the language these lines are written in — and a line already
+    translated into this language. Without the second, this function is called
+    once per generated question and spends a full round trip to produce the same
+    two words every time.
     """
     text = (english or "").strip()
-    if not text or llm is None:
+    if not text or llm is None or not _needs_translation(language):
         return text
+
+    key = (language.strip().casefold(), text)
+    cached = _STATUS_TRANSLATIONS.get(key)
+    if cached is not None:
+        return cached
+
     system = localize_status_system(language)
     try:
-        resp = llm.invoke(
-            [SystemMessage(content=system), HumanMessage(content=text)]
+        resp = (
+            llm.bind(**phase_call_kwargs("language.localize_status"))
+            .invoke([SystemMessage(content=system), HumanMessage(content=text)])
         )
         translated = (getattr(resp, "content", "") or "").strip()
-        return translated or text
     except Exception:  # noqa: BLE001 — any failure -> original English
         return text
+    if not translated:
+        return text
+    _STATUS_TRANSLATIONS[key] = translated
+    return translated
