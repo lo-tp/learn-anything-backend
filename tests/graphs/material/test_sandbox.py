@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from graphs.material.sandbox import (
+    MATHJAX_CONTEXT_RULE,
     MAX_BRACE_APPEND,
     MAX_MATERIAL_ATTEMPTS,
     MAX_SLIDE_SELF_REPAIR_TURNS,
@@ -17,6 +18,7 @@ from graphs.material.sandbox import (
     SLIDE_REASONING_EFFORT,
     SLIDE_SAMPLING_PROFILES,
     _compile_slide,
+    _mathjax_without_context,
     _placeholder_slide_jsx,
     _strip_markdown_fences,
     _unbalanced_open_braces,
@@ -26,6 +28,7 @@ from graphs.material.sandbox import (
     slide_sampling_bind_kwargs,
     slide_sampling_for_attempt,
     validate_jsx,
+    wrap_mathjax_context,
 )
 
 
@@ -463,6 +466,179 @@ class TestValidateJsx:
         assert result["ok"] is False
         assert "strip_markdown_fences" in result["repairs"]
         assert "balance_braces" in result["repairs"]
+
+
+# --- MathJax context contract (renders blank, compiles green) ---
+
+_MATHJAX_SLIDE = (
+    'export default function Slide() {\n'
+    '  return <div><MathJax inline>{"`x^2`"}</MathJax></div>;\n'
+    '}'
+)
+_WRAPPED_SLIDE = (
+    'export default function Slide() {\n'
+    '  return <MathJaxContext config={{ loader: { load: ["input/asciimath"] } }}>'
+    '<div><MathJax inline>{"`x^2`"}</MathJax></div></MathJaxContext>;\n'
+    '}'
+)
+_ARROW_SLIDE = 'export default () => <div><MathJax inline>{"`x^2`"}</MathJax></div>;'
+
+
+class TestMathjaxWithoutContextDetection:
+    def test_detects_mathjax_tag_without_context(self):
+        assert _mathjax_without_context(_MATHJAX_SLIDE) is True
+        assert _mathjax_without_context("<MathJax/>") is True
+        assert _mathjax_without_context("<MathJax\n dynamic>") is True
+
+    def test_context_tag_closes_the_contract(self):
+        # <MathJaxContext> must never match the <MathJax> tag pattern.
+        assert _mathjax_without_context(_WRAPPED_SLIDE) is False
+        assert _mathjax_without_context("<MathJaxContext>") is False
+        assert _mathjax_without_context("<MathJaxContext config={{}}>\n") is False
+
+    def test_no_math_or_prose_mentions_are_not_math(self):
+        assert _mathjax_without_context("export default function S(){return <div/>;}") is False
+        assert _mathjax_without_context(
+            'export default function S(){return <p>MathJax is a library</p>;}'
+        ) is False
+
+
+class TestWrapMathjaxContext:
+    def test_named_default_export_is_renamed_and_wrapped(self):
+        wrapped, applied = wrap_mathjax_context(_MATHJAX_SLIDE)
+        assert applied is True
+        # The original component becomes a plain function; the model's content
+        # is untouched — nothing moved, nothing deleted.
+        assert "function Slide() {" in wrapped
+        assert 'return <div><MathJax inline>{"`x^2`"}</MathJax></div>;' in wrapped
+        # The new default export renders it inside the mandated wrapper, with
+        # the exact config the prompt mandates.
+        assert (
+            'export default function __SlideWithMathJaxContext() {\n'
+            '  return <MathJaxContext config={{ loader: { load: ["input/asciimath"] } }}>'
+            '<Slide /></MathJaxContext>;\n'
+            '}' in wrapped
+        )
+        assert wrapped.count("export default") == 1
+
+    def test_anonymous_default_export_gains_a_name(self):
+        anon = 'export default function () {\n  return <MathJax inline>{"`x`"}</MathJax>;\n}'
+        wrapped, applied = wrap_mathjax_context(anon)
+        assert applied is True
+        assert "function __SlideInner ()" in wrapped
+        assert "<__SlideInner />" in wrapped
+        assert wrapped.count("export default") == 1
+
+    def test_unpinned_module_shape_is_declined_not_guessed(self):
+        # The prompt pins "export default function"; an arrow default is not
+        # safely rewritable, so the violation must be reported instead.
+        unchanged, applied = wrap_mathjax_context(_ARROW_SLIDE)
+        assert applied is False
+        assert unchanged == _ARROW_SLIDE
+
+    def test_declined_when_it_would_collide_with_an_existing_name(self):
+        colliding = _MATHJAX_SLIDE.replace(
+            "function Slide()", "function __SlideWithMathJaxContext()"
+        )
+        _, applied = wrap_mathjax_context(colliding)
+        assert applied is False
+
+    def test_noop_when_contract_is_met_or_absent(self):
+        assert wrap_mathjax_context(_WRAPPED_SLIDE) == (_WRAPPED_SLIDE, False)
+        plain = "export default function S(){return <div/>;}"
+        assert wrap_mathjax_context(plain) == (plain, False)
+
+
+class TestValidateJsxMathjaxContract:
+    @staticmethod
+    def _compile_by_context(code: str):
+        # Distinguishes the raw slide from the wrapped variant by content.
+        return ("compiled-wrapped", "") if "MathJaxContext" in code else ("compiled-raw", "")
+
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_compiled_slide_missing_context_is_deterministically_wrapped(self, mock_compile):
+        mock_compile.side_effect = self._compile_by_context
+        result = validate_jsx(_MATHJAX_SLIDE)
+        assert result["ok"] is True
+        assert result["repairs"] == ["wrap_mathjax_context"]
+        # The stored source is the wrapped module, and its own compiled output
+        # is what is returned — not the raw slide's.
+        assert _mathjax_without_context(result["source"]) is False
+        assert result["compiled_code"] == "compiled-wrapped"
+
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_compliant_slide_compiles_once_and_is_untouched(self, mock_compile):
+        mock_compile.side_effect = self._compile_by_context
+        result = validate_jsx(_WRAPPED_SLIDE)
+        assert result["ok"] is True
+        assert result["source"] == _WRAPPED_SLIDE
+        assert result["repairs"] == []
+        assert mock_compile.call_count == 1
+
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_unwritable_shape_reports_the_contract(self, mock_compile):
+        mock_compile.side_effect = self._compile_by_context
+        result = validate_jsx(_ARROW_SLIDE)
+        assert result["ok"] is False
+        assert "<MathJaxContext>" in result["error"]
+        assert "renders blank" in result["error"]
+        assert result["repairs"] == []
+
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_wrap_that_does_not_compile_falls_back_to_the_model(self, mock_compile):
+        mock_compile.side_effect = [("compiled-raw", ""), (None, "Build failed with 1 error")]
+        result = validate_jsx(_MATHJAX_SLIDE)
+        assert result["ok"] is False
+        assert "Build failed with 1 error" in result["error"]
+        # The contract wording rides along so the repair turn fixes both.
+        assert "<MathJaxContext>" in result["error"]
+        assert result["repairs"] == []
+        # The second compile call was the wrapped variant.
+        assert "MathJaxContext" in mock_compile.call_args_list[1][0][0]
+
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_failed_compile_also_gets_the_wrap_repair(self, mock_compile):
+        # The raw slide does not compile; after the deterministic wrap the
+        # wrapped variant does.
+        def fake(code):
+            if code == _MATHJAX_SLIDE:
+                return (None, "syntax error")
+            return self._compile_by_context(code)
+        mock_compile.side_effect = fake
+        result = validate_jsx(_MATHJAX_SLIDE)
+        assert result["ok"] is True
+        assert result["repairs"] == ["wrap_mathjax_context"]
+
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_repaired_but_unwritable_slide_still_reports_the_contract(self, mock_compile):
+        # A truncated arrow-default slide: its one unclosed brace gets
+        # balanced (a repair it genuinely needs) and the repaired source
+        # compiles — it must *still* fail the contract, reporting both the
+        # applied repairs and the contract wording to the repair turn.
+        truncated = 'export default () => { return <MathJax inline>{"`x`"}</MathJax>; '
+
+        def fake(code):
+            if code == truncated:
+                return (None, "unexpected end of input")
+            return ("compiled", "")
+        mock_compile.side_effect = fake
+        result = validate_jsx(truncated)
+        assert result["ok"] is False
+        assert "balance_braces" in result["repairs"]
+        assert "<MathJaxContext>" in result["error"]
+
+
+class TestMathjaxContractClassification:
+    def test_contract_violation_is_content_spec_invalid(self):
+        # A slide that compiles but breaks the slide contract: the honest
+        # class is the content gate's, not a syntax error.
+        assert classify_compile_error(MATHJAX_CONTEXT_RULE) == "content_spec_invalid"
+
+    def test_syntax_errors_are_not_swallowed_by_the_new_token(self):
+        assert (
+            classify_compile_error('500 Build failed with 1 error: Unexpected ">"')
+            == "syntax_error"
+        )
 
 
 # --- Failure-class classifier (supports the skip-rate measurement) ---
