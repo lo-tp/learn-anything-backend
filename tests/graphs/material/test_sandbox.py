@@ -143,10 +143,20 @@ class TestSlideSamplingBindKwargs:
         assert "reasoning_effort" in kwargs
 
     def test_tracks_attempt(self):
-        # All profiles are identical, so every attempt binds the same
-        # deterministic sampling end to end.
-        for i in range(1, len(SLIDE_SAMPLING_PROFILES) + 1):
-            assert slide_sampling_bind_kwargs(i) == slide_sampling_bind_kwargs(1)
+        # The bind kwargs follow the graded ladder: each attempt binds its
+        # own profile, and temperature steps down monotonically toward the
+        # most deterministic profile.
+        kwargs = [
+            slide_sampling_bind_kwargs(i)
+            for i in range(1, len(SLIDE_SAMPLING_PROFILES) + 1)
+        ]
+        for i, kw in enumerate(kwargs, start=1):
+            profile = SLIDE_SAMPLING_PROFILES[i - 1]
+            assert kw["temperature"] == profile["temperature"]
+            assert kw["top_p"] == profile["top_p"]
+            assert kw["extra_body"]["top_k"] == profile["top_k"]
+        temps = [kw["temperature"] for kw in kwargs]
+        assert all(a > b for a, b in pairwise(temps))
 
     def test_returns_fresh_dict(self):
         a = slide_sampling_bind_kwargs(1)
