@@ -1,13 +1,32 @@
 """What each stage may think, and how much it may say (#194).
 
-The measured fact this module exists for: on this project's llama.cpp backend
-(``qwen3.8-flash-next-iq3_xxs``) the backend default is thinking **ON**, and one
-plain call produced 1544 completion tokens of which 6477 characters were
-reasoning, against 817 with ``reasoning_effort="minimal"`` for the same prompt
-— ~2x the wall time per call, for an answer the prompt asked for in a few
-hundred words. The request also carried no output cap at all
-(``core/llm.py`` sets ``max_tokens=65536`` globally), so nothing bounded a
-runaway think loop either.
+The measured fact this module exists for
+---------------------------------------
+On this project's llama.cpp backend (``qwen3.8-flash-next-iq3_xxs``) the backend
+default is thinking **ON**, and the thinking is unbounded. The same request —
+weigh three first-month plans against what a learner said, and pick one — run
+three ways:
+
+======================  ==========  ===============  ==================  ==========
+request                 wall time   completion cap  reasoning reached   answered
+======================  ==========  ===============  ==================  ==========
+no ``reasoning_effort``  71.2 s      8192 tokens     37,803 characters  **no**
+``reasoning_effort=low``  21.2 s     1865 tokens      2,136 characters  yes
+``…=minimal``             17.3 s      1471 tokens          0 characters  yes
+======================  ==========  ===============  ==================  ==========
+
+The first row is the shape of every pre-slide call this app was making: it spent
+its whole token allowance thinking, hit ``finish_reason="length"`` and returned
+**no content at all**. An earlier measurement (#194) caught the same thing at a
+smaller scale — 1544 completion tokens of which 6477 characters were reasoning,
+against 817 with ``minimal`` for the same prompt — which is where the ~2x per
+call came from.
+
+So the fix has two halves and the caps are not a nicety: a cap alone would have
+truncated that 37,803-character think loop into a *shorter* answer, and effort
+alone would still have left nothing bounding a runaway loop. A call that ends on
+``finish_reason="length"`` is a silent quality bug either way, and nothing here
+reports it yet.
 
 Stage, not phase
 ----------------
@@ -60,6 +79,17 @@ change, not a code change.
 A value the backend would reject (an unknown effort, a non-numeric cap) is
 reported and the stage default is used instead: a typo must not send a request
 the backend answers with HTTP 400.
+
+What has not been measured
+--------------------------
+Everything above is a measurement of *cost*. What is unmeasured is *quality*:
+whether ``evaluate_batch`` grades as well at ``low`` as it did with the backend's
+unbounded default, or whether ``design_plan`` orders a DAG as well. That needs
+the outputs of real sessions compared, not a latency table, and it is the reason
+the judgement stages sit at ``low`` rather than ``minimal``: the cheap option was
+chosen only where a stage restates a decision something else already made.
+``scripts/slide_analysis.py --graph clarify|probe|plan`` now has the per-stage
+numbers to compare against when someone does it.
 """
 
 from __future__ import annotations
