@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from graphs.probe.graph import build_probe_graph
+from graphs.probe.nodes import DECOMPOSE_STRANDS, EVALUATE_BATCH, GENERATE_BATCH
 from graphs.probe.state import ProbeState
 
 
@@ -25,11 +26,11 @@ class TestBuildProbeGraph:
     def test_graph_has_expected_nodes(self):
         graph = build_probe_graph(_make_llm())
         node_names = set(graph.nodes.keys())
-        assert "decompose_strands" in node_names
-        assert "generate_batch" in node_names
-        assert "wait_for_answers" in node_names
-        assert "evaluate_batch" in node_names
-        assert "decide_next" in node_names
+        # A model stage is a node named by the same qualified stage name its call
+        # asks core/reasoning.py for a budget against; the pause and the routing
+        # decision are not stages.
+        assert {DECOMPOSE_STRANDS, GENERATE_BATCH, EVALUATE_BATCH} <= node_names
+        assert {"wait_for_answers", "decide_next"} <= node_names
 
     def test_with_checkpointer(self):
         from langgraph.checkpoint.memory import MemorySaver

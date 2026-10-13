@@ -52,7 +52,11 @@ from graphs import (
     plan_graph,
     pre_material_llm,
 )
-from services.stage_timings import empty_stage_timings, record_stage_timings
+from services.stage_timings import (
+    empty_stage_timings,
+    record_stage_timings,
+    stage_timing_rows,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -295,18 +299,11 @@ def generate_materials(session_id: str) -> None:
                     )
                     # Persist any stage timings that have accumulated since the
                     # last commit (one row per stage execution, append-only).
-                    timings = state.get("stage_timings") or []
-                    for t in timings[timings_persisted:]:
-                        db.add(
-                            GraphStageTiming(
-                                session_id=session_id,
-                                graph="material",
-                                stage=t["stage"],
-                                context=t.get("context"),
-                                duration_seconds=t["duration_seconds"],
-                            )
-                        )
-                    timings_persisted = len(timings)
+                    new_rows = stage_timing_rows(
+                        session_id, "material", (state.get("stage_timings") or [])[timings_persisted:]
+                    )
+                    db.add_all(new_rows)
+                    timings_persisted += len(new_rows)
                     # Publish the new slide on the provisional row (reassign a
                     # fresh list so SQLAlchemy's JSON column detects the change).
                     provisional.slides = provisional.slides + [slide_id]
@@ -329,17 +326,13 @@ def generate_materials(session_id: str) -> None:
                             error=fa["error"],
                         )
                     )
-                timings = result.get("stage_timings") or []
-                for t in timings[timings_persisted:]:
-                    db.add(
-                        GraphStageTiming(
-                            session_id=session_id,
-                            graph="material",
-                            stage=t["stage"],
-                            context=t.get("context"),
-                            duration_seconds=t["duration_seconds"],
-                        )
+                db.add_all(
+                    stage_timing_rows(
+                        session_id,
+                        "material",
+                        (result.get("stage_timings") or [])[timings_persisted:],
                     )
+                )
                 provisional.slides = slide_ids
                 provisional.questions = result["questions"]
                 provisional.summary = result["summary"]

@@ -32,7 +32,7 @@ from core.prompts import (
     language_instruction,  # noqa: F401  (re-exported for graph nodes)
     localize_status_system,
 )
-from core.reasoning import phase_call_kwargs
+from core.reasoning import stage_call_kwargs
 
 #: Language used when detection is unavailable or the text has no signal.
 DEFAULT_LANGUAGE = "English"
@@ -57,6 +57,34 @@ def clear_status_translation_cache() -> None:
 def _needs_translation(language: str) -> bool:
     """True when a status line actually has to be translated into ``language``."""
     return (language or "").strip().casefold() != DEFAULT_LANGUAGE.casefold()
+
+
+#: How many short replies' detected languages are remembered (#194). Unlike the
+#: status strings above, these keys are learner text, so the number is bounded
+#: rather than fixed by construction.
+MAX_DETECTED_TEXTS = 256
+
+_SHORT_TEXT_LANGUAGES: dict[str, str] = {}
+
+
+def clear_short_text_language_cache() -> None:
+    """Drop every remembered short-text classification.
+
+    Process-global, so this is the public handle on it: tests use it to stay
+    independent of each other.
+    """
+    _SHORT_TEXT_LANGUAGES.clear()
+
+
+def _short_text_key(text: str) -> str:
+    """The cache key for a short reply: the same text whatever its case or padding."""
+    return " ".join(text.split()).casefold()
+
+
+def _remember_short_text(text: str, language: str) -> None:
+    if len(_SHORT_TEXT_LANGUAGES) >= MAX_DETECTED_TEXTS:
+        del _SHORT_TEXT_LANGUAGES[next(iter(_SHORT_TEXT_LANGUAGES))]  # oldest first
+    _SHORT_TEXT_LANGUAGES[text] = language
 
 # Below this length ``langid`` is unreliable (it returns its default 'en'
 # sentinel). Short text is routed to the LLM fallback instead; short *reply*
@@ -177,14 +205,25 @@ def detect_language(text: str, llm: BaseChatModel | None = None) -> str:
 
 
 def _llm_detect(text: str, llm: BaseChatModel | None) -> str:
-    """Classify the language of short text with a constrained LLM call."""
+    """Classify the language of short text with a constrained LLM call.
+
+    Text below the classifier's reliable length is routed here, and a session is
+    full of exactly that kind of text — the same "yes", "no" and "I don't know"
+    asked over and over — so a result is remembered for the text it came from
+    (#194). A failure is not: a model that was down must not become the
+    learner's language for the rest of the session.
+    """
     if llm is None:
         return DEFAULT_LANGUAGE
+    key = _short_text_key(text)
+    remembered = _SHORT_TEXT_LANGUAGES.get(key)
+    if remembered is not None:
+        return remembered
     try:
         out = cast(
             _LanguageDetectionOut,
             llm.with_structured_output(_LanguageDetectionOut)
-            .bind(**phase_call_kwargs("language.detect"))
+            .bind(**stage_call_kwargs("language.detect"))
             .invoke(
                 [
                     SystemMessage(content=DETECT_LANGUAGE_SYSTEM),
@@ -192,9 +231,11 @@ def _llm_detect(text: str, llm: BaseChatModel | None) -> str:
                 ]
             ),
         )
-        return _code_to_name(out.language)
+        language = _code_to_name(out.language)
     except Exception:  # noqa: BLE001 — any LLM/schema failure -> default
         return DEFAULT_LANGUAGE
+    _remember_short_text(key, language)
+    return language
 
 
 # ``language_instruction`` is provided by ``core.prompts`` (private prompts).
@@ -227,7 +268,7 @@ def localize_status(llm: BaseChatModel | None, language: str, english: str) -> s
     system = localize_status_system(language)
     try:
         resp = (
-            llm.bind(**phase_call_kwargs("language.localize_status"))
+            llm.bind(**stage_call_kwargs("language.localize_status"))
             .invoke([SystemMessage(content=system), HumanMessage(content=text)])
         )
         translated = (getattr(resp, "content", "") or "").strip()

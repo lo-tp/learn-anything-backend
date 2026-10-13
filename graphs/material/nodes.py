@@ -14,7 +14,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from core.language import DEFAULT_LANGUAGE, language_instruction
-from core.reasoning import phase_call_kwargs
+from core.reasoning import stage_call_kwargs
 
 from ..common import structured_invoke, structured_invoke_messages, with_unknown_option
 from .prompts import (
@@ -33,6 +33,7 @@ from .sandbox import (
     _placeholder_slide_jsx,
     classify_compile_error,
     compile_error_for_feedback,
+    slide_contents_max_output_tokens,
     slide_sampling_bind_kwargs,
     validate_jsx,
 )
@@ -94,9 +95,12 @@ def make_plan_slide_contents(llm: BaseChatModel):
         )
         out = structured_invoke(
             llm, SlideContentsOut, system, "\n".join(parts),
-            # Slide generation runs at the minimum reasoning budget; see
-            # SLIDE_REASONING_EFFORT in sandbox.py for the measurement behind it.
+            # Slide generation runs at the minimum reasoning budget and under an
+            # output cap; see SLIDE_REASONING_EFFORT and
+            # SLIDE_CONTENTS_MAX_OUTPUT_TOKENS in sandbox.py for the measurements
+            # behind both (#194).
             reasoning_effort=SLIDE_REASONING_EFFORT,
+            max_tokens=slide_contents_max_output_tokens(),
         )
         contents = [
             {
@@ -461,7 +465,7 @@ def make_write_questions(llm: BaseChatModel):
             QuestionsOut,
             system,
             "\n".join(parts),
-            **phase_call_kwargs("material.write_questions"),
+            **stage_call_kwargs("material.write_questions"),
         )
         logger.debug(
             "write_questions: step=%s -> %d question(s) (%.1fs)",
@@ -519,7 +523,7 @@ def make_summarize_step(llm: BaseChatModel):
             SummaryOut,
             system,
             human,
-            **phase_call_kwargs("material.summarize_step"),
+            **stage_call_kwargs("material.summarize_step"),
         )
         logger.debug(
             "summarize_step: step=%s -> %d key point(s) (%.1fs)",

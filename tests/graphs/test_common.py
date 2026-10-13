@@ -9,6 +9,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel
 
+from core.reasoning import stage_name
 from graphs.common import (
     _MAX_TOOL_CALL_ROUNDS,
     structured_invoke,
@@ -398,22 +399,37 @@ class TestTimedNode:
         def node(_state: dict) -> dict:
             return {"answer": 1}
 
-        result = timed_node("assess_goal", node)({})
+        result = timed_node(stage_name("clarify", "assess_goal"), node)({})
 
         assert result["answer"] == 1
         (entry,) = result["stage_timings"]
+        # The row stores the stage without its graph prefix — the graph is in its
+        # own column, exactly as the material graph stores it.
         assert entry["stage"] == "assess_goal"
         assert entry["context"] == {}
         assert entry["duration_seconds"] >= 0
+
+    def test_a_model_stage_no_one_has_a_budget_for_is_rejected_here(self):
+        """A wrapped node is a model call, so it must be a stage core/reasoning.py
+        knows: a renamed node or a new call nobody budgeted fails when the graph
+        is assembled, not in a timings row nobody can explain."""
+        def node(_state: dict) -> dict:
+            return {}
+
+        with pytest.raises(KeyError) as exc_info:
+            timed_node(stage_name("clarify", "assess_goals"), node)
+
+        assert "clarify.assess_goals" in str(exc_info.value)
+        assert "clarify.assess_goal" in str(exc_info.value)
 
     def test_the_cost_is_logged(self, caplog):
         def node(_state: dict) -> dict:
             return {}
 
-        with caplog.at_level(logging.INFO, logger="graphs.common"):
-            timed_node("design_plan", node)({})
+        with caplog.at_level(logging.DEBUG, logger="graphs.common"):
+            timed_node(stage_name("plan", "design_plan"), node)({})
 
-        assert "design_plan" in caplog.text
+        assert "plan.design_plan: " in caplog.text
 
     def test_a_node_that_raises_still_raises(self):
         """Timing must not swallow a failure: a node's error is the graph's."""
@@ -422,7 +438,7 @@ class TestTimedNode:
             raise RuntimeError("model down")
 
         with pytest.raises(RuntimeError, match="model down"):
-            timed_node("evaluate_batch", node)({})
+            timed_node(stage_name("probe", "evaluate_batch"), node)({})
 
     def test_the_context_names_which_execution_it_was(self):
         """Attribution is what makes the rows usable: a batch, a round, a pass."""
@@ -431,7 +447,7 @@ class TestTimedNode:
             return {}
 
         result = timed_node(
-            "generate_batch",
+            stage_name("probe", "generate_batch"),
             node,
             context=lambda state: {"question_count": state.get("question_count", 0)},
         )({"question_count": 3})

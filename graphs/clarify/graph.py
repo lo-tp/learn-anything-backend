@@ -35,6 +35,9 @@ from langgraph.graph import END, StateGraph
 
 from ..common import timed_node
 from .nodes import (
+    ASSESS_GOAL,
+    GENERATE_QUESTIONS,
+    REFINE_GOAL,
     make_assess_goal,
     make_generate_questions,
     make_refine_goal,
@@ -47,7 +50,7 @@ def build_clarify_graph(
     llm: BaseChatModel, checkpointer: BaseCheckpointSaver | None = None
 ):
     def route_after_assess(state: ClarifyState) -> str:
-        return END if state.get("narrowed_goal") else "generate_questions"
+        return END if state.get("narrowed_goal") else GENERATE_QUESTIONS
 
     def round_context(state: ClarifyState) -> dict:
         """Which round of the clarify loop a recorded stage belongs to."""
@@ -55,22 +58,25 @@ def build_clarify_graph(
 
     graph = StateGraph(ClarifyState)
     graph.add_node(
-        "assess_goal",
-        timed_node("assess_goal", make_assess_goal(llm), round_context),
+        ASSESS_GOAL,
+        timed_node(ASSESS_GOAL, make_assess_goal(llm), round_context),
     )
     graph.add_node(
-        "generate_questions",
-        timed_node("generate_questions", make_generate_questions(llm), round_context),
+        GENERATE_QUESTIONS,
+        timed_node(GENERATE_QUESTIONS, make_generate_questions(llm), round_context),
     )
     # Not timed: an interrupt spans the learner's answer, not this service's work.
     graph.add_node("wait_for_answer", make_wait_for_answer(llm))
     graph.add_node(
-        "refine_goal",
-        timed_node("refine_goal", make_refine_goal(llm), round_context),
+        REFINE_GOAL,
+        timed_node(REFINE_GOAL, make_refine_goal(llm), round_context),
     )
-    graph.set_entry_point("assess_goal")
-    graph.add_conditional_edges("assess_goal", route_after_assess)
-    graph.add_edge("generate_questions", "wait_for_answer")
-    graph.add_edge("wait_for_answer", "refine_goal")
-    graph.add_edge("refine_goal", "assess_goal")
+    # A model stage is named by its qualified stage name throughout — the same
+    # string core/reasoning.py's budget table is keyed by, so no stage name here
+    # is spelled twice. The interrupt is not a stage.
+    graph.set_entry_point(ASSESS_GOAL)
+    graph.add_conditional_edges(ASSESS_GOAL, route_after_assess)
+    graph.add_edge(GENERATE_QUESTIONS, "wait_for_answer")
+    graph.add_edge("wait_for_answer", REFINE_GOAL)
+    graph.add_edge(REFINE_GOAL, ASSESS_GOAL)
     return graph.compile(checkpointer=checkpointer)
