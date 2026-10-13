@@ -6,4 +6,5 @@ __pycache__/
 .coverage
 sql/
 .pi/
+tmp/
 mock.db
