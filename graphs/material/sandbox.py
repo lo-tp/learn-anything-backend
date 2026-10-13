@@ -10,6 +10,8 @@ from typing import Any
 
 import httpx
 
+from core.settings import LLM_MAX_OUTPUT_TOKENS_ENV, numeric_setting
+
 from .prompts import _PLACEHOLDER_JSX_TEMPLATE
 
 logger = logging.getLogger(__name__)
@@ -81,6 +83,37 @@ SLIDE_SAMPLING_PROFILES: tuple[dict[str, float], ...] = (
 # is the single place that assembles what a slide-writing call sends.
 SLIDE_REASONING_EFFORT: str = "minimal"
 
+# --- Slide-generation output caps (#194) ---
+#
+# `core/llm.py` carries max_tokens=65536, which bounds nothing a slide needs:
+# real slides in this project came back at 356-686 completion tokens. A slide
+# call that starts looping would therefore run for ~10 minutes before it stops,
+# and the #194 measurement showed an uncapped thinking call producing 1544
+# tokens of which 6477 characters were reasoning. These are runaway guards, not
+# budgets to fill: both sit several times above the largest output ever measured
+# here and well under the client's global cap.
+#
+# A step's slide *contents* plan gets the wider one on purpose: how many specs a
+# step asks for is the model's choice, so its guard has to sit above a whole
+# plan rather than above a single slide.
+#
+# Both honour LLM_MAX_OUTPUT_TOKENS, the same setting every other call's cap
+# honours (core/reasoning.py), so a run can raise all of them at once.
+SLIDE_MAX_OUTPUT_TOKENS: int = 4096
+SLIDE_CONTENTS_MAX_OUTPUT_TOKENS: int = 8192
+
+
+def slide_max_output_tokens() -> int:
+    """The output cap for one slide-writing or slide-repairing call."""
+    return numeric_setting((LLM_MAX_OUTPUT_TOKENS_ENV,), SLIDE_MAX_OUTPUT_TOKENS, int)
+
+
+def slide_contents_max_output_tokens() -> int:
+    """The output cap for the call that plans a step's slide contents."""
+    return numeric_setting(
+        (LLM_MAX_OUTPUT_TOKENS_ENV,), SLIDE_CONTENTS_MAX_OUTPUT_TOKENS, int
+    )
+
 
 def slide_sampling_for_attempt(attempt: int) -> dict[str, float]:
     """Sampling params for the given 1-based write attempt.
@@ -119,6 +152,7 @@ def slide_sampling_bind_kwargs(attempt: int) -> dict[str, Any]:
         k: v for k, v in profile.items() if k not in SLIDE_EXTRA_BODY_PARAMS
     }
     kwargs["reasoning_effort"] = SLIDE_REASONING_EFFORT
+    kwargs["max_tokens"] = slide_max_output_tokens()
     if extra_body:
         kwargs["extra_body"] = extra_body
     return kwargs
