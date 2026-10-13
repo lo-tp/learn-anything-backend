@@ -14,6 +14,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from core.language import DEFAULT_LANGUAGE, language_instruction
+from core.reasoning import phase_call_kwargs
 
 from ..common import structured_invoke, structured_invoke_messages, with_unknown_option
 from .prompts import (
@@ -455,7 +456,13 @@ def make_write_questions(llm: BaseChatModel):
             "write_questions: step=%s, established_concepts=%d",
             step.get("id"), len(established),
         )
-        out = structured_invoke(llm, QuestionsOut, system, "\n".join(parts))
+        out = structured_invoke(
+            llm,
+            QuestionsOut,
+            system,
+            "\n".join(parts),
+            **phase_call_kwargs("material.write_questions"),
+        )
         logger.debug(
             "write_questions: step=%s -> %d question(s) (%.1fs)",
             step.get("id"), len(out.questions), time.monotonic() - started,
@@ -507,7 +514,13 @@ def make_summarize_step(llm: BaseChatModel):
         logger.debug(
             "summarize_step: step=%s, slides=%d", step.get("id"), len(slide_contents)
         )
-        out = structured_invoke(llm, SummaryOut, system, human)
+        out = structured_invoke(
+            llm,
+            SummaryOut,
+            system,
+            human,
+            **phase_call_kwargs("material.summarize_step"),
+        )
         logger.debug(
             "summarize_step: step=%s -> %d key point(s) (%.1fs)",
             step.get("id"), len(out.key_points), time.monotonic() - started,

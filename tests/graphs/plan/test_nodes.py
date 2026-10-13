@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -249,3 +250,75 @@ class TestWaitForResponse:
         ):
             result = node({"pass_count": 2})
         assert result["pass_count"] == 3
+
+
+# --- reasoning budget (#194) ---
+
+
+class TestReasoningBudget:
+    """Every Plan call states how much it may think, and how much it may say.
+
+    Plan is the phase a learner waits through *and* re-runs on every adjustment,
+    so an uncapped thinking default here is paid more than once (#194). The
+    values are the policy literals, read back out of the call the node made.
+    """
+
+    def _research_kwargs(self, **config) -> dict[str, Any]:
+        llm = _make_llm()
+        out = ResearchOut(
+            unconditional_truths=[], core_concepts=[], standard_framing="", common_gotchas=[]
+        )
+        with patch("graphs.plan.nodes.structured_invoke_with_tools", return_value=out) as mock_call:
+            make_research_topic(llm, config.get("search_tools"))({"goal": "g"})
+        return dict(mock_call.call_args.kwargs)
+
+    def test_research_topic_thinks_within_a_budget(self):
+        assert self._research_kwargs() == {
+            "reasoning_effort": "low",
+            "max_tokens": 3072,
+        }
+
+    def test_the_budget_travels_with_the_search_tools(self):
+        """The search decision is the expensive half, so it carries the budget."""
+        tools = [MagicMock()]
+        assert self._research_kwargs(search_tools=lambda: tools) == {
+            "reasoning_effort": "low",
+            "max_tokens": 3072,
+        }
+
+    def test_design_plan_thinks_within_a_budget(self):
+        llm = _make_llm()
+        state: PlanState = {"goal": "Learn calculus", "boundary_map": {}, "language": "English"}
+        with patch(
+            "graphs.plan.nodes.structured_invoke", return_value=self._design_out()
+        ) as mock_call:
+            make_design_plan(llm)(state)
+        assert mock_call.call_args.kwargs == {
+            "reasoning_effort": "low",
+            "max_tokens": 4096,
+        }
+
+    def test_render_plan_is_given_nothing_to_think_with(self):
+        """Rendering is formatting: IDs, labels, a DAG of steps that exist."""
+        llm = _make_llm()
+        out = RenderOut(
+            prose_summary="S",
+            dependency_dag="graph LR",
+            steps=[RenderedStep(id="s0", letter="A", title="A", description="d", depth=1)],
+        )
+        state: PlanState = {
+            "goal": "Learn calculus",
+            "boundary_map": {},
+            "design_steps": [{"title": "A", "description": "d", "depends_on": [], "depth": 1}],
+            "language": "English",
+        }
+        with patch("graphs.plan.nodes.structured_invoke", return_value=out) as mock_call:
+            make_render_plan(llm)(state)
+        assert mock_call.call_args.kwargs == {
+            "reasoning_effort": "minimal",
+            "max_tokens": 6144,
+        }
+
+    @staticmethod
+    def _design_out() -> DesignOut:
+        return DesignOut(steps=[StepDraft(title="A", description="d", depth=1)])

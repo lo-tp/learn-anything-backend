@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import logging
+import time
+from collections.abc import Callable, Sequence
 from typing import Any, cast
 
 from langchain_core.language_models import BaseChatModel
@@ -20,11 +22,60 @@ from pydantic import BaseModel
 from core.blocking import await_blocking
 from core.language import DEFAULT_LANGUAGE, localize_status
 
+logger = logging.getLogger(__name__)
+
 # How many times a model may reach for tools before it must answer. Each round
 # is one model call plus one round trip per requested tool, so this is the
 # bound on what a tool-using step can cost: two rounds let the model search,
 # look at what came back, and search once more, and no further.
 _MAX_TOOL_CALL_ROUNDS = 2
+
+
+def timed_node[State](
+    stage: str,
+    node: Callable[[State], dict],
+    context: Callable[[State], dict] | None = None,
+):
+    """Wrap a graph node so every execution records its own wall time (#194).
+
+    The returned node is left un-annotated on purpose: LangGraph's node protocol
+    wants a function, and a ``Callable[[State], dict]`` annotation is not one —
+    it fails the protocol check for the same code.
+
+    The material graph times its stages inside each node because its driver runs
+    the whole graph in one background task and persists the timings between
+    interrupts. Clarify, Probe and Plan pause between HTTP requests instead, so
+    their timing belongs at the seam rather than in twelve node bodies: the graph
+    builders wrap what they add, and each driver persists what is new.
+
+    Entries are shaped exactly like the material graph's ``stage_timings``
+    (``{"stage", "context", "duration_seconds"}``) so both land in the same
+    ``graph_stage_timings`` rows and the same analysis.
+
+    Only a node that *does work* is wrapped. An interrupt node's wall time is the
+    learner's, spent between requests, and recording it would make the timings
+    measure the wrong thing.
+    """
+
+    def timed(state: State) -> dict:
+        started = time.monotonic()
+        try:
+            result = node(state)
+        except Exception:
+            logger.warning(
+                "%s: failed after %.1fs", stage, time.monotonic() - started, exc_info=True
+            )
+            raise
+        duration = time.monotonic() - started
+        logger.info("%s: %.1fs", stage, duration)
+        entry = {
+            "stage": stage,
+            "context": context(state) if context is not None else {},
+            "duration_seconds": duration,
+        }
+        return {**result, "stage_timings": [entry]}
+
+    return timed
 
 
 def structured_invoke[Schema: BaseModel](
@@ -63,7 +114,7 @@ def structured_invoke_messages[Schema: BaseModel](
 
 def structured_invoke_with_tools[Schema: BaseModel](
     llm: BaseChatModel, schema: type[Schema], system: str, human: str,
-    tools: Sequence[BaseTool],
+    tools: Sequence[BaseTool], **bind_kwargs: Any,
 ) -> Schema:
     """Run the LLM with structured output, offering it tools first.
 
@@ -77,6 +128,11 @@ def structured_invoke_with_tools[Schema: BaseModel](
     request). The answer is then produced from that whole history through the
     usual structured path, so grounding never changes the output contract.
 
+    ``bind_kwargs`` are bound on **both** halves of the turn (#194): deciding
+    whether to search is where a tool-using node does its thinking, so a
+    reasoning budget applied only to the answer after the search would leave the
+    expensive part unbounded.
+
     Which node is given tools is decided by the graph that builds it — today
     only ``research_topic`` is (#166). The turn itself is shared because the
     boundary it serves is: an internal tool (slide JSX validation, #165) is
@@ -85,7 +141,7 @@ def structured_invoke_with_tools[Schema: BaseModel](
     messages: list[BaseMessage] = [SystemMessage(content=system), HumanMessage(content=human)]
     if tools:
         by_name = {t.name: t for t in tools}
-        model = llm.bind_tools(list(tools))
+        model = llm.bind_tools(list(tools), **bind_kwargs)
         for _ in range(_MAX_TOOL_CALL_ROUNDS):
             asked = cast(AIMessage, model.invoke(messages))
             if not asked.tool_calls:
@@ -93,7 +149,9 @@ def structured_invoke_with_tools[Schema: BaseModel](
             messages.append(asked)
             for call in asked.tool_calls:
                 messages.append(_run_tool_call(by_name, call))
-    return structured_invoke_messages(llm, schema, messages)
+    return structured_invoke_messages(
+        llm, schema, messages, **bind_kwargs
+    )
 
 
 def _run_tool_call(by_name: dict[str, BaseTool], call: ToolCall) -> ToolMessage:

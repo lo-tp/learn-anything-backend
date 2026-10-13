@@ -6,6 +6,7 @@ from langchain_core.language_models import BaseChatModel
 from langgraph.types import interrupt
 
 from core.language import DEFAULT_LANGUAGE, language_instruction
+from core.reasoning import phase_call_kwargs
 
 from ..common import structured_invoke
 from .prompts import (
@@ -40,6 +41,7 @@ def make_assess_goal(llm: BaseChatModel):
                 f"Open dimensions: {state.get('open_dimensions') or 'none'}\n"
                 f"Clarification round: {state.get('round_count', 0)}"
             ),
+            **phase_call_kwargs("clarify.assess_goal"),
         )
         if out.verdict == "specific" or at_cap:
             return {"narrowed_goal": out.narrowed_goal, "open_dimensions": []}
@@ -63,6 +65,7 @@ def make_generate_questions(llm: BaseChatModel):
                 f"Open dimensions: "
                 f"{state.get('open_dimensions') or 'the vaguest part of the goal'}"
             ),
+            **phase_call_kwargs("clarify.generate_questions"),
         )
         return {"clarifying_questions": out.questions}
 
@@ -94,6 +97,7 @@ def make_refine_goal(llm: BaseChatModel):
                 f"Open dimensions: {state.get('open_dimensions') or 'none'}\n"
                 f"Learner's answer: {state.get('last_answer', '')}"
             ),
+            **phase_call_kwargs("clarify.refine_goal"),
         )
         return {
             "working_goal": out.working_goal,
