@@ -170,7 +170,7 @@ class GraphStageTiming(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True)
-    graph: Mapped[str] = mapped_column(String)                   # which graph produced the row ("material" for now; "plan"/"probe"/"clarify" later)
+    graph: Mapped[str] = mapped_column(String)                   # which graph produced the row ("material" | "plan" | "probe" | "clarify")
     stage: Mapped[str] = mapped_column(String)                  # node name within the graph (e.g. "write_slide")
     context: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # stage-specific detail; material rows: {step_id, slide_index (1-based|null), attempt (1-based|null)}
     duration_seconds: Mapped[float] = mapped_column(Float)      # wall-clock time for that stage execution
@@ -1095,7 +1095,7 @@ generate_materials (background task, its OWN db session, per-session lock):
 | Don't ship broken slides | Every slide is compiled in the sandbox before persisting; if any slide's JSX fails validation, the step's material is **regenerated** (up to `MAX_MATERIAL_ATTEMPTS`), and the step is committed only once all its slides are valid |
 | Don't corrupt the request session | The task opens its **own** DB session (the request's is closed by the time it runs) |
 | Keep stores independent | Resume state lives in the **DB**, not the graph checkpointer — no double-stored state |
-| Stage timings | Every material stage records its wall-clock duration into graph state (`stage_timings`); the driver persists one `GraphStageTiming` row per stage execution (`graph="material"`), incrementally at each slide commit and the remainder at step finalization — append-only, so a re-run appends a fresh set of rows |
+| Stage timings | Every material stage records its wall-clock duration into graph state (`stage_timings`); the driver persists one `GraphStageTiming` row per stage execution (`graph="material"`), incrementally at each slide commit and the remainder at step finalization — append-only, so a re-run appends a fresh set of rows. Clarify, Probe and Plan do the same for the stages of each request (`graph="clarify"|"probe"|"plan"`, `services.stage_timings`): their nodes are wrapped in `graphs.common.timed_node`, and each request starts with the timing channel emptied so a later request records only what it ran (#194) |
 | Client visibility | Poll `GET /sessions/{id}/materials` until phase flips to `executing` |
 
 **Durability / migration:** `BackgroundTasks` runs **in-process** — no retry, lost on crash/restart. That matches the in-memory MVP (everything is lost on restart anyway). When you move to Postgres and want generation to survive restarts, **swap `add_task` for a queue job** (ARQ / RQ / Celery / Dramatiq / SQS) with a worker — the `generate_materials` body stays identical, only the enqueue call changes.
