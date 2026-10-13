@@ -7,8 +7,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from pydantic import BaseModel
+from langchain_openai.chat_models.base import OpenAIAPIError
+from pydantic import BaseModel, ValidationError
 
+from core.model_answers import (
+    ModelAnswerUnparseable,
+    ModelRecovery,
+    drain_model_recoveries,
+    record_model_recovery,
+)
 from core.reasoning import stage_name
 from graphs.common import (
     _MAX_TOOL_CALL_ROUNDS,
@@ -19,7 +26,12 @@ from graphs.common import (
     unknown_option,
     with_unknown_option,
 )
+from tests.error_shapes import model_unavailable, structured_output_refused
 from tests.tool_shapes import mcp_shaped_tool as _mcp_shaped_tool
+
+# Every structured call names the stage it belongs to (#195): the same name the
+# node passes to core/reasoning.py and the graph passes to timed_node.
+STAGE = "clarify.assess_goal"
 
 # --- structured_invoke ---
 
@@ -35,7 +47,9 @@ class TestStructuredInvoke:
         with patch(
             "graphs.common.structured_invoke_messages", return_value=mock_result
         ) as mock_fn:
-            result = structured_invoke(llm, _DummySchema, "sys prompt", "user prompt")
+            result = structured_invoke(
+                llm, _DummySchema, "sys prompt", "user prompt", stage=STAGE
+            )
             assert result == mock_result
             # Verify the messages passed
             args = mock_fn.call_args
@@ -51,7 +65,7 @@ class TestStructuredInvoke:
         with patch(
             "graphs.common.structured_invoke_messages", return_value=mock_result
         ) as mock_fn:
-            structured_invoke(llm, _DummySchema, "s", "h")
+            structured_invoke(llm, _DummySchema, "s", "h", stage=STAGE)
             assert mock_fn.call_args[0][0] is llm
             assert mock_fn.call_args[0][1] is _DummySchema
 
@@ -63,9 +77,12 @@ class TestStructuredInvoke:
             "graphs.common.structured_invoke_messages", return_value=mock_result
         ) as mock_fn:
             structured_invoke(
-                llm, _DummySchema, "s", "h", reasoning_effort="minimal"
+                llm, _DummySchema, "s", "h", stage=STAGE, reasoning_effort="minimal"
             )
-            assert mock_fn.call_args.kwargs == {"reasoning_effort": "minimal"}
+            assert mock_fn.call_args.kwargs == {
+                "stage": STAGE,
+                "reasoning_effort": "minimal",
+            }
 
     def test_no_bind_kwargs_by_default(self):
         """Call sites that pass nothing must keep sending nothing."""
@@ -74,8 +91,8 @@ class TestStructuredInvoke:
         with patch(
             "graphs.common.structured_invoke_messages", return_value=mock_result
         ) as mock_fn:
-            structured_invoke(llm, _DummySchema, "s", "h")
-            assert mock_fn.call_args.kwargs == {}
+            structured_invoke(llm, _DummySchema, "s", "h", stage=STAGE)
+            assert mock_fn.call_args.kwargs == {"stage": STAGE}
 
 
 # --- structured_invoke_messages ---
@@ -89,7 +106,7 @@ class TestStructuredInvokeMessages:
         llm.with_structured_output.return_value = mock_structured
 
         result = structured_invoke_messages(
-            llm, _DummySchema, [HumanMessage(content="hi")]
+            llm, _DummySchema, [HumanMessage(content="hi")], stage=STAGE
         )
         assert result.value == "ok"
         llm.with_structured_output.assert_called_once_with(_DummySchema)
@@ -104,7 +121,9 @@ class TestStructuredInvokeMessages:
         llm.with_structured_output.return_value = mock_structured
 
         result = structured_invoke_messages(
-            llm, _DummySchema, [HumanMessage(content="hi")], temperature=0.1
+            llm, _DummySchema, [HumanMessage(content="hi")],
+            stage=STAGE,
+            temperature=0.1,
         )
         assert result.value == "ok"
         # bind must wrap the structured-output model (i.e. run AFTER
@@ -112,6 +131,221 @@ class TestStructuredInvokeMessages:
         mock_structured.bind.assert_called_once_with(temperature=0.1)
         mock_bound.invoke.assert_called_once()
         mock_structured.invoke.assert_not_called()
+
+
+# --- the structured call has a second plan (#195) ---
+
+
+def _refusing_model(llm: MagicMock, refusal: BaseException | None = None) -> MagicMock:
+    """A model whose structured answer the backend refuses to parse.
+
+    Set on both shapes the strict plan takes: bound (a stage with a reasoning
+    budget) and unbound. The refusal is the same either way, because the backend
+    does not know which one made the text it could not parse.
+    """
+    structured = llm.with_structured_output.return_value
+    error = refusal if refusal is not None else structured_output_refused()
+    structured.invoke.side_effect = error
+    structured.bind.return_value.invoke.side_effect = error
+    return llm
+
+
+def _answered_with(llm: MagicMock, text: str) -> MagicMock:
+    """What the unconstrained second ask comes back with."""
+    llm.invoke.return_value = AIMessage(content=text)
+    llm.bind.return_value.invoke.return_value = AIMessage(content=text)
+    return llm
+
+
+class TestStructuredCallIsRecoverable:
+    """A refused answer is not the end of a deck.
+
+    The backend's grammar lets the model write `$\\int` and then refuses to
+    parse it, which is #195: the failure reached a driver that could only mark
+    the session ``error``. The first plan is unchanged; the second one asks for
+    the same shape with nothing constraining the decode, reads the text this
+    side of the wire, and validates it as strictly as the first plan did.
+    """
+
+    def test_the_schema_enforced_ask_is_still_the_first_plan(self):
+        """The grammar stays on: this is a fallback, not a downgrade of every
+        structured call in the app."""
+        llm = MagicMock()
+        llm.with_structured_output.return_value.invoke.return_value = _DummySchema(
+            value="ok"
+        )
+
+        result = structured_invoke_messages(
+            llm, _DummySchema, [HumanMessage(content="hi")], stage=STAGE
+        )
+
+        assert result.value == "ok"
+        llm.invoke.assert_not_called()
+        llm.bind.assert_not_called()
+
+    def test_a_refused_answer_is_asked_for_again_unconstrained(self):
+        llm = _refusing_model(MagicMock())
+        _answered_with(llm, '{"value": "the answer, with $\\frac{1}{2}$ in it"}')
+
+        result = structured_invoke_messages(
+            llm,
+            _DummySchema,
+            [SystemMessage(content="s"), HumanMessage(content="h")],
+            stage=STAGE,
+        )
+
+        assert result.value == "the answer, with $\\frac{1}{2}$ in it"
+        llm.with_structured_output.assert_called_once_with(_DummySchema)
+        # The second plan has no schema enforcement: a plain call, not a second
+        # structured one.
+        llm.bind.assert_not_called()
+        llm.invoke.assert_called_once()
+
+    def test_the_second_ask_carries_the_same_reasoning_budget(self):
+        """A recovery that escapes the stage's budget is a hole in #194: the
+        fallback is a model call like any other, and is bound like one."""
+        llm = _refusing_model(MagicMock())
+        _answered_with(llm, '{"value": "x"}')
+
+        structured_invoke_messages(
+            llm,
+            _DummySchema,
+            [HumanMessage(content="hi")],
+            stage=STAGE,
+            reasoning_effort="low",
+            max_tokens=3072,
+        )
+
+        llm.bind.assert_called_once_with(reasoning_effort="low", max_tokens=3072)
+
+    def test_the_second_ask_is_told_the_shape_of_an_answer(self):
+        """Without the grammar there is nothing else holding the contract, and a
+        model left with no shape at all has been measured answering with its own
+        schema. The stage's own messages come first, unchanged: the language the
+        prompt asked for must still be in effect."""
+        llm = _refusing_model(MagicMock())
+        _answered_with(llm, '{"value": "x"}')
+
+        structured_invoke_messages(
+            llm,
+            _DummySchema,
+            [SystemMessage(content="s"), HumanMessage(content="h")],
+            stage=STAGE,
+        )
+
+        sent = llm.invoke.call_args[0][0]
+        assert [type(message) for message in sent[:2]] == [SystemMessage, HumanMessage]
+        assert [message.content for message in sent[:2]] == ["s", "h"]
+        asked = sent[-1].content
+        assert '"value": "<string>"' in asked
+        assert "additionalProperties" not in asked
+
+    def test_the_latex_arrives_as_latex(self):
+        """The stored value must be the formula, not a control character plus
+        whatever letters followed it — the half of #195 that never raised."""
+        llm = _refusing_model(MagicMock())
+        _answered_with(llm, '{"value": "$\\frac{1}{2}$ and \\beta decay"}')
+
+        result = structured_invoke_messages(
+            llm, _DummySchema, [HumanMessage(content="hi")], stage=STAGE
+        )
+
+        assert result.value == "$\\frac{1}{2}$ and \\beta decay"
+        assert "\u000c" not in result.value  # form feed
+        assert "\u0008" not in result.value  # backspace
+
+    def test_a_recovered_answer_is_attributed_to_the_stage_that_recovered_it(self):
+        """Which stage leaned on this is a query, not a guess from log lines."""
+        llm = _refusing_model(MagicMock())
+        _answered_with(llm, '{"value": "$\\int_1^2$"}')
+
+        structured_invoke_messages(
+            llm, _DummySchema, [HumanMessage(content="hi")], stage=STAGE
+        )
+
+        assert drain_model_recoveries() == [
+            {"reason": "backend_refused_json", "repaired_escapes": 1}
+        ]
+
+    def test_a_recovery_is_logged_naming_the_stage(self, caplog):
+        llm = _refusing_model(MagicMock())
+        _answered_with(llm, '{"value": "$\\int_1^2$"}')
+
+        with caplog.at_level(logging.WARNING, logger="graphs.common"):
+            structured_invoke_messages(
+                llm, _DummySchema, [HumanMessage(content="hi")], stage=STAGE
+            )
+
+        assert "clarify.assess_goal" in caplog.text
+        assert "#195" in caplog.text
+
+    def test_a_backend_that_is_busy_is_not_recovered_from(self):
+        """A busy model is not a model whose JSON did not parse: for that one,
+        repeating the request is the right plan, and this must not pretend
+        otherwise by rewriting the request."""
+        llm = _refusing_model(MagicMock(), refusal=model_unavailable())
+
+        with pytest.raises(OpenAIAPIError):
+            structured_invoke_messages(
+                llm, _DummySchema, [HumanMessage(content="hi")], stage=STAGE
+            )
+
+        llm.invoke.assert_not_called()
+
+    def test_an_answer_that_validated_badly_is_not_recovered_from(self):
+        """A shape miss is a prompt problem. Asking again with *less* enforcement
+        is a guess at it, and a guess is not what this seam is for."""
+        try:
+            _DummySchema.model_validate({})
+        except ValidationError as invalid_shape:
+            llm = _refusing_model(MagicMock(), refusal=invalid_shape)
+
+            with pytest.raises(ValidationError):
+                structured_invoke_messages(
+                    llm, _DummySchema, [HumanMessage(content="hi")], stage=STAGE
+                )
+
+            llm.invoke.assert_not_called()
+
+    def test_an_answer_that_cannot_be_read_fails_by_name(self):
+        """When the second plan fails too, what reaches the driver says which
+        stage, what was wrong, and keeps the original refusal as its cause."""
+        refusal = structured_output_refused()
+        llm = _refusing_model(MagicMock(), refusal=refusal)
+        _answered_with(llm, "I could not decide what to teach.")
+
+        with pytest.raises(ModelAnswerUnparseable) as exc_info:
+            structured_invoke_messages(
+                llm, _DummySchema, [HumanMessage(content="hi")], stage=STAGE
+            )
+
+        assert STAGE in str(exc_info.value)
+        assert exc_info.value.__cause__ is refusal
+
+    def test_an_answer_that_does_not_fit_the_schema_fails_by_name(self):
+        """Recovering the parse does not lower the standard the answer is held to."""
+        llm = _refusing_model(MagicMock())
+        _answered_with(llm, '{"not_the_field": 1}')
+
+        with pytest.raises(ModelAnswerUnparseable) as exc_info:
+            structured_invoke_messages(
+                llm, _DummySchema, [HumanMessage(content="hi")], stage=STAGE
+            )
+
+        assert STAGE in str(exc_info.value)
+
+    def test_a_tool_using_call_site_gets_the_same_recovery(self):
+        """``research_topic`` answers through this seam too (#166): the tool turn
+        and the plain answer share the recovery."""
+        llm = MagicMock()
+        _refusing_model(llm)
+        _answered_with(llm, '{"value": "$\\frac{1}{2}$"}')
+
+        result = structured_invoke_with_tools(
+            llm, _DummySchema, "s", "h", [], stage=STAGE
+        )
+
+        assert result.value == "$\\frac{1}{2}$"
 
 
 # --- unknown_option ---
@@ -197,7 +431,7 @@ class TestStructuredInvokeWithTools:
             return_value=_DummySchema(value="x"),
         ) as structured:
             result = structured_invoke_with_tools(
-                llm, _DummySchema, "sys", "human", []
+                llm, _DummySchema, "sys", "human", [], stage=STAGE
             )
         assert result.value == "x"
         llm.bind_tools.assert_not_called()
@@ -215,7 +449,7 @@ class TestStructuredInvokeWithTools:
             "graphs.common.structured_invoke_messages",
             return_value=_DummySchema(value="x"),
         ):
-            structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool])
+            structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool], stage=STAGE)
         llm.bind_tools.assert_called_once_with([tool])
 
     def test_the_model_may_answer_without_searching(self):
@@ -227,7 +461,7 @@ class TestStructuredInvokeWithTools:
             "graphs.common.structured_invoke_messages",
             return_value=_DummySchema(value="x"),
         ):
-            structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool])
+            structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool], stage=STAGE)
         assert calls == []
         assert llm.bind_tools.return_value.invoke.call_count == 1
 
@@ -245,7 +479,7 @@ class TestStructuredInvokeWithTools:
             "graphs.common.structured_invoke_messages",
             return_value=_DummySchema(value="x"),
         ) as structured:
-            structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool])
+            structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool], stage=STAGE)
 
         assert calls == ["calculus pedagogy"]
         messages = structured.call_args[0][2]
@@ -267,7 +501,7 @@ class TestStructuredInvokeWithTools:
             "graphs.common.structured_invoke_messages",
             return_value=_DummySchema(value="x"),
         ) as structured:
-            result = structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool])
+            result = structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool], stage=STAGE)
 
         assert result.value == "x"
         tool_message = structured.call_args[0][2][3]
@@ -291,7 +525,7 @@ class TestStructuredInvokeWithTools:
             "graphs.common.structured_invoke_messages",
             return_value=_DummySchema(value="x"),
         ) as structured:
-            result = structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool])
+            result = structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool], stage=STAGE)
         assert result.value == "x"
         assert calls == []
         tool_message = structured.call_args[0][2][3]
@@ -310,7 +544,7 @@ class TestStructuredInvokeWithTools:
             "graphs.common.structured_invoke_messages",
             return_value=_DummySchema(value="x"),
         ) as structured:
-            structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool])
+            structured_invoke_with_tools(llm, _DummySchema, "s", "h", [tool], stage=STAGE)
         assert len(calls) == _MAX_TOOL_CALL_ROUNDS
         assert llm.bind_tools.return_value.invoke.call_count == _MAX_TOOL_CALL_ROUNDS
         # The answer is still produced over the accumulated history.
@@ -343,6 +577,7 @@ class TestToolTurnCarriesTheReasoningBudget:
                 "s",
                 "h",
                 [tool],
+                stage=STAGE,
                 reasoning_effort="low",
                 max_tokens=4096,
             )
@@ -365,10 +600,12 @@ class TestToolTurnCarriesTheReasoningBudget:
                 "s",
                 "h",
                 [tool],
+                stage=STAGE,
                 reasoning_effort="low",
                 max_tokens=4096,
             )
         assert structured.call_args.kwargs == {
+            "stage": STAGE,
             "reasoning_effort": "low",
             "max_tokens": 4096,
         }
@@ -380,8 +617,8 @@ class TestToolTurnCarriesTheReasoningBudget:
             "graphs.common.structured_invoke_messages",
             return_value=_DummySchema(value="x"),
         ) as structured:
-            structured_invoke_with_tools(llm, _DummySchema, "s", "h", [])
-        assert structured.call_args.kwargs == {}
+            structured_invoke_with_tools(llm, _DummySchema, "s", "h", [], stage=STAGE)
+        assert structured.call_args.kwargs == {"stage": STAGE}
 
 
 # --- timed_node (#194) ---
@@ -439,6 +676,22 @@ class TestTimedNode:
 
         with pytest.raises(RuntimeError, match="model down"):
             timed_node(stage_name("probe", "evaluate_batch"), node)({})
+
+    def test_a_recovered_answer_is_recorded_on_the_stage_row(self):
+        """The recovery is a fact about this stage, so it belongs in this stage's
+        row: what the row already carries, plus why the answer needed help."""
+        def node(_state: dict) -> dict:
+            record_model_recovery(
+                ModelRecovery(reason="backend_refused_json", repaired_escapes=21)
+            )
+            return {}
+
+        result = timed_node(stage_name("clarify", "assess_goal"), node)({})
+
+        (entry,) = result["stage_timings"]
+        assert entry["context"] == {
+            "model_recoveries": [{"reason": "backend_refused_json", "repaired_escapes": 21}]
+        }
 
     def test_the_context_names_which_execution_it_was(self):
         """Attribution is what makes the rows usable: a batch, a round, a pass."""

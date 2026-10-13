@@ -55,7 +55,7 @@ def make_decompose_strands(llm: BaseChatModel):
             StrandsOut,
             DECOMPOSE_STRANDS_SYSTEM,
             f"Goal: {goal}",
-            **stage_call_kwargs(DECOMPOSE_STRANDS),
+            stage=DECOMPOSE_STRANDS, **stage_call_kwargs(DECOMPOSE_STRANDS),
         )
         return {
             "strands": [s.id for s in out.strands],
@@ -95,7 +95,7 @@ def make_generate_batch(llm: BaseChatModel):
                 f"Boundary map so far: {state.get('boundary_map') or '{}'}\n"
                 f"History: {state.get('history') or 'none'}"
             ),
-            **stage_call_kwargs(GENERATE_BATCH),
+            stage=GENERATE_BATCH, **stage_call_kwargs(GENERATE_BATCH),
         )
 
         questions = []
@@ -176,7 +176,7 @@ def make_evaluate_batch(llm: BaseChatModel):
                 f"Current boundary map: {state.get('boundary_map') or '{}'}\n"
                 f"History: {state.get('history') or 'none'}"
             ),
-            **stage_call_kwargs(EVALUATE_BATCH),
+            stage=EVALUATE_BATCH, **stage_call_kwargs(EVALUATE_BATCH),
         )
 
         evals = {e.question_id: e for e in out.evaluations}
