@@ -412,6 +412,27 @@ class TestWriteSlide:
         repair_human = invoke.call_args_list[1][0][2][-1].content
         assert "balance_braces" in repair_human
 
+    def test_contract_violation_feeds_a_repair_turn(self):
+        """A slide that compiles but renders <MathJax> outside any
+        <MathJaxContext> (the shape validate_jsx cannot safely rewrite):
+        the contract wording is the failure the repair turn receives."""
+        from graphs.material.sandbox import MATHJAX_CONTEXT_RULE
+
+        _, invoke = self._run(
+            self._state(),
+            writes=[
+                SlideOut(code="export default () => <MathJax inline />"),
+                SlideOut(code="fixed"),
+            ],
+            validates=[
+                self._validate_fail(MATHJAX_CONTEXT_RULE, "export default () => <MathJax inline />"),
+                self._validate_ok("fixed"),
+            ],
+        )
+        repair_human = invoke.call_args_list[1][0][2][-1].content
+        assert "<MathJaxContext>" in repair_human
+        assert "renders blank" in repair_human
+
     def test_includes_established_concepts_in_initial_prompt(self):
         _, invoke = self._run(
             self._state(
@@ -450,6 +471,19 @@ class TestWriteSlide:
 
 
 # --- make_compile_slide ---
+
+
+_MATHJAX_SLIDE_NO_CONTEXT = (
+    'export default function Slide() {\n'
+    '  return <div><MathJax inline>{"`x^2`"}</MathJax></div>;\n'
+    '}'
+)
+_MATHJAX_SLIDE_WITH_CONTEXT = (
+    'export default function Slide() {\n'
+    '  return <MathJaxContext config={{ loader: { load: ["input/asciimath"] } }}>'
+    '<div><MathJax inline>{"`x^2`"}</MathJax></div></MathJaxContext>;\n'
+    '}'
+)
 
 
 class TestCompileSlide:
@@ -500,6 +534,31 @@ class TestCompileSlide:
         result = node(self._state())
 
         assert result["failed_attempts"][0]["failure_class"] == "unknown_component"
+
+    @patch("graphs.material.nodes._compile_slide")
+    def test_compiled_slide_without_mathjax_context_fails_with_the_contract(self, mock_compile):
+        # Backstop for the render-time contract: <MathJax> with no
+        # <MathJaxContext> compiles green everywhere but renders blank in
+        # the browser harness. write_slide's validate_jsx normally enforces
+        # it; this catches a source it could not rewrite and the model did
+        # not fix — the attempt fails with the real reason, tagged.
+        mock_compile.return_value = ("compiled_code", "")
+        node = make_compile_slide(MagicMock())
+        result = node(self._state(current_slide_jsx=_MATHJAX_SLIDE_NO_CONTEXT))
+
+        assert result["compile_result"] == "retry"
+        assert "<MathJaxContext>" in result["last_compile_error"]
+        assert result["failed_attempts"][0]["failure_class"] == "content_spec_invalid"
+        assert mock_compile.call_count == 1  # the wrap is validate_jsx's job, not this gate's
+
+    @patch("graphs.material.nodes._compile_slide")
+    def test_compiled_slide_with_mathjax_context_succeeds(self, mock_compile):
+        mock_compile.return_value = ("compiled_code", "")
+        node = make_compile_slide(MagicMock())
+        result = node(self._state(current_slide_jsx=_MATHJAX_SLIDE_WITH_CONTEXT))
+
+        assert result["compile_result"] == "success"
+        assert result["slides"] == ["compiled_code"]
 
     @patch("graphs.material.nodes._compile_slide")
     def test_exhausted_when_placeholder_also_fails(self, mock_compile):
