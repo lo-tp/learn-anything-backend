@@ -23,10 +23,12 @@ from .prompts import (
     WRITE_QUESTIONS_SYSTEM,
 )
 from .sandbox import (
+    MATHJAX_CONTEXT_RULE,
     MAX_MATERIAL_ATTEMPTS,
     MAX_SLIDE_SELF_REPAIR_TURNS,
     SLIDE_REASONING_EFFORT,
     _compile_slide,
+    _mathjax_without_context,
     _placeholder_slide_jsx,
     classify_compile_error,
     compile_error_for_feedback,
@@ -316,6 +318,16 @@ def make_compile_slide(llm: BaseChatModel):
 
         started = time.monotonic()
         compiled_code, error = _compile_slide(jsx)
+
+        # Backstop for the render-time MathJax contract: a slide with
+        # <MathJax> and no <MathJaxContext> compiles green everywhere but
+        # renders blank in the browser harness. write_slide's validate_jsx
+        # normally enforces it (deterministic wrap, or a repair turn); this
+        # catches a source it could not rewrite and the model did not fix —
+        # the attempt fails with the real reason, so the deck ends with a
+        # placeholder, never a blank slide.
+        if compiled_code is not None and _mathjax_without_context(jsx):
+            compiled_code, error = None, MATHJAX_CONTEXT_RULE
 
         if compiled_code is not None:
             logger.debug(
