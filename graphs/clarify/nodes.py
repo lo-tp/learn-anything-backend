@@ -48,7 +48,7 @@ def make_assess_goal(llm: BaseChatModel):
                 f"Open dimensions: {state.get('open_dimensions') or 'none'}\n"
                 f"Clarification round: {state.get('round_count', 0)}"
             ),
-            **stage_call_kwargs(ASSESS_GOAL),
+            stage=ASSESS_GOAL, **stage_call_kwargs(ASSESS_GOAL),
         )
         if out.verdict == "specific" or at_cap:
             return {"narrowed_goal": out.narrowed_goal, "open_dimensions": []}
@@ -72,7 +72,7 @@ def make_generate_questions(llm: BaseChatModel):
                 f"Open dimensions: "
                 f"{state.get('open_dimensions') or 'the vaguest part of the goal'}"
             ),
-            **stage_call_kwargs(GENERATE_QUESTIONS),
+            stage=GENERATE_QUESTIONS, **stage_call_kwargs(GENERATE_QUESTIONS),
         )
         return {"clarifying_questions": out.questions}
 
@@ -104,7 +104,7 @@ def make_refine_goal(llm: BaseChatModel):
                 f"Open dimensions: {state.get('open_dimensions') or 'none'}\n"
                 f"Learner's answer: {state.get('last_answer', '')}"
             ),
-            **stage_call_kwargs(REFINE_GOAL),
+            stage=REFINE_GOAL, **stage_call_kwargs(REFINE_GOAL),
         )
         return {
             "working_goal": out.working_goal,

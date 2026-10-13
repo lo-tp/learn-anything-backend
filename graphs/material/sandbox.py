@@ -144,7 +144,10 @@ def slide_sampling_bind_kwargs(attempt: int) -> dict[str, Any]:
     a standard OpenAI field, so nesting it under ``extra_body`` — the vLLM
     ``chat_template_kwargs`` dialect — is ignored by llama.cpp.
     The result is ready to spread into the invoke call:
-    ``structured_invoke_messages(llm, schema, msgs, **slide_sampling_bind_kwargs(n))``.
+    ``structured_invoke_messages(llm, schema, msgs, stage=WRITE_SLIDE,
+    **slide_sampling_bind_kwargs(n))`` — the stage name is the constant in
+    ``graphs.material.nodes``, and it is what lets a recovered or unreadable
+    answer say where it came from (#195).
     """
     profile = slide_sampling_for_attempt(attempt)
     extra_body = {k: v for k, v in profile.items() if k in SLIDE_EXTRA_BODY_PARAMS}
