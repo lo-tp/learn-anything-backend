@@ -44,7 +44,7 @@ def make_research_topic(
             RESEARCH_TOPIC_SYSTEM,
             f"Goal: {state.get('goal', '')}",
             list(search_tools()) if search_tools is not None else [],
-            **stage_call_kwargs(RESEARCH_TOPIC),
+            stage=RESEARCH_TOPIC, **stage_call_kwargs(RESEARCH_TOPIC),
         )
         return {
             "research": {
@@ -98,7 +98,7 @@ def make_design_plan(llm: BaseChatModel):
             DesignOut,
             system,
             "\n".join(parts),
-            **stage_call_kwargs(DESIGN_PLAN),
+            stage=DESIGN_PLAN, **stage_call_kwargs(DESIGN_PLAN),
         )
         return {"design_steps": [s.model_dump() for s in out.steps]}
 
@@ -133,7 +133,7 @@ def make_render_plan(llm: BaseChatModel):
             RenderOut,
             system,
             "\n".join(parts),
-            **stage_call_kwargs(RENDER_PLAN),
+            stage=RENDER_PLAN, **stage_call_kwargs(RENDER_PLAN),
         )
         return {
             "current_plan": {

@@ -8,7 +8,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from graphs.clarify.nodes import (
+    ASSESS_GOAL,
+    GENERATE_QUESTIONS,
     MAX_CLARIFY_ROUNDS,
+    REFINE_GOAL,
     make_assess_goal,
     make_generate_questions,
     make_refine_goal,
@@ -205,18 +208,30 @@ class TestReasoningBudget:
         kwargs = self._kwargs_of_the_call(
             make_assess_goal, {"goal": "g", "round_count": 0}, out
         )
-        assert kwargs == {"reasoning_effort": "low", "max_tokens": 1536}
+        assert kwargs == {
+            "stage": ASSESS_GOAL,
+            "reasoning_effort": "low",
+            "max_tokens": 1536,
+        }
 
     def test_generate_questions_is_given_nothing_to_think_with(self):
         out = QuestionsOut(questions=["q"])
         kwargs = self._kwargs_of_the_call(
             make_generate_questions, {"working_goal": "g", "open_dimensions": ["d"]}, out
         )
-        assert kwargs == {"reasoning_effort": "minimal", "max_tokens": 1024}
+        assert kwargs == {
+            "stage": GENERATE_QUESTIONS,
+            "reasoning_effort": "minimal",
+            "max_tokens": 1024,
+        }
 
     def test_refine_goal_is_given_nothing_to_think_with(self):
         out = RefineOut(working_goal="g", open_dimensions=[])
         kwargs = self._kwargs_of_the_call(
             make_refine_goal, {"working_goal": "g", "last_answer": "a"}, out
         )
-        assert kwargs == {"reasoning_effort": "minimal", "max_tokens": 1024}
+        assert kwargs == {
+            "stage": REFINE_GOAL,
+            "reasoning_effort": "minimal",
+            "max_tokens": 1024,
+        }

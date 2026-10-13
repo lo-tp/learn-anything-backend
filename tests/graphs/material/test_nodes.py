@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+from core.model_answers import ModelRecovery, record_model_recovery
 from graphs.material.nodes import (
+    PLAN_SLIDE_CONTENTS,
+    SUMMARIZE_STEP,
+    WRITE_QUESTIONS,
+    WRITE_SLIDE,
     make_compile_slide,
     make_plan_slide_contents,
     make_summarize_step,
@@ -151,6 +156,7 @@ class TestPlanSlideContents:
 
         assert SLIDE_REASONING_EFFORT == "minimal"
         assert mock_invoke.call_args.kwargs == {
+            "stage": PLAN_SLIDE_CONTENTS,
             "reasoning_effort": SLIDE_REASONING_EFFORT,
             "max_tokens": SLIDE_CONTENTS_MAX_OUTPUT_TOKENS,
         }
@@ -238,17 +244,26 @@ class TestWriteSlide:
     def test_first_attempt_uses_creative_profile(self):
         from graphs.material.sandbox import slide_sampling_bind_kwargs
 
-        assert self._kwargs_for_attempt([0]) == slide_sampling_bind_kwargs(1)
+        assert self._kwargs_for_attempt([0]) == {
+            **slide_sampling_bind_kwargs(1),
+            "stage": WRITE_SLIDE,
+        }
 
     def test_second_attempt_uses_middle_profile(self):
         from graphs.material.sandbox import slide_sampling_bind_kwargs
 
-        assert self._kwargs_for_attempt([1]) == slide_sampling_bind_kwargs(2)
+        assert self._kwargs_for_attempt([1]) == {
+            **slide_sampling_bind_kwargs(2),
+            "stage": WRITE_SLIDE,
+        }
 
     def test_third_attempt_uses_reliable_profile(self):
         from graphs.material.sandbox import slide_sampling_bind_kwargs
 
-        assert self._kwargs_for_attempt([2]) == slide_sampling_bind_kwargs(3)
+        assert self._kwargs_for_attempt([2]) == {
+            **slide_sampling_bind_kwargs(3),
+            "stage": WRITE_SLIDE,
+        }
 
     def test_attempt_beyond_profiles_uses_last_profile(self):
         from graphs.material.sandbox import (
@@ -257,7 +272,10 @@ class TestWriteSlide:
         )
 
         n = len(SLIDE_SAMPLING_PROFILES)
-        assert self._kwargs_for_attempt([n]) == slide_sampling_bind_kwargs(n + 1)
+        assert self._kwargs_for_attempt([n]) == {
+            **slide_sampling_bind_kwargs(n + 1),
+            "stage": WRITE_SLIDE,
+        }
 
     def test_non_openai_params_are_nested_in_extra_body(self):
         from graphs.material.sandbox import slide_sampling_bind_kwargs
@@ -271,8 +289,9 @@ class TestWriteSlide:
         for param in ("top_k", "min_p", "repeat_penalty"):
             assert param in kwargs["extra_body"]
             assert param not in kwargs
-        # ...and the result matches the shared helper exactly.
-        assert kwargs == slide_sampling_bind_kwargs(1)
+        # ...and the result matches the shared helper exactly, plus the stage
+        # the call belongs to (#195).
+        assert kwargs == {**slide_sampling_bind_kwargs(1), "stage": WRITE_SLIDE}
 
     def test_writes_with_the_minimum_reasoning_effort(self):
         """Every slide-writing attempt asks for the smallest reasoning budget."""
@@ -854,6 +873,7 @@ class TestQuizAndSummaryReasoningBudget:
         ):
             make_write_questions(llm)(self._state())
         assert mock_call.call_args.kwargs == {
+            "stage": WRITE_QUESTIONS,
             "reasoning_effort": "low",
             "max_tokens": 4096,
         }
@@ -867,6 +887,41 @@ class TestQuizAndSummaryReasoningBudget:
         ) as mock_call:
             make_summarize_step(llm)(self._state())
         assert mock_call.call_args.kwargs == {
+            "stage": SUMMARIZE_STEP,
             "reasoning_effort": "low",
             "max_tokens": 3072,
         }
+
+
+# --- a recovered answer is recorded on the stage that recovered it (#195) ---
+
+
+class TestRecoveredAnswerAttribution:
+    """Which stage needed the second plan is a question the rows answer.
+
+    The recovery happens inside the shared structured call, which no material
+    node sees. What a node does see is the row it writes for itself, so that is
+    where the fact lands — and a stage that needed nothing gains no field at all
+    (the budget tests above assert their context dicts exactly, and none of them
+    mentions recovery).
+    """
+
+    def test_the_stage_row_carries_the_recovery(self):
+        llm = MagicMock()
+        out = SummaryOut(key_points=["k1"])
+
+        def answered_after_a_second_plan(_llm, _schema, _system, _human, **_kwargs):
+            record_model_recovery(
+                ModelRecovery(reason="backend_refused_json", repaired_escapes=17)
+            )
+            return out
+
+        with patch("graphs.material.nodes.structured_invoke", side_effect=answered_after_a_second_plan):
+            result = make_summarize_step(llm)(
+                {"step": {"id": "s1", "title": "T"}, "language": "English"}
+            )
+
+        (timing,) = result["stage_timings"]
+        assert timing["context"]["model_recoveries"] == [
+            {"reason": "backend_refused_json", "repaired_escapes": 17}
+        ]
