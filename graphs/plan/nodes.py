@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.types import interrupt
 
 from core.external_tools import SearchToolLoader
 from core.language import DEFAULT_LANGUAGE, language_instruction
 
-from ..common import structured_invoke, structured_invoke_with_tools
+from ..common import (
+    structured_invoke,
+    structured_invoke_messages,
+    structured_invoke_with_tools,
+)
 from .prompts import (
     DESIGN_PLAN_INITIAL_SYSTEM,
     DESIGN_PLAN_REFINE_SYSTEM,
@@ -51,7 +56,17 @@ def make_research_topic(
 
 
 def make_design_plan(llm: BaseChatModel):
-    """Build/refine the dependency-ordered step list."""
+    """Build/refine the dependency-ordered step list.
+
+    Every pass also leaves a record of what it was conditioned on
+    (``prompt_context``) and, on a refinement, of the version it replaces
+    (``prior_plan``). With the plan those steps become, those are one
+    instruction-conditioned preference pair: the learner's adjustment moved them
+    from the rejected version to the new one, and approving a plan is what turns
+    that pair into a stored row (#167). Only this pass's prompt is recorded —
+    ``render_plan`` reformats what this node decided, and is not part of the
+    pair. Nothing in the graph reads these back.
+    """
 
     def design_plan(state: PlanState) -> dict:
         research = state.get("research") or {}
@@ -85,13 +100,24 @@ def make_design_plan(llm: BaseChatModel):
         )
         # Step titles and descriptions are shown to the learner.
         system += language_instruction(state.get("language") or DEFAULT_LANGUAGE)
-        out = structured_invoke(
-            llm,
-            DesignOut,
-            system,
-            "\n".join(parts),
-        )
-        return {"design_steps": [s.model_dump() for s in out.steps]}
+        # The exact messages this pass is conditioned on. The same objects are
+        # invoked below, so what is recorded is the real prompt and not a
+        # paraphrase of it (the way write_slide keeps a failed compile's prompt).
+        messages = [
+            SystemMessage(content=system),
+            HumanMessage(content="\n".join(parts)),
+        ]
+        out = structured_invoke_messages(llm, DesignOut, messages)
+        update: dict = {
+            "design_steps": [s.model_dump() for s in out.steps],
+            "prompt_context": [
+                {"role": m.type, "content": m.content} for m in messages
+            ],
+        }
+        if is_refinement:
+            # The version this pass replaces: the rejected half of the pair.
+            update["prior_plan"] = current_plan
+        return update
 
     return design_plan
 

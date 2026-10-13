@@ -13,6 +13,7 @@ from db import (
     GraphStageTiming,
     Phase,
     Plan,
+    PlanPreference,
     Session,
     SlideContent,
     StepMaterial,
@@ -54,6 +55,35 @@ def _seed_plan_session(db, make_session, sid, phase, steps=None, **extra):
     )
     db.commit()
     return sid
+
+
+def _adjusted_plan_approve_result() -> dict:
+    """The approve resume state for a plan that went through one adjustment.
+
+    Exactly what the plan graph carries when a learner adjusts and then
+    approves: the version they rejected, the one they chose, their words, and
+    the prompt of the design pass that produced the chosen version (#167).
+    """
+    return {
+        "current_plan": _valid_plan(prose_summary="ps v2"),
+        "prior_plan": _valid_plan(prose_summary="ps v1"),
+        "adjustment": "add a quiz step",
+        "prompt_context": [
+            {"role": "system", "content": "Refine the existing plan"},
+            {
+                "role": "human",
+                "content": "Goal: ng\nUser adjustment request: add a quiz step",
+            },
+        ],
+    }
+
+
+def _advance_plan_row_to_version(db, sid, version, adjustments):
+    """Make the Plan row look like it has been adjusted ``version - 1`` times."""
+    row = db.query(Plan).filter_by(session_id=sid).one()
+    row.version = version
+    row.adjustments = adjustments
+    db.commit()
 
 
 # --- validate_plan (pure helper) ---
@@ -449,6 +479,141 @@ class TestApprovePlan:
             graph.invoke.return_value = {"current_plan": None}
             resp = client.post(f"/sessions/{sid}/plan/approve")
         assert resp.status_code == 500
+
+
+# --- Preference pair captured at approve (#167) ---
+
+
+class TestApproveCapturesPreference:
+    """An approve after the adjust loop stores one instruction-conditioned
+    pair. The learner-facing response is the same either way."""
+
+    def _approve(self, client, graph_result, sid):
+        with (
+            patch("routers.plan.plan_graph") as graph,
+            patch("routers.plan.checkpointer"),
+            patch("routers.plan.localize_status", return_value="ok"),
+            patch("routers.plan.generate_materials") as gen,
+        ):
+            graph.invoke.return_value = graph_result
+            resp = client.post(f"/sessions/{sid}/plan/approve")
+        return resp, gen
+
+    def test_adjusted_plan_writes_one_row_with_the_pair(
+        self, client, db, make_session
+    ):
+        sid = _seed_plan_session(
+            db, make_session, "a", Phase.REVIEWING, steps=_valid_plan()["steps"]
+        )
+        _advance_plan_row_to_version(db, sid, 2, ["add a quiz step"])
+
+        resp, gen = self._approve(client, _adjusted_plan_approve_result(), sid)
+        assert resp.status_code == 202
+        gen.assert_called_once_with(sid)
+
+        db.expire_all()
+        rows = db.query(PlanPreference).filter_by(session_id=sid).all()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.rejected_version == 1
+        assert row.chosen_version == 2
+        assert row.adjustment == "add a quiz step"
+        # Both versions as the learner saw them, not just their version numbers.
+        assert row.rejected_plan["prose_summary"] == "ps v1"
+        assert row.chosen_plan["prose_summary"] == "ps v2"
+        assert [m["role"] for m in row.prompt_context] == ["system", "human"]
+        assert "add a quiz step" in row.prompt_context[1]["content"]
+
+    def test_unmodified_plan_writes_no_row(self, client, db, make_session):
+        sid = _seed_plan_session(
+            db, make_session, "a", Phase.REVIEWING, steps=_valid_plan()["steps"]
+        )
+
+        resp, _ = self._approve(
+            client, {"current_plan": _valid_plan()}, sid
+        )
+        assert resp.status_code == 202
+
+        db.expire_all()
+        assert db.query(PlanPreference).filter_by(session_id=sid).count() == 0
+        # The approve itself behaved exactly as before.
+        assert db.get(Session, sid).phase == Phase.GENERATING.value
+
+    @pytest.mark.parametrize("adjustment", ["", "   ", None])
+    def test_adjustment_that_says_nothing_writes_no_row(
+        self, client, db, make_session, adjustment
+    ):
+        """A pair is instruction-conditioned, so a blank adjustment (which does
+        run a real refinement pass) leaves nothing to pair on (#167)."""
+        sid = _seed_plan_session(
+            db, make_session, "a", Phase.REVIEWING, steps=_valid_plan()["steps"]
+        )
+        _advance_plan_row_to_version(db, sid, 2, [adjustment or ""])
+
+        pair = _adjusted_plan_approve_result()
+        if adjustment is None:
+            pair.pop("adjustment")
+        else:
+            pair["adjustment"] = adjustment
+        resp, gen = self._approve(client, pair, sid)
+
+        assert resp.status_code == 202
+        gen.assert_called_once_with(sid)
+
+        db.expire_all()
+        assert db.query(PlanPreference).filter_by(session_id=sid).count() == 0
+        assert db.get(Session, sid).phase == Phase.GENERATING.value
+
+    def test_user_visible_behaviour_is_unchanged(self, client, db, make_session):
+        """Capturing the pair changes nothing the learner sees (#167)."""
+        sid = _seed_plan_session(
+            db, make_session, "a", Phase.REVIEWING, steps=_valid_plan()["steps"]
+        )
+        _advance_plan_row_to_version(db, sid, 2, ["add a quiz step"])
+
+        resp, _ = self._approve(client, _adjusted_plan_approve_result(), sid)
+
+        assert resp.status_code == 202
+        assert resp.json() == {"phase": "generating", "message": "ok"}
+        db.expire_all()
+        row = db.query(Plan).filter_by(session_id=sid).one()
+        assert row.version == 2
+        assert row.prose_summary == "ps v2"
+
+    def test_pair_is_written_once_even_if_a_second_approve_gets_through(
+        self, client, db, make_session, monkeypatch
+    ):
+        """Mock mode leaves the session in reviewing, so a repeat approve must
+        not store the same pair twice."""
+        monkeypatch.setenv("MOCK_LLM", "1")
+        sid = _seed_plan_session(
+            db, make_session, "a", Phase.REVIEWING, steps=_valid_plan()["steps"]
+        )
+        _advance_plan_row_to_version(db, sid, 2, ["add a quiz step"])
+
+        self._approve(client, _adjusted_plan_approve_result(), sid)
+        self._approve(client, _adjusted_plan_approve_result(), sid)
+
+        db.expire_all()
+        assert db.query(PlanPreference).filter_by(session_id=sid).count() == 1
+
+    def test_write_failure_does_not_fail_the_approve(self, client, db, make_session):
+        """Training data is best-effort: it must never break an approve."""
+        sid = _seed_plan_session(
+            db, make_session, "a", Phase.REVIEWING, steps=_valid_plan()["steps"]
+        )
+        _advance_plan_row_to_version(db, sid, 2, ["add a quiz step"])
+
+        with patch(
+            "routers.plan.PlanPreference", side_effect=RuntimeError("db down")
+        ):
+            resp, gen = self._approve(client, _adjusted_plan_approve_result(), sid)
+
+        assert resp.status_code == 202
+        assert resp.json()["phase"] == "generating"
+        gen.assert_called_once_with(sid)
+        db.expire_all()
+        assert db.query(PlanPreference).filter_by(session_id=sid).count() == 0
 
 
 # --- GET /sessions/{session_id}/materials ---

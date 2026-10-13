@@ -121,7 +121,7 @@ class TestDesignPlan:
     def test_initial_pass_returns_design_steps(self):
         llm = _make_llm()
         with patch(
-            "graphs.plan.nodes.structured_invoke", return_value=self._mock_design_out()
+            "graphs.plan.nodes.structured_invoke_messages", return_value=self._mock_design_out()
         ):
             node = make_design_plan(llm)
             result = node(self._state())
@@ -138,7 +138,7 @@ class TestDesignPlan:
             adjustment="Add a step on limits",
         )
         with patch(
-            "graphs.plan.nodes.structured_invoke", return_value=self._mock_design_out()
+            "graphs.plan.nodes.structured_invoke_messages", return_value=self._mock_design_out()
         ) as mock_invoke:
             node = make_design_plan(llm)
             node(state)
@@ -149,7 +149,7 @@ class TestDesignPlan:
     def test_initial_pass_uses_initial_system(self):
         llm = _make_llm()
         with patch(
-            "graphs.plan.nodes.structured_invoke", return_value=self._mock_design_out()
+            "graphs.plan.nodes.structured_invoke_messages", return_value=self._mock_design_out()
         ) as mock_invoke:
             node = make_design_plan(llm)
             node(self._state())
@@ -158,11 +158,67 @@ class TestDesignPlan:
     def test_includes_boundary_map_in_context(self):
         llm = _make_llm()
         with patch(
-            "graphs.plan.nodes.structured_invoke", return_value=self._mock_design_out()
+            "graphs.plan.nodes.structured_invoke_messages", return_value=self._mock_design_out()
         ) as mock_invoke:
             node = make_design_plan(llm)
             node(self._state())
         assert "algebra" in str(mock_invoke.call_args)
+
+    # --- preference-pair capture (#167) ---
+
+    def _baseline(self) -> dict:
+        """The plan version a refinement pass replaces."""
+        return {
+            "prose_summary": "old prose",
+            "dependency_dag": "old dag",
+            "steps": [{"id": "s0", "title": "Old"}],
+        }
+
+    def test_refinement_pass_records_the_version_it_superseded(self):
+        """The rejected half of the pair leaves the node in the state."""
+        llm = _make_llm()
+        baseline = self._baseline()
+        state = self._state(current_plan=baseline, adjustment="Add limits")
+        with patch(
+            "graphs.plan.nodes.structured_invoke_messages",
+            return_value=self._mock_design_out(),
+        ):
+            result = make_design_plan(llm)(state)
+
+        assert result["prior_plan"] == baseline
+
+    def test_first_pass_supersedes_nothing(self):
+        llm = _make_llm()
+        with patch(
+            "graphs.plan.nodes.structured_invoke_messages",
+            return_value=self._mock_design_out(),
+        ):
+            result = make_design_plan(llm)(self._state())
+
+        assert "prior_plan" not in result
+
+    def test_records_the_exact_prompt_the_pass_was_conditioned_on(self):
+        """A preference pair is only usable offline with its instruction."""
+        llm = _make_llm()
+        state = self._state(
+            current_plan=self._baseline(), adjustment="Add a step on limits"
+        )
+        with patch(
+            "graphs.plan.nodes.structured_invoke_messages",
+            return_value=self._mock_design_out(),
+        ) as mock_invoke:
+            result = make_design_plan(llm)(state)
+
+        # The same message objects the node invoked — the real prompt.
+        invoked = mock_invoke.call_args.args[2]
+        assert result["prompt_context"] == [
+            {"role": m.type, "content": m.content} for m in invoked
+        ]
+        assert [m["role"] for m in result["prompt_context"]] == ["system", "human"]
+        human = result["prompt_context"][1]["content"]
+        assert "Add a step on limits" in human
+        assert "Learn calculus" in human
+        assert "Old" in human  # the baseline it was asked to refine
 
 
 # --- make_render_plan ---

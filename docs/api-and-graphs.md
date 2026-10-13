@@ -127,6 +127,24 @@ class Plan(Base):
     session: Mapped["Session"] = relationship(back_populates="plan")
 
 
+class PlanPreference(Base):
+    """One instruction-conditioned preference pair, captured at approve (#167).
+    Offline training data — nothing in the serving path reads it."""
+    __tablename__ = "plan_preferences"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True)
+    rejected_version: Mapped[int] = mapped_column(Integer)   # the plans.version the learner rejected
+    chosen_version: Mapped[int] = mapped_column(Integer)     # the plans.version they approved
+    prompt_context: Mapped[list] = mapped_column(JSON)       # [{role, content}] — the exact messages of the design pass that produced the chosen version's content (goal, boundary map, research, the rejected plan, the adjustment); render_plan's formatting call is not recorded
+    adjustment: Mapped[str] = mapped_column(Text)            # the learner's own words, verbatim
+    rejected_plan: Mapped[dict] = mapped_column(JSON)        # {prose_summary, dependency_dag, steps}
+    chosen_plan: Mapped[dict] = mapped_column(JSON)          # same shape — the version kept
+    created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
+
+    session: Mapped["Session"] = relationship(back_populates="plan_preferences")
+
+
 class StepMaterial(Base):
     __tablename__ = "step_materials"
 
@@ -256,7 +274,7 @@ material_graph = material_graph_fn()
 |--------|------|---------|
 | `POST` | `/sessions/{id}/plan/generate` | Trigger plan generation (auto after probe or explicit) |
 | `POST` | `/sessions/{id}/plan/adjust` | Submit a free-text adjustment, get regenerated plan |
-| `POST` | `/sessions/{id}/plan/approve` | Approve plan, kick off background material generation (returns `202` immediately) |
+| `POST` | `/sessions/{id}/plan/approve` | Approve plan, kick off background material generation (returns `202` immediately). If the plan arrived through the adjust loop, also records one `plan_preferences` row (#167) — invisible to the learner. |
 | `GET` | `/sessions/{id}/materials` | Poll material generation progress (phase + per-step summary and items) |
 
 ### Execution phase (no LLM — deterministic only)
@@ -517,6 +535,8 @@ This is the **combined** probe endpoint. First call has no answers (starts the p
 ```
 
 If generation fails, the session lands in the `error` phase (terminal — the user starts a new session); the failure detail is logged.
+
+**Preference capture (#167).** When the approved plan had been through the adjust loop, the approve handler also writes one `plan_preferences` row: the version the learner rejected, the version they chose, their adjustment text, and the prompt of the `design_plan` pass that produced the chosen version's content (`prior_plan` / `prompt_context` / `adjustment` from the graph state) — the instruction-conditioning half, not `render_plan`'s later formatting call, which is not recorded. A pair needs both halves and an instruction to be conditioned on, so nothing is written when nothing was rejected (a plan approved with no adjustment) or when nothing was said (an adjustment carrying no words, which still runs a refinement pass). The response, the phase transition and the generation task are unchanged either way, and a failed preference write is logged rather than turned into a failed approve.
 
 #### `GET /sessions/{id}/materials`
 
@@ -948,6 +968,8 @@ result = plan_graph.invoke(
 
 **State persisted across the loop (in the checkpointer, keyed by `thread_id = f"{session_id}:plan"`):**
 - `current_plan` — the last rendered plan (baseline for next refinement)
+- `prior_plan` — the plan the last `design_plan` pass superseded (absent until there is one): the rejected half of a preference pair (#167)
+- `prompt_context` — the exact messages the last `design_plan` pass was conditioned on, as `[{role, content}]` (#167)
 - `design_steps` — the current pass's design output (carries the adjustment into the renderer)
 - `research` — the topic research output (reused across refinements)
 - `pass_count` — how many refinement passes have occurred
@@ -1166,6 +1188,8 @@ Execution (step 6) requires **no graph and no LLM** — it's a DB read + index c
 2. **Probe graph uses LangGraph interrupts, held by an in-memory checkpointer.** On the first call the `decompose_strands` node enumerates the goal's prerequisite strands and seeds `boundary_map` (each at `{floor: null, ceiling: null, gap_type: "unknown"}`), giving the loop a fixed strand set; `decide_next` ends only when *all seeded* strands are bracketed (or the 10-question cap is hit). The `generate_batch` node emits a batch of questions (size = `min(PROBE_BATCH_SIZE, unbracketed strand count)`, default 3) and the graph pauses; the pause (pending node + accumulated state) is written to the `MemorySaver` checkpointer under `thread_id = f"{session_id}:probe"`. The next `POST /probe` call resumes by invoking with `Command(resume={"answers": [...]})` and the same config — the checkpointer restores the paused state, so the handler never re-derives it.
 
 3. **Plan graph uses LangGraph interrupts (same pattern as Probe), held by the in-memory checkpointer.** The graph pauses after `render_plan` (checkpoint saved in memory) and resumes via `Command(resume=...)` when the user's next response arrives (adjust or approve). The `current_plan` and `research` baselines live in the checkpointer (keyed by `thread_id = f"{session_id}:plan"`) across the loop, not in the domain DB. On approval, the final plan is written to the `Plan` row (same `session_id`, incremented `version` on each pass).
+
+3a. **The adjust loop doubles as a preference source (#167).** Each `design_plan` pass also leaves `prior_plan` (the version it superseded) and `prompt_context` (the messages it was conditioned on) in the graph state. When the learner approves, the approve handler turns those into one `plan_preferences` row — rejected version, chosen version, adjustment text, prompt context — for offline preference training. Nothing in the graph or the serving path reads them back, and the write is best-effort by design: offline training data must never fail a learner's approve.
 
 4. **Material generation is sequential and must stay sequential.** Each step's `write_slides` node needs the accumulated `ConceptSummary` list from all prior steps, so steps must be generated in order. The context stays small (~1-2k tokens for the summaries) regardless of plan length. For large plans, run it as a background task with a polling endpoint (see the **Material generation driver** subsection) so the client isn't waiting synchronously.
 
