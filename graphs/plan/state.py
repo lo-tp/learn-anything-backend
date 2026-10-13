@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TypedDict
+import operator
+from typing import Annotated, TypedDict
 
 
 class PlanState(TypedDict, total=False):
@@ -16,3 +17,9 @@ class PlanState(TypedDict, total=False):
     pass_count: int  # how many refinement passes have occurred
     response: dict | None  # resume payload {action, text?}
     approved: bool | None  # set True on approve
+
+    # Per-stage wall-clock timings, one entry per stage this request ran
+    # (see graphs.common.timed_node); the router persists them to
+    # graph_stage_timings. Entry shape matches the material graph's:
+    # {"stage": str, "context": dict, "duration_seconds": float}.
+    stage_timings: Annotated[list[dict], operator.add]

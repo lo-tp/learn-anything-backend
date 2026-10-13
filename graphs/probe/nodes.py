@@ -9,6 +9,7 @@ from langchain_core.language_models import BaseChatModel
 from langgraph.types import interrupt
 
 from core.language import DEFAULT_LANGUAGE, language_instruction
+from core.reasoning import phase_call_kwargs
 
 from ..common import structured_invoke, with_unknown_option
 from .prompts import (
@@ -48,6 +49,7 @@ def make_decompose_strands(llm: BaseChatModel):
             StrandsOut,
             DECOMPOSE_STRANDS_SYSTEM,
             f"Goal: {goal}",
+            **phase_call_kwargs("probe.decompose_strands"),
         )
         return {
             "strands": [s.id for s in out.strands],
@@ -87,6 +89,7 @@ def make_generate_batch(llm: BaseChatModel):
                 f"Boundary map so far: {state.get('boundary_map') or '{}'}\n"
                 f"History: {state.get('history') or 'none'}"
             ),
+            **phase_call_kwargs("probe.generate_batch"),
         )
 
         questions = []
@@ -167,6 +170,7 @@ def make_evaluate_batch(llm: BaseChatModel):
                 f"Current boundary map: {state.get('boundary_map') or '{}'}\n"
                 f"History: {state.get('history') or 'none'}"
             ),
+            **phase_call_kwargs("probe.evaluate_batch"),
         )
 
         evals = {e.question_id: e for e in out.evaluations}
