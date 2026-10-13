@@ -7,6 +7,7 @@ from langgraph.types import interrupt
 
 from core.external_tools import SearchToolLoader
 from core.language import DEFAULT_LANGUAGE, language_instruction
+from core.reasoning import phase_call_kwargs
 
 from ..common import structured_invoke, structured_invoke_with_tools
 from .prompts import (
@@ -37,6 +38,7 @@ def make_research_topic(
             RESEARCH_TOPIC_SYSTEM,
             f"Goal: {state.get('goal', '')}",
             list(search_tools()) if search_tools is not None else [],
+            **phase_call_kwargs("plan.research_topic"),
         )
         return {
             "research": {
@@ -90,6 +92,7 @@ def make_design_plan(llm: BaseChatModel):
             DesignOut,
             system,
             "\n".join(parts),
+            **phase_call_kwargs("plan.design_plan"),
         )
         return {"design_steps": [s.model_dump() for s in out.steps]}
 
@@ -124,6 +127,7 @@ def make_render_plan(llm: BaseChatModel):
             RenderOut,
             system,
             "\n".join(parts),
+            **phase_call_kwargs("plan.render_plan"),
         )
         return {
             "current_plan": {

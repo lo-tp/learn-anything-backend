@@ -31,6 +31,10 @@ Control flow:
 
 State (``research``, ``current_plan``, ``pass_count``) lives in the
 checkpointer across passes, keyed by ``thread_id = f"{session_id}:plan"``.
+
+Each LLM node is wrapped in :func:`graphs.common.timed_node` so its wall time is
+recorded (#194); ``wait_for_response`` is not, because the time it spans is the
+learner's.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ from langgraph.graph import END, StateGraph
 
 from core.external_tools import SearchToolLoader
 
+from ..common import timed_node
 from .nodes import (
     make_design_plan,
     make_render_plan,
@@ -70,9 +75,22 @@ def build_plan_graph(
         return END if state.get("approved") else "design_plan"
 
     graph = StateGraph(PlanState)
-    graph.add_node("research_topic", make_research_topic(llm, search_tools))
-    graph.add_node("design_plan", make_design_plan(llm))
-    graph.add_node("render_plan", make_render_plan(llm))
+
+    def pass_context(state: PlanState) -> dict:
+        """Which pass of the plan loop a recorded stage belongs to."""
+        return {"pass_count": state.get("pass_count", 0)}
+
+    graph.add_node(
+        "research_topic",
+        timed_node("research_topic", make_research_topic(llm, search_tools)),
+    )
+    graph.add_node(
+        "design_plan", timed_node("design_plan", make_design_plan(llm), pass_context)
+    )
+    graph.add_node(
+        "render_plan", timed_node("render_plan", make_render_plan(llm), pass_context)
+    )
+    # Not timed: an interrupt spans the learner's decision, not this service's work.
     graph.add_node("wait_for_response", make_wait_for_response(llm))
 
     graph.add_conditional_edges("research_topic", lambda _: "design_plan")

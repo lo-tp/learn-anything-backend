@@ -21,6 +21,11 @@ Control flow:
         → evaluate_batch → decide_next
             → "continue" → generate_batch (loop)
             → "done"     → END (output boundary_map)
+
+Each LLM node is wrapped in :func:`graphs.common.timed_node` so its wall time is
+recorded (#194). Two nodes are not: ``wait_for_answers``, because the time it
+spans is the learner's, and ``decide_next``, which is deterministic and asks
+nothing of the model — a row for it would be noise.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from langchain_core.language_models import BaseChatModel
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, StateGraph
 
+from ..common import timed_node
 from .nodes import (
     make_decide_next,
     make_decompose_strands,
@@ -45,11 +51,24 @@ def build_probe_graph(
     def route_after_decide(state: ProbeState) -> str:
         return "generate_batch" if state.get("_decision") == "continue" else END
 
+    def batch_context(state: ProbeState) -> dict:
+        """Which batch of questions a recorded stage belongs to."""
+        return {"question_count": state.get("question_count", 0)}
+
     graph = StateGraph(ProbeState)
-    graph.add_node("decompose_strands", make_decompose_strands(llm))
-    graph.add_node("generate_batch", make_generate_batch(llm))
+    graph.add_node(
+        "decompose_strands", timed_node("decompose_strands", make_decompose_strands(llm))
+    )
+    graph.add_node(
+        "generate_batch",
+        timed_node("generate_batch", make_generate_batch(llm), batch_context),
+    )
+    # Not timed: an interrupt spans the learner's answers, not this service's work.
     graph.add_node("wait_for_answers", make_wait_for_answers(llm))
-    graph.add_node("evaluate_batch", make_evaluate_batch(llm))
+    graph.add_node(
+        "evaluate_batch",
+        timed_node("evaluate_batch", make_evaluate_batch(llm), batch_context),
+    )
     graph.add_node("decide_next", make_decide_next(llm))
 
     graph.set_entry_point("decompose_strands")
