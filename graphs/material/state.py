@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import operator
-from typing import Annotated, TypedDict
+from typing import Annotated
+
+from ..common import StageTimingsState
 
 
-class MaterialState(TypedDict, total=False):
+class MaterialState(StageTimingsState, total=False):
     step: dict
     established_concepts: list[dict]
     learner_context: dict
@@ -21,10 +23,9 @@ class MaterialState(TypedDict, total=False):
     current_slide_prompt: str | None
     last_compile_error: str | None
     failed_attempts: Annotated[list[dict], operator.add]
-    # Per-stage wall-clock timings accumulated by the nodes (one entry per
-    # stage execution); the driver persists them to graph_stage_timings.
-    # Entry shape: {"stage": str, "context": dict, "duration_seconds": float}.
-    stage_timings: Annotated[list[dict], operator.add]
+    # stage_timings: the shared channel (StageTimingsState); this graph's nodes
+    # write the entries themselves, because its driver persists them between
+    # interrupts.
     compile_result: str  # "success" | "retry" | "exhausted"
     # True when the just-compiled slide is a placeholder (the failed slide
     # exhausted all attempts). The driver persists it on the SlideContent

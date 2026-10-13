@@ -15,7 +15,7 @@ import importlib
 from unittest.mock import patch
 
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command, Overwrite
+from langgraph.types import Command
 
 import graphs
 from core.external_tools import external_search_tools
@@ -25,6 +25,7 @@ from graphs import graph_config
 from graphs.clarify import build_clarify_graph
 from graphs.plan import build_plan_graph
 from graphs.probe import ProbeState, build_probe_graph
+from services.stage_timings import empty_stage_timings
 
 
 class TestWiringSeam:
@@ -239,6 +240,7 @@ class TestPreMaterialStageTimings:
                 "next_batch": [],
                 "question_count": 0,
                 "history": [],
+                "stage_timings": empty_stage_timings(),
             },
             config,
         )
@@ -299,8 +301,12 @@ class TestEachRequestRecordsOnlyItsOwnStages:
     A checkpoint keeps the timings of the stages already run, so a driver that
     persisted whatever the graph returned would write yesterday's stages again on
     every request. Each request therefore starts with the channel emptied, and
-    records exactly what it ran. LangGraph's ``Overwrite`` is what bypasses the
-    accumulating reducer to do that.
+    records exactly what it ran.
+
+    These invokes are the inputs the routers actually build — first request and
+    resume alike, with :func:`services.stage_timings.empty_stage_timings` in
+    them — so the emptying is tested against a real graph, not against a
+    stand-in that could not tell an emptied channel from an ordinary one.
     """
 
     def test_a_resume_records_only_the_stages_it_ran(self):
@@ -328,7 +334,7 @@ class TestEachRequestRecordsOnlyItsOwnStages:
         result = graph.invoke(
             Command(
                 resume={"answers": [{"question_id": question["id"], "selected_index": 0}]},
-                update={"stage_timings": Overwrite([])},
+                update={"stage_timings": empty_stage_timings()},
             ),
             config,
         )
