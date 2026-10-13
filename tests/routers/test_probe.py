@@ -6,8 +6,10 @@ import uuid
 from datetime import UTC, datetime
 from unittest.mock import patch
 
+from langgraph.types import Overwrite
+
 from core.security import create_token
-from db import Phase, ProbeQuestion, ReviewCard, Session
+from db import GraphStageTiming, Phase, ProbeQuestion, ReviewCard, Session
 
 
 def _qid() -> str:
@@ -290,3 +292,71 @@ class TestProbeHook:
 
         cards = db.query(ReviewCard).all()
         assert len(cards) == 0
+
+
+# --- stage timings (#194) ---
+
+
+_PROBE_TIMINGS = [
+    {"stage": "decompose_strands", "context": {}, "duration_seconds": 6.5},
+    {"stage": "generate_batch", "context": {"question_count": 0}, "duration_seconds": 8.25},
+]
+
+
+class TestStageTimings:
+    """Probe is the most LLM-calls-per-session phase of the three (#194: up to
+    10 questions across batches), so its per-stage cost has to be on the record."""
+
+    def test_starting_a_probe_records_what_each_stage_cost(
+        self, client, db, make_session
+    ):
+        sid = make_session(session_id="a", phase=Phase.PROBING).session_id
+        with patch("routers.probe.probe_graph") as graph:
+            graph.invoke.return_value = {
+                "__interrupt__": object(),
+                "next_batch": [_question_dict()],
+                "stage_timings": _PROBE_TIMINGS,
+            }
+            resp = client.post(f"/sessions/{sid}/probe", json={})
+
+        assert resp.status_code == 200
+        rows = (
+            db.query(GraphStageTiming)
+            .filter_by(session_id=sid, graph="probe")
+            .order_by(GraphStageTiming.id)
+            .all()
+        )
+        assert [(r.stage, r.context, r.duration_seconds) for r in rows] == [
+            ("decompose_strands", {}, 6.5),
+            ("generate_batch", {"question_count": 0}, 8.25),
+        ]
+
+    def test_answering_a_batch_records_only_the_stages_it_ran(
+        self, client, db, make_session
+    ):
+        """Earlier batches are already on the record; a checkpoint would otherwise
+        hand their timings to every later request (#194)."""
+        sid = make_session(session_id="a", phase=Phase.PROBING).session_id
+        qid = _qid()
+        _seed_probe(db, sid, [qid])
+
+        with patch("routers.probe.probe_graph") as graph:
+            graph.invoke.return_value = {
+                "boundary_map": {"algebra": {"floor": "l1", "ceiling": "l2", "gap_type": "none"}},
+                "stage_timings": [
+                    {"stage": "evaluate_batch", "context": {"question_count": 0}, "duration_seconds": 5.0},
+                ],
+            }
+            resp = client.post(
+                f"/sessions/{sid}/probe",
+                json={"answers": [{"question_id": qid, "selected_index": 0}]},
+            )
+
+        assert resp.status_code == 200
+        rows = db.query(GraphStageTiming).filter_by(session_id=sid, graph="probe").all()
+        assert [(r.stage, r.duration_seconds) for r in rows] == [("evaluate_batch", 5.0)]
+
+        # The resumed run is started with the accumulated channel emptied.
+        command = graph.invoke.call_args.args[0]
+        assert isinstance(command.update["stage_timings"], Overwrite)
+        assert command.update["stage_timings"].value == []

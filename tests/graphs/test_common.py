@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock, patch
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel
 
@@ -12,6 +14,7 @@ from graphs.common import (
     structured_invoke,
     structured_invoke_messages,
     structured_invoke_with_tools,
+    timed_node,
     unknown_option,
     with_unknown_option,
 )
@@ -311,3 +314,127 @@ class TestStructuredInvokeWithTools:
         assert llm.bind_tools.return_value.invoke.call_count == _MAX_TOOL_CALL_ROUNDS
         # The answer is still produced over the accumulated history.
         assert len(structured.call_args[0][2]) == 2 + 2 * _MAX_TOOL_CALL_ROUNDS
+
+
+# --- the reasoning budget reaches the whole turn (#194) ---
+
+
+class TestToolTurnCarriesTheReasoningBudget:
+    """A phase's budget must cover the thinking a tool call involves, not only
+    the answer that follows it: for ``research_topic`` the search decision is
+    where the reasoning happens."""
+
+    def test_the_budget_is_bound_on_the_turn_that_decides_to_search(self):
+        llm = MagicMock()
+        calls: list = []
+        tool = _mcp_shaped_tool("tavily_search", calls, "results")
+        llm.bind_tools.return_value.invoke.side_effect = [
+            _asking_for_a_tool(),
+            AIMessage(content="enough"),
+        ]
+        with patch(
+            "graphs.common.structured_invoke_messages",
+            return_value=_DummySchema(value="x"),
+        ):
+            structured_invoke_with_tools(
+                llm,
+                _DummySchema,
+                "s",
+                "h",
+                [tool],
+                reasoning_effort="low",
+                max_tokens=4096,
+            )
+        llm.bind_tools.assert_called_once_with(
+            [tool], reasoning_effort="low", max_tokens=4096
+        )
+
+    def test_the_budget_is_also_on_the_answer_that_follows(self):
+        llm = MagicMock()
+        calls: list = []
+        tool = _mcp_shaped_tool("tavily_search", calls, "results")
+        llm.bind_tools.return_value.invoke.return_value = AIMessage(content="ok")
+        with patch(
+            "graphs.common.structured_invoke_messages",
+            return_value=_DummySchema(value="x"),
+        ) as structured:
+            structured_invoke_with_tools(
+                llm,
+                _DummySchema,
+                "s",
+                "h",
+                [tool],
+                reasoning_effort="low",
+                max_tokens=4096,
+            )
+        assert structured.call_args.kwargs == {
+            "reasoning_effort": "low",
+            "max_tokens": 4096,
+        }
+
+    def test_an_unbounded_call_is_unchanged(self):
+        """The no-budget path is the one every other caller already uses."""
+        llm = MagicMock()
+        with patch(
+            "graphs.common.structured_invoke_messages",
+            return_value=_DummySchema(value="x"),
+        ) as structured:
+            structured_invoke_with_tools(llm, _DummySchema, "s", "h", [])
+        assert structured.call_args.kwargs == {}
+
+
+# --- timed_node (#194) ---
+
+
+class TestTimedNode:
+    """A graph node wrapped so its wall time is recorded.
+
+    The material graph already times its own stages because its driver persists
+    them between interrupts; Clarify, Probe and Plan pause between HTTP requests,
+    so they get the timing at the seam instead of inside each node (#194).
+    """
+
+    def test_the_result_is_the_nodes_plus_its_own_timing(self):
+        def node(_state: dict) -> dict:
+            return {"answer": 1}
+
+        result = timed_node("assess_goal", node)({})
+
+        assert result["answer"] == 1
+        (entry,) = result["stage_timings"]
+        assert entry["stage"] == "assess_goal"
+        assert entry["context"] == {}
+        assert entry["duration_seconds"] >= 0
+
+    def test_the_cost_is_logged(self, caplog):
+        def node(_state: dict) -> dict:
+            return {}
+
+        with caplog.at_level(logging.INFO, logger="graphs.common"):
+            timed_node("design_plan", node)({})
+
+        assert "design_plan" in caplog.text
+
+    def test_a_node_that_raises_still_raises(self):
+        """Timing must not swallow a failure: a node's error is the graph's."""
+
+        def node(_state: dict) -> dict:
+            raise RuntimeError("model down")
+
+        with pytest.raises(RuntimeError, match="model down"):
+            timed_node("evaluate_batch", node)({})
+
+    def test_the_context_names_which_execution_it_was(self):
+        """Attribution is what makes the rows usable: a batch, a round, a pass."""
+
+        def node(_state: dict) -> dict:
+            return {}
+
+        result = timed_node(
+            "generate_batch",
+            node,
+            context=lambda state: {"question_count": state.get("question_count", 0)},
+        )({"question_count": 3})
+
+        (entry,) = result["stage_timings"]
+        assert entry["context"] == {"question_count": 3}

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+from langgraph.types import Overwrite
+
 from core.llm import llm
-from db import Phase, Session
+from db import GraphStageTiming, Phase, Session
 
 
 def _signed_in(auth_cookie: str) -> dict[str, str]:
@@ -194,3 +196,82 @@ class TestClarifySession:
         dl.assert_not_called()
         db.expire_all()
         assert db.get(Session, sid).language == "English"
+
+
+# --- stage timings (#194) ---
+
+
+_TIMINGS = [
+    {"stage": "assess_goal", "context": {"round_count": 0}, "duration_seconds": 4.25},
+    {"stage": "generate_questions", "context": {"round_count": 0}, "duration_seconds": 3.5},
+]
+
+
+class TestStageTimings:
+    """What each Clarify stage cost has to be recorded, or the phase that
+    dominates the wait before a slide exists is the one phase nobody can measure
+    (#194)."""
+
+    def test_a_clarify_run_records_what_each_stage_cost(
+        self, client, db, auth_cookie
+    ):
+        with (
+            patch("routers.clarify.clarify_graph") as graph,
+            patch("routers.clarify.detect_language", return_value="English"),
+        ):
+            graph.invoke.return_value = {
+                "__interrupt__": object(),
+                "clarifying_questions": ["What area?"],
+                "stage_timings": _TIMINGS,
+            }
+            resp = client.post(
+                "/sessions",
+                json={"goal": "Learn calculus"},
+                cookies=_signed_in(auth_cookie),
+            )
+
+        session_id = resp.json()["session_id"]
+        rows = (
+            db.query(GraphStageTiming)
+            .filter_by(session_id=session_id, graph="clarify")
+            .order_by(GraphStageTiming.id)
+            .all()
+        )
+        assert [(r.stage, r.context, r.duration_seconds) for r in rows] == [
+            ("assess_goal", {"round_count": 0}, 4.25),
+            ("generate_questions", {"round_count": 0}, 3.5),
+        ]
+
+    def test_each_request_starts_with_an_empty_channel(
+        self, client, db, make_session, auth_cookie
+    ):
+        """A checkpoint keeps the timings of the stages already run, and the
+        first request recorded them. Starting a run with the channel emptied is
+        what stops the next request recording them a second time (#194)."""
+        make_session(session_id="a", phase=Phase.CLARIFYING, language="English")
+
+        with (
+            patch("routers.clarify.clarify_graph") as graph,
+            patch("routers.clarify.detect_language", return_value="English"),
+            patch("routers.clarify.has_meaningful_signal", return_value=False),
+        ):
+            graph.invoke.return_value = {"__interrupt__": object(), "clarifying_questions": ["q"]}
+            created = client.post(
+                "/sessions",
+                json={"goal": "Learn calculus"},
+                cookies=_signed_in(auth_cookie),
+            )
+            graph.invoke.return_value = {"__interrupt__": object(), "clarifying_questions": ["q2"]}
+            client.post(
+                f"/sessions/{created.json()['session_id']}/clarify",
+                json={"answer": "because I need it for ML"},
+            )
+
+        # Both calls: the input of the first, the resume update of the second.
+        started = []
+        for call in graph.invoke.call_args_list:
+            arg = call.args[0]
+            channel = arg["stage_timings"] if isinstance(arg, dict) else arg.update["stage_timings"]
+            started.append(channel)
+
+        assert all(isinstance(channel, Overwrite) and channel.value == [] for channel in started)
