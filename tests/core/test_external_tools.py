@@ -138,8 +138,10 @@ class TestSearchFailsSoft:
             assert external_search_tools() == []
         assert "unavailable" in caplog.text.lower()
 
-    def test_a_failure_is_not_cached(self, monkeypatch):
-        """The next plan generation retries a server that was down once."""
+    def test_a_failure_is_retried_once_the_cooldown_has_passed(self, monkeypatch):
+        """A server that was down once is tried again: search degrades a plan, it
+        does not end it (#166). The retry waits out the cooldown, not every
+        request (#194)."""
         monkeypatch.delenv("MOCK_LLM", raising=False)
         monkeypatch.setenv("TAVILY_API_KEY", "tvly-key-retry")
         failures = iter([ConnectionError("down")])
@@ -158,6 +160,7 @@ class TestSearchFailsSoft:
 
         with patch("core.external_tools.MultiServerMCPClient", _Client):
             assert external_search_tools() == []
+            _advance_clock(monkeypatch, 3600.0)
             assert [t.name for t in external_search_tools()] == ["tavily_search"]
         assert calls["n"] == 2
 
@@ -204,3 +207,106 @@ def test_search_tools_are_callable_from_this_side():
     # side drives them through core.blocking.await_blocking.
     with pytest.raises(NotImplementedError):
         tool.invoke({"query": "calculus pedagogy"})
+
+
+# --- a down Tavily is not paid for on every request (#194) ---
+
+
+def _advance_clock(monkeypatch, seconds: float) -> None:
+    """Move the module's view of time forward by ``seconds``."""
+    import core.external_tools as boundary
+
+    real = boundary.time.monotonic
+    monkeypatch.setattr(
+        boundary.time, "monotonic", lambda: real() + seconds
+    )
+
+
+def _failing_client() -> tuple[type, list[int]]:
+    """Stand in for the adapter, counting how many handshakes were attempted."""
+    attempts: list[int] = []
+
+    class _Client:
+        def __init__(self, connections, **kwargs):
+            pass
+
+        async def get_tools(self, *, server_name=None):
+            attempts.append(1)
+            raise ConnectionError("tavily is not listening")
+
+    return _Client, attempts
+
+
+class TestAnUnreachableServerIsNotPaidForEveryRequest:
+    """``_MCP_TIMEOUT_SECONDS`` bounds one handshake at 30s. With no negative
+    caching, a session whose plan is generated, adjusted and approved paid that
+    stall three times over, for the same down server (#194)."""
+
+    def test_a_down_server_is_attempted_once_per_cooldown(self, monkeypatch):
+        monkeypatch.delenv("MOCK_LLM", raising=False)
+        monkeypatch.setenv("TAVILY_API_KEY", "tvly-key-cooldown")
+        client, attempts = _failing_client()
+
+        with patch("core.external_tools.MultiServerMCPClient", client):
+            assert external_search_tools() == []
+            assert external_search_tools() == []
+            assert external_search_tools() == []
+
+        assert len(attempts) == 1
+
+    def test_the_attempt_is_made_again_once_the_cooldown_has_passed(self, monkeypatch):
+        """The point of #166 still holds: search can degrade a plan, it must
+        never fail one. A cooldown delays the retry, it does not end it."""
+        monkeypatch.delenv("MOCK_LLM", raising=False)
+        monkeypatch.setenv("TAVILY_API_KEY", "tvly-key-cooldown-expiry")
+        client, attempts = _failing_client()
+
+        with patch("core.external_tools.MultiServerMCPClient", client):
+            assert external_search_tools() == []
+            assert external_search_tools() == []
+            _advance_clock(monkeypatch, 3600.0)
+            assert external_search_tools() == []
+            assert external_search_tools() == []
+
+        assert len(attempts) == 2
+
+    def test_a_down_server_says_so_once_per_attempt(self, monkeypatch, caplog):
+        """Silence here would read as a configuration problem, not an outage."""
+        monkeypatch.delenv("MOCK_LLM", raising=False)
+        monkeypatch.setenv("TAVILY_API_KEY", "tvly-key-cooldown-log")
+        client, _attempts = _failing_client()
+
+        with (
+            patch("core.external_tools.MultiServerMCPClient", client),
+            caplog.at_level(logging.WARNING, logger="core.external_tools"),
+        ):
+            external_search_tools()
+            external_search_tools()
+
+        assert caplog.text.count("unavailable") == 1
+
+    def test_a_cached_success_is_not_affected_by_the_cooldown(self, monkeypatch):
+        """A key that has worked stops making handshakes at all (#166); the
+        cooldown only exists for a server that is currently failing."""
+        monkeypatch.delenv("MOCK_LLM", raising=False)
+        monkeypatch.setenv("TAVILY_API_KEY", "tvly-key-cooldown-cached")
+        client, attempts = _failing_client()
+
+        with patch("core.external_tools.MultiServerMCPClient", _working_client()):
+            assert [t.name for t in external_search_tools()] == ["tavily_search"]
+
+        with patch("core.external_tools.MultiServerMCPClient", client):
+            assert [t.name for t in external_search_tools()] == ["tavily_search"]
+
+        assert attempts == []
+
+
+def _working_client() -> type:
+    class _Client:
+        def __init__(self, connections, **kwargs):
+            pass
+
+        async def get_tools(self, *, server_name=None):
+            return [mcp_shaped_tool("tavily_search")]
+
+    return _Client
