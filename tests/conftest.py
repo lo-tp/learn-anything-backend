@@ -15,6 +15,8 @@ import os
 
 import pytest
 
+from core.model_answers import drain_model_recoveries
+
 os.environ["MOCK_LLM"] = "false"
 # core/llm.py constructs a real ChatOpenAI at import time whenever MOCK_LLM is off,
 # and the SDK rejects an empty ``api_key`` — so on a machine with no ``.env``
@@ -31,6 +33,19 @@ os.environ["OPENAI_API_KEY"] = "test-only-placeholder-not-a-secret"
 os.environ.setdefault("LA_PROMPTS_STUB", "1")
 os.environ["MAX_PROBE_QUESTIONS"] = "10"
 os.environ["PROBE_BATCH_SIZE"] = "3"
+
+
+@pytest.fixture(autouse=True)
+def _no_answer_recovery_carries_over():
+    """Drain the recovery accumulator around every test.
+
+    ``core.model_answers`` attributes a recovered answer to the stage row written
+    next — correct when one task runs one stage, and wrong between two tests
+    sharing one thread, where a record left by one would be blamed on the next.
+    """
+    drain_model_recoveries()
+    yield
+    drain_model_recoveries()
 
 
 def _real_prompts_available() -> bool:
