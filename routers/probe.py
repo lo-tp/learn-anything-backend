@@ -17,6 +17,7 @@ from core.security import get_current_user_optional, require_auth
 from db import Phase, ProbeQuestion, Session, User, get_db
 from graphs import graph_config, probe_graph
 from services.review import record_missed_question
+from services.stage_timings import empty_stage_timings, record_stage_timings
 
 router = APIRouter(tags=["probe"], dependencies=[Depends(require_auth)])
 
@@ -149,9 +150,11 @@ def probe_session(
                 "history": [],
                 "boundary_map": {},
                 "question_count": 0,
+                "stage_timings": empty_stage_timings(),
             },
             config,
         )
+        record_stage_timings(db, session_id, "probe", result)
         questions = result.get("next_batch")
         if not questions:
             raise HTTPException(status_code=500, detail="Graph did not produce questions")
@@ -199,10 +202,12 @@ def probe_session(
                     {"question_id": str(a.question_id), "selected_index": a.selected_index}
                     for a in body.answers
                 ]
-            }
+            },
+            update={"stage_timings": empty_stage_timings()},
         ),
         config,
     )
+    record_stage_timings(db, session_id, "probe", result)
 
     answered_questions = [by_id[a.question_id] for a in body.answers]
     answer_pairs = [(a.question_id, a.selected_index) for a in body.answers]
