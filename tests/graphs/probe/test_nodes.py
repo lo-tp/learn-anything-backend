@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from graphs.probe.nodes import (
@@ -377,3 +378,85 @@ class TestDecideNext:
         )
         # Floor is None → not bracketed → continue
         assert result["_decision"] == "continue"
+
+
+# --- reasoning budget (#194) ---
+
+
+class TestReasoningBudget:
+    """Every Probe call states how much it may think, and how much it may say.
+
+    Four batches per session makes Probe the largest cost before a slide exists,
+    so the budget here is the one that matters most (#194). The values are the
+    policy literals, read back out of the call the node actually made.
+    """
+
+    def _kwargs_of_the_call(self, factory, state, out) -> dict[str, Any]:
+        llm = _make_llm()
+        with (
+            patch("graphs.probe.nodes.structured_invoke", return_value=out) as mock_invoke,
+            patch(
+                "graphs.probe.nodes.with_unknown_option",
+                side_effect=lambda llm, lang, opts: opts + ["I don't know"],
+            ),
+        ):
+            factory(llm)(state)
+        return dict(mock_invoke.call_args.kwargs)
+
+    def test_decompose_strands_thinks_within_a_budget(self):
+        out = StrandsOut(strands=[StrandItem(id="algebra", description="d")])
+        kwargs = self._kwargs_of_the_call(
+            make_decompose_strands, {"goal": "Learn calculus"}, out
+        )
+        assert kwargs == {"reasoning_effort": "low", "max_tokens": 1536}
+
+    def test_generate_batch_thinks_within_a_budget(self):
+        out = BatchQuestionsOut(
+            questions=[
+                QuestionOut(
+                    text="q", options=["a", "b", "c", "d"], correct_index=0,
+                    explanation="e", strand="algebra", difficulty=1,
+                )
+            ]
+        )
+        state: ProbeState = {
+            "goal": "Learn calculus",
+            "strands": ["algebra"],
+            "strand_descriptions": {"algebra": "d"},
+            "boundary_map": {
+                "algebra": {"floor": None, "ceiling": None, "gap_type": "unknown"}
+            },
+            "question_count": 0,
+            "history": [],
+            "language": "English",
+        }
+        kwargs = self._kwargs_of_the_call(make_generate_batch, state, out)
+        assert kwargs == {"reasoning_effort": "low", "max_tokens": 3072}
+
+    def test_evaluate_batch_thinks_within_a_budget(self):
+        out = BatchEvaluateOut(
+            evaluations=[SingleEvaluation(question_id="q1", is_correct=False)],
+            updated_boundary_map={
+                "algebra": {"floor": "l1", "ceiling": "l2", "gap_type": "narrow"}
+            },
+            gap_summary="knows the basics, not the mechanics.",
+        )
+        state: ProbeState = {
+            "goal": "Learn calculus",
+            "strands": ["algebra"],
+            "boundary_map": {"algebra": {"floor": None, "ceiling": None}},
+            "history": [],
+            "next_batch": [
+                {
+                    "id": "q1",
+                    "text": "q",
+                    "options": ["a", "b"],
+                    "correct_index": 0,
+                    "strand": "algebra",
+                    "difficulty": 1,
+                }
+            ],
+            "_resume": {"answers": [{"question_id": "q1", "selected_index": 1}]},
+        }
+        kwargs = self._kwargs_of_the_call(make_evaluate_batch, state, out)
+        assert kwargs == {"reasoning_effort": "low", "max_tokens": 3072}

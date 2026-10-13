@@ -1041,3 +1041,108 @@ class TestGenerateMaterials:
         db.expire_all()
         # Recovery commit failed, so the phase was never persisted as ERROR.
         assert db.get(Session, sid).phase == Phase.GENERATING.value
+
+
+# --- stage timings for the plan graph (#194) ---
+
+
+_PLAN_TIMINGS = [
+    {"stage": "research_topic", "context": {}, "duration_seconds": 11.0},
+    {"stage": "design_plan", "context": {"pass_count": 0}, "duration_seconds": 9.5},
+    {"stage": "render_plan", "context": {"pass_count": 0}, "duration_seconds": 4.0},
+]
+
+
+class TestPlanStageTimings:
+    """Plan is the phase a learner waits through *and* re-runs on every
+    adjustment, so its cost has to be attributable per stage (#194)."""
+
+    def test_generating_a_plan_records_what_each_stage_cost(self, client, db, make_session):
+        sid = make_session(session_id="a", phase=Phase.PLANNING, narrowed_goal="ng").session_id
+        with (
+            patch("routers.plan.plan_graph") as graph,
+            patch("routers.plan.checkpointer"),
+        ):
+            graph.invoke.return_value = {
+                "__interrupt__": object(),
+                "current_plan": _valid_plan(),
+                "stage_timings": _PLAN_TIMINGS,
+            }
+            resp = client.post(f"/sessions/{sid}/plan/generate")
+
+        assert resp.status_code == 200
+        rows = (
+            db.query(GraphStageTiming)
+            .filter_by(session_id=sid, graph="plan")
+            .order_by(GraphStageTiming.id)
+            .all()
+        )
+        assert [(r.stage, r.duration_seconds) for r in rows] == [
+            ("research_topic", 11.0),
+            ("design_plan", 9.5),
+            ("render_plan", 4.0),
+        ]
+
+    def test_an_adjustment_records_only_its_own_pass(self, client, db, make_session):
+        """The generation pass is already on the record; an adjustment pass adds
+        its own rows and nothing else (#194)."""
+        sid = _seed_plan_session(
+            db, make_session, "a", Phase.REVIEWING, steps=_valid_plan()["steps"]
+        )
+        db.add(
+            GraphStageTiming(
+                session_id=sid,
+                graph="plan",
+                stage="research_topic",
+                context={},
+                duration_seconds=11.0,
+            )
+        )
+        db.commit()
+
+        with (
+            patch("routers.plan.plan_graph") as graph,
+            patch("routers.plan.checkpointer"),
+        ):
+            graph.invoke.return_value = {
+                "__interrupt__": object(),
+                "current_plan": _valid_plan(),
+                "stage_timings": [
+                    {"stage": "design_plan", "context": {"pass_count": 1}, "duration_seconds": 7.0},
+                    {"stage": "render_plan", "context": {"pass_count": 1}, "duration_seconds": 3.0},
+                ],
+            }
+            resp = client.post(
+                f"/sessions/{sid}/plan/adjust", json={"adjustment": "add a step"}
+            )
+
+        assert resp.status_code == 200
+        rows = (
+            db.query(GraphStageTiming)
+            .filter_by(session_id=sid, graph="plan")
+            .order_by(GraphStageTiming.id)
+            .all()
+        )
+        assert [(r.stage, r.duration_seconds) for r in rows] == [
+            ("research_topic", 11.0),  # from the generation pass, untouched
+            ("design_plan", 7.0),
+            ("render_plan", 3.0),
+        ]
+
+    def test_approving_records_nothing_because_the_graph_ran_no_llm_stage(
+        self, client, db, make_session
+    ):
+        sid = _seed_plan_session(
+            db, make_session, "a", Phase.REVIEWING, steps=_valid_plan()["steps"]
+        )
+        with (
+            patch("routers.plan.plan_graph") as graph,
+            patch("routers.plan.checkpointer"),
+            patch("routers.plan.generate_materials"),
+            patch("routers.plan.localize_status", return_value="ok"),
+        ):
+            graph.invoke.return_value = {"current_plan": _valid_plan(), "stage_timings": []}
+            resp = client.post(f"/sessions/{sid}/plan/approve")
+
+        assert resp.status_code == 202
+        assert db.query(GraphStageTiming).filter_by(session_id=sid, graph="plan").all() == []

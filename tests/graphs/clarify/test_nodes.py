@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -178,3 +179,44 @@ class TestRefineGoal:
             node = make_refine_goal(llm)
             node({"last_answer": "I want to learn calculus"})
         assert "I want to learn calculus" in str(mock_invoke.call_args)
+
+
+# --- reasoning budget (#194) ---
+
+
+class TestReasoningBudget:
+    """Every Clarify call states how much it may think, and how much it may say.
+
+    The expected values are the policy literals, read back out of the call the
+    node actually made: the defect in #194 was that no pre-material call stated
+    anything, so the backend's uncapped thinking default applied to all of them.
+    """
+
+    def _kwargs_of_the_call(self, factory, state, out) -> dict[str, Any]:
+        llm = _make_llm()
+        with patch(
+            "graphs.clarify.nodes.structured_invoke", return_value=out
+        ) as mock_invoke:
+            factory(llm)(state)
+        return dict(mock_invoke.call_args.kwargs)
+
+    def test_assess_goal_thinks_within_a_budget(self):
+        out = AssessOut(verdict="specific", narrowed_goal="g", open_dimensions=[])
+        kwargs = self._kwargs_of_the_call(
+            make_assess_goal, {"goal": "g", "round_count": 0}, out
+        )
+        assert kwargs == {"reasoning_effort": "low", "max_tokens": 1536}
+
+    def test_generate_questions_is_given_nothing_to_think_with(self):
+        out = QuestionsOut(questions=["q"])
+        kwargs = self._kwargs_of_the_call(
+            make_generate_questions, {"working_goal": "g", "open_dimensions": ["d"]}, out
+        )
+        assert kwargs == {"reasoning_effort": "minimal", "max_tokens": 1024}
+
+    def test_refine_goal_is_given_nothing_to_think_with(self):
+        out = RefineOut(working_goal="g", open_dimensions=[])
+        kwargs = self._kwargs_of_the_call(
+            make_refine_goal, {"working_goal": "g", "last_answer": "a"}, out
+        )
+        assert kwargs == {"reasoning_effort": "minimal", "max_tokens": 1024}

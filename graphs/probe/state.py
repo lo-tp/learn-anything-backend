@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TypedDict
+import operator
+from typing import Annotated, TypedDict
 
 
 class ProbeState(TypedDict, total=False):
@@ -16,3 +17,9 @@ class ProbeState(TypedDict, total=False):
     next_batch: list[dict] | None  # the current batch of questions (output at interrupt)
     _resume: dict | None  # transient: resume payload from wait_for_answers
     _decision: str | None  # transient: decide_next output ("continue" | "done")
+
+    # Per-stage wall-clock timings, one entry per stage this request ran
+    # (see graphs.common.timed_node); the router persists them to
+    # graph_stage_timings. Entry shape matches the material graph's:
+    # {"stage": str, "context": dict, "duration_seconds": float}.
+    stage_timings: Annotated[list[dict], operator.add]
