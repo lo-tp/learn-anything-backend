@@ -809,3 +809,58 @@ class TestSummarizeStep:
             "step_id": "s1", "slide_index": None, "attempt": None,
         }
         assert timing["duration_seconds"] >= 0
+
+
+# --- reasoning budget for the quiz/summary half (#194) ---
+
+
+class TestQuizAndSummaryReasoningBudget:
+    """The half of Material the slide-side fix left untouched now states its own
+    budget (#194). ``write_slide``/``plan_slide_contents`` keep theirs from
+    ``SLIDE_REASONING_EFFORT`` and the sampling ladder; these two had neither.
+    """
+
+    @staticmethod
+    def _state() -> MaterialState:
+        return {
+            "step": {"id": "s1", "title": "Step 1", "description": "d"},
+            "established_concepts": [],
+            "learner_context": {},
+            "slide_contents": [{"title": "S", "key_points": ["k"], "visual_hint": "v"}],
+            "language": "English",
+        }
+
+    def test_write_questions_thinks_within_a_budget(self):
+        llm = MagicMock()
+        out = QuestionsOut(
+            questions=[
+                QuestionDraft(text="Q1?", options=["A", "B"], correct_index=0, explanation="e"),
+                QuestionDraft(text="Q2?", options=["C", "D"], correct_index=1, explanation="e"),
+                QuestionDraft(text="Q3?", options=["E", "F"], correct_index=0, explanation="e"),
+            ]
+        )
+        with (
+            patch("graphs.material.nodes.structured_invoke", return_value=out) as mock_call,
+            patch(
+                "graphs.material.nodes.with_unknown_option",
+                side_effect=lambda llm, lang, opts: opts + ["I don't know"],
+            ),
+        ):
+            make_write_questions(llm)(self._state())
+        assert mock_call.call_args.kwargs == {
+            "reasoning_effort": "low",
+            "max_tokens": 4096,
+        }
+
+    def test_summarize_step_thinks_within_a_budget(self):
+        """Its output is what every later step is told to connect to."""
+        llm = MagicMock()
+        out = SummaryOut(key_points=["k1"])
+        with patch(
+            "graphs.material.nodes.structured_invoke", return_value=out
+        ) as mock_call:
+            make_summarize_step(llm)(self._state())
+        assert mock_call.call_args.kwargs == {
+            "reasoning_effort": "low",
+            "max_tokens": 3072,
+        }

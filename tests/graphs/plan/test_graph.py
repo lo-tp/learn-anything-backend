@@ -144,7 +144,7 @@ class TestSearchToolScope:
         with (
             patch(
                 "graphs.plan.nodes.structured_invoke_with_tools",
-                side_effect=lambda llm, schema, system, human, offered: grounded.append(
+                side_effect=lambda llm, schema, system, human, offered, **budget: grounded.append(
                     offered
                 )
                 or _RESEARCH,
