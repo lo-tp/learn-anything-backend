@@ -14,13 +14,15 @@ which passes it to that one node.
 Every path here is optional-by-design. Mock mode (#118), a missing
 ``TAVILY_API_KEY``, or a Tavily server that cannot be reached all give an empty
 list, which the graphs read as "no external search — answer as before". Search
-can degrade a plan's grounding; it must never fail a request.
+can degrade a plan's grounding; it must never fail a request. A server that is
+down is asked again after a cooldown rather than on every request (#194).
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import time
 from collections.abc import Callable, Sequence
 from functools import lru_cache
 
@@ -49,6 +51,33 @@ _SEARCH_TOOL_NAMES = frozenset({"tavily_search"})
 # bound the MCP round trip rather than let it hang the request.
 _MCP_TIMEOUT_SECONDS = 30.0
 
+# How long to wait before asking an unreachable MCP server again (#194). A
+# session reaches for search on every plan request it makes — generate, then each
+# adjustment — and with no negative caching each of those paid the full
+# ``_MCP_TIMEOUT_SECONDS`` for the same dead service. A failure is still retried
+# (a degraded plan is better than a failed one, #166); it is just not retried
+# every single time.
+_MCP_RETRY_COOLDOWN_SECONDS = 60.0
+
+# (url, api key) -> monotonic time before which another handshake is pointless.
+_SEARCH_RETRY_AFTER: dict[tuple[str, str], float] = {}
+
+
+def _retry_cooldown_seconds() -> float:
+    """The cooldown, overridable for a run where search matters more than latency."""
+    raw = os.getenv("TAVILY_MCP_RETRY_COOLDOWN_SECONDS", "").strip()
+    if not raw:
+        return _MCP_RETRY_COOLDOWN_SECONDS
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "TAVILY_MCP_RETRY_COOLDOWN_SECONDS=%r is not a number; using %s",
+            raw,
+            _MCP_RETRY_COOLDOWN_SECONDS,
+        )
+        return _MCP_RETRY_COOLDOWN_SECONDS
+
 # What a graph node is given to reach external search: a loader, not a live
 # connection. Calling it is what performs the (cached, fail-soft) MCP handshake.
 SearchToolLoader = Callable[[], Sequence[BaseTool]]
@@ -67,22 +96,34 @@ def external_search_tools() -> list[BaseTool]:
 
     An empty list means "no external search", and every caller treats it that
     way: mock mode, no key, or an unreachable server. Loading is lazy (first
-    use, not import time) and a successful load is reused; a failure is not
-    cached, so the next plan generation tries again.
+    use, not import time) and a successful load is reused; a failed one is
+    retried once its cooldown has passed, not on every request (#194).
     """
     if not is_external_search_enabled():
         return []
 
     api_key = os.environ["TAVILY_API_KEY"].strip()
     url = os.getenv("TAVILY_MCP_URL", DEFAULT_TAVILY_MCP_URL).strip()
+    key = (url, api_key)
+
+    retry_after = _SEARCH_RETRY_AFTER.get(key)
+    if retry_after is not None and time.monotonic() < retry_after:
+        # Deliberately quiet: the first attempt already said this is unavailable.
+        return []
+
     try:
-        return list(_load_search_tools(url, api_key))
+        tools = list(_load_search_tools(url, api_key))
     except Exception:  # an unreachable Tavily must not be a failed request
+        _SEARCH_RETRY_AFTER[key] = time.monotonic() + _retry_cooldown_seconds()
         logger.warning(
-            "Tavily MCP search is unavailable; this plan will not be grounded",
+            "Tavily MCP search is unavailable; this plan will not be grounded "
+            "(retrying the handshake in %ss)",
+            _retry_cooldown_seconds(),
             exc_info=True,
         )
         return []
+    _SEARCH_RETRY_AFTER.pop(key, None)
+    return tools
 
 
 # Cached by (url, key) so a key rotation or an .env change is a different entry,
