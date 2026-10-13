@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 from langgraph.checkpoint.memory import MemorySaver
 
 from graphs.plan.graph import build_plan_graph
+from graphs.plan.nodes import DESIGN_PLAN, RENDER_PLAN, RESEARCH_TOPIC
 from graphs.plan.schemas import (
     DesignOut,
     RenderedStep,
@@ -34,9 +35,9 @@ class TestBuildPlanGraph:
     def test_graph_has_expected_nodes(self):
         graph = build_plan_graph(_make_llm())
         node_names = set(graph.nodes.keys())
-        assert "research_topic" in node_names
-        assert "design_plan" in node_names
-        assert "render_plan" in node_names
+        # A model stage is a node named by the same qualified stage name its call
+        # asks core/reasoning.py for a budget against; the pause is not a stage.
+        assert {RESEARCH_TOPIC, DESIGN_PLAN, RENDER_PLAN} <= node_names
         assert "wait_for_response" in node_names
 
     def test_with_checkpointer(self):

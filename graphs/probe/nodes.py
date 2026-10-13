@@ -9,7 +9,7 @@ from langchain_core.language_models import BaseChatModel
 from langgraph.types import interrupt
 
 from core.language import DEFAULT_LANGUAGE, language_instruction
-from core.reasoning import phase_call_kwargs
+from core.reasoning import stage_call_kwargs, stage_name
 
 from ..common import structured_invoke, with_unknown_option
 from .prompts import (
@@ -25,6 +25,12 @@ from .schemas import (
 from .state import ProbeState
 
 MAX_PROBE_QUESTIONS = int(os.getenv("MAX_PROBE_QUESTIONS", "10"))
+
+# Named once, used twice: by the call that gets the reasoning budget and by the
+# graph builder's timed_node (#194 review).
+DECOMPOSE_STRANDS = stage_name("probe", "decompose_strands")
+GENERATE_BATCH = stage_name("probe", "generate_batch")
+EVALUATE_BATCH = stage_name("probe", "evaluate_batch")
 PROBE_BATCH_SIZE = int(os.getenv("PROBE_BATCH_SIZE", "3"))
 
 
@@ -49,7 +55,7 @@ def make_decompose_strands(llm: BaseChatModel):
             StrandsOut,
             DECOMPOSE_STRANDS_SYSTEM,
             f"Goal: {goal}",
-            **phase_call_kwargs("probe.decompose_strands"),
+            **stage_call_kwargs(DECOMPOSE_STRANDS),
         )
         return {
             "strands": [s.id for s in out.strands],
@@ -89,7 +95,7 @@ def make_generate_batch(llm: BaseChatModel):
                 f"Boundary map so far: {state.get('boundary_map') or '{}'}\n"
                 f"History: {state.get('history') or 'none'}"
             ),
-            **phase_call_kwargs("probe.generate_batch"),
+            **stage_call_kwargs(GENERATE_BATCH),
         )
 
         questions = []
@@ -170,7 +176,7 @@ def make_evaluate_batch(llm: BaseChatModel):
                 f"Current boundary map: {state.get('boundary_map') or '{}'}\n"
                 f"History: {state.get('history') or 'none'}"
             ),
-            **phase_call_kwargs("probe.evaluate_batch"),
+            **stage_call_kwargs(EVALUATE_BATCH),
         )
 
         evals = {e.question_id: e for e in out.evaluations}
