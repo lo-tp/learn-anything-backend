@@ -325,7 +325,10 @@ class GraphStageTiming(Base):
     stage-specific detail (material rows:
     ``{"step_id": ..., "slide_index": ... | null, "attempt": ... | null}``;
     probe rows ``{"question_count": ...}``, plan rows ``{"pass_count": ...}``,
-    clarify rows ``{"round_count": ...}``).
+    clarify rows ``{"round_count": ...}``). In any graph, a stage whose answer
+    had to be recovered from an unreadable one carries ``model_recoveries``:
+    the reason and how many JSON escapes the repair took (#195). Its absence is
+    the normal case, and that is what makes the rows that have it findable.
     Append-only — a regenerated step appends a fresh set of rows; prior
     attempt rows are kept as history (same policy as failed_slides).
     """

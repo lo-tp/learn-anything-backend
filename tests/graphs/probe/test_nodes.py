@@ -6,6 +6,9 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 from graphs.probe.nodes import (
+    DECOMPOSE_STRANDS,
+    EVALUATE_BATCH,
+    GENERATE_BATCH,
     MAX_PROBE_QUESTIONS,
     make_decide_next,
     make_decompose_strands,
@@ -408,7 +411,11 @@ class TestReasoningBudget:
         kwargs = self._kwargs_of_the_call(
             make_decompose_strands, {"goal": "Learn calculus"}, out
         )
-        assert kwargs == {"reasoning_effort": "low", "max_tokens": 1536}
+        assert kwargs == {
+            "stage": DECOMPOSE_STRANDS,
+            "reasoning_effort": "low",
+            "max_tokens": 1536,
+        }
 
     def test_generate_batch_thinks_within_a_budget(self):
         out = BatchQuestionsOut(
@@ -431,7 +438,11 @@ class TestReasoningBudget:
             "language": "English",
         }
         kwargs = self._kwargs_of_the_call(make_generate_batch, state, out)
-        assert kwargs == {"reasoning_effort": "low", "max_tokens": 3072}
+        assert kwargs == {
+            "stage": GENERATE_BATCH,
+            "reasoning_effort": "low",
+            "max_tokens": 3072,
+        }
 
     def test_evaluate_batch_thinks_within_a_budget(self):
         out = BatchEvaluateOut(
@@ -459,4 +470,8 @@ class TestReasoningBudget:
             "_resume": {"answers": [{"question_id": "q1", "selected_index": 1}]},
         }
         kwargs = self._kwargs_of_the_call(make_evaluate_batch, state, out)
-        assert kwargs == {"reasoning_effort": "low", "max_tokens": 3072}
+        assert kwargs == {
+            "stage": EVALUATE_BATCH,
+            "reasoning_effort": "low",
+            "max_tokens": 3072,
+        }
