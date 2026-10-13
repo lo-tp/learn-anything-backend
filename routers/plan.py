@@ -52,6 +52,7 @@ from graphs import (
     plan_graph,
     pre_material_llm,
 )
+from services.stage_timings import empty_stage_timings, record_stage_timings
 
 logger = logging.getLogger(__name__)
 
@@ -543,12 +544,15 @@ def generate_plan(session_id: str, db: DBSession = Depends(get_db)) -> PlanOut:
                 "current_plan": None,
                 "adjustment": None,
                 "pass_count": 0,
+                "stage_timings": empty_stage_timings(),
             },
             config,
         )
     except Exception:  # noqa: BLE001 — catch all to clean up thread
         _cleanup_thread(session_id)
         raise HTTPException(status_code=500, detail="Plan generation failed")
+
+    record_stage_timings(db, session_id, "plan", result)
 
     if "__interrupt__" not in result:
         _cleanup_thread(session_id)
@@ -609,13 +613,18 @@ def adjust_plan(
         result = plan_graph.invoke(
             Command(
                 resume={"action": "adjust", "text": body.adjustment},
-                update={"language": session.language or DEFAULT_LANGUAGE},
+                update={
+                    "language": session.language or DEFAULT_LANGUAGE,
+                    "stage_timings": empty_stage_timings(),
+                },
             ),
             config,
         )
     except Exception:  # noqa: BLE001 — catch all to clean up thread
         _cleanup_thread(session_id)
         raise HTTPException(status_code=500, detail="Plan adjustment failed")
+
+    record_stage_timings(db, session_id, "plan", result)
 
     if "__interrupt__" not in result:
         _cleanup_thread(session_id)
@@ -679,12 +688,17 @@ def approve_plan(
 
     try:
         result = plan_graph.invoke(
-            Command(resume={"action": "approve"}),
+            Command(
+                resume={"action": "approve"},
+                update={"stage_timings": empty_stage_timings()},
+            ),
             config,
         )
     except Exception:  # noqa: BLE001 — catch all to clean up thread
         _cleanup_thread(session_id)
         raise HTTPException(status_code=500, detail="Plan approval failed")
+
+    record_stage_timings(db, session_id, "plan", result)
 
     plan = result.get("current_plan")
     if plan is None:
