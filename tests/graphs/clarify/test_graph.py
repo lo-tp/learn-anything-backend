@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from graphs.clarify.graph import build_clarify_graph
+from graphs.clarify.nodes import ASSESS_GOAL, GENERATE_QUESTIONS, REFINE_GOAL
 from graphs.clarify.state import ClarifyState
 
 
@@ -25,10 +26,10 @@ class TestBuildClarifyGraph:
     def test_graph_has_expected_nodes(self):
         graph = build_clarify_graph(_make_llm())
         node_names = set(graph.nodes.keys())
-        assert "assess_goal" in node_names
-        assert "generate_questions" in node_names
+        # A model stage is a node named by the same qualified stage name its call
+        # asks core/reasoning.py for a budget against; the pause is not a stage.
+        assert {ASSESS_GOAL, GENERATE_QUESTIONS, REFINE_GOAL} <= node_names
         assert "wait_for_answer" in node_names
-        assert "refine_goal" in node_names
 
     def test_with_checkpointer(self):
         from langgraph.checkpoint.memory import MemorySaver

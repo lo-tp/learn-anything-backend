@@ -126,9 +126,14 @@ class TestPlanSlideContents:
         }
         assert timing["duration_seconds"] >= 0
 
-    def test_plans_with_the_minimum_reasoning_effort(self):
-        """Slide planning is a slide-generation call: it binds minimal reasoning."""
-        from graphs.material.sandbox import SLIDE_REASONING_EFFORT
+    def test_plans_with_the_minimum_reasoning_effort_and_an_output_cap(self):
+        """Slide planning is a slide-generation call: minimal reasoning, and a
+        cap on what it may write (#194) — how many specs a step asks for is the
+        model's choice, so its guard sits above a whole plan."""
+        from graphs.material.sandbox import (
+            SLIDE_CONTENTS_MAX_OUTPUT_TOKENS,
+            SLIDE_REASONING_EFFORT,
+        )
 
         llm = _make_llm()
         mock_out = SlideContentsOut(
@@ -147,6 +152,7 @@ class TestPlanSlideContents:
         assert SLIDE_REASONING_EFFORT == "minimal"
         assert mock_invoke.call_args.kwargs == {
             "reasoning_effort": SLIDE_REASONING_EFFORT,
+            "max_tokens": SLIDE_CONTENTS_MAX_OUTPUT_TOKENS,
         }
 
 

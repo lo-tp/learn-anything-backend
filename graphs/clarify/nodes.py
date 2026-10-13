@@ -6,7 +6,7 @@ from langchain_core.language_models import BaseChatModel
 from langgraph.types import interrupt
 
 from core.language import DEFAULT_LANGUAGE, language_instruction
-from core.reasoning import phase_call_kwargs
+from core.reasoning import stage_call_kwargs, stage_name
 
 from ..common import structured_invoke
 from .prompts import (
@@ -19,6 +19,13 @@ from .schemas import AssessOut, QuestionsOut, RefineOut
 from .state import ClarifyState
 
 MAX_CLARIFY_ROUNDS = 3
+
+# The stages this graph's model calls are named by, qualified for
+# core/reasoning.py's budget table and for timed_node in the graph builder: one
+# spelling for the call that gets a budget and the wrapper that times it.
+ASSESS_GOAL = stage_name("clarify", "assess_goal")
+GENERATE_QUESTIONS = stage_name("clarify", "generate_questions")
+REFINE_GOAL = stage_name("clarify", "refine_goal")
 
 
 def make_assess_goal(llm: BaseChatModel):
@@ -41,7 +48,7 @@ def make_assess_goal(llm: BaseChatModel):
                 f"Open dimensions: {state.get('open_dimensions') or 'none'}\n"
                 f"Clarification round: {state.get('round_count', 0)}"
             ),
-            **phase_call_kwargs("clarify.assess_goal"),
+            **stage_call_kwargs(ASSESS_GOAL),
         )
         if out.verdict == "specific" or at_cap:
             return {"narrowed_goal": out.narrowed_goal, "open_dimensions": []}
@@ -65,7 +72,7 @@ def make_generate_questions(llm: BaseChatModel):
                 f"Open dimensions: "
                 f"{state.get('open_dimensions') or 'the vaguest part of the goal'}"
             ),
-            **phase_call_kwargs("clarify.generate_questions"),
+            **stage_call_kwargs(GENERATE_QUESTIONS),
         )
         return {"clarifying_questions": out.questions}
 
@@ -97,7 +104,7 @@ def make_refine_goal(llm: BaseChatModel):
                 f"Open dimensions: {state.get('open_dimensions') or 'none'}\n"
                 f"Learner's answer: {state.get('last_answer', '')}"
             ),
-            **phase_call_kwargs("clarify.refine_goal"),
+            **stage_call_kwargs(REFINE_GOAL),
         )
         return {
             "working_goal": out.working_goal,

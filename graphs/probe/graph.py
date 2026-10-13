@@ -36,6 +36,9 @@ from langgraph.graph import END, StateGraph
 
 from ..common import timed_node
 from .nodes import (
+    DECOMPOSE_STRANDS,
+    EVALUATE_BATCH,
+    GENERATE_BATCH,
     make_decide_next,
     make_decompose_strands,
     make_evaluate_batch,
@@ -49,7 +52,7 @@ def build_probe_graph(
     llm: BaseChatModel, checkpointer: BaseCheckpointSaver | None = None
 ):
     def route_after_decide(state: ProbeState) -> str:
-        return "generate_batch" if state.get("_decision") == "continue" else END
+        return GENERATE_BATCH if state.get("_decision") == "continue" else END
 
     def batch_context(state: ProbeState) -> dict:
         """Which batch of questions a recorded stage belongs to."""
@@ -57,25 +60,29 @@ def build_probe_graph(
 
     graph = StateGraph(ProbeState)
     graph.add_node(
-        "decompose_strands", timed_node("decompose_strands", make_decompose_strands(llm))
+        DECOMPOSE_STRANDS,
+        timed_node(DECOMPOSE_STRANDS, make_decompose_strands(llm)),
     )
     graph.add_node(
-        "generate_batch",
-        timed_node("generate_batch", make_generate_batch(llm), batch_context),
+        GENERATE_BATCH,
+        timed_node(GENERATE_BATCH, make_generate_batch(llm), batch_context),
     )
     # Not timed: an interrupt spans the learner's answers, not this service's work.
     graph.add_node("wait_for_answers", make_wait_for_answers(llm))
     graph.add_node(
-        "evaluate_batch",
-        timed_node("evaluate_batch", make_evaluate_batch(llm), batch_context),
+        EVALUATE_BATCH,
+        timed_node(EVALUATE_BATCH, make_evaluate_batch(llm), batch_context),
     )
     graph.add_node("decide_next", make_decide_next(llm))
 
-    graph.set_entry_point("decompose_strands")
-    graph.add_edge("decompose_strands", "generate_batch")
-    graph.add_edge("generate_batch", "wait_for_answers")
-    graph.add_edge("wait_for_answers", "evaluate_batch")
-    graph.add_edge("evaluate_batch", "decide_next")
+    # A model stage is named by its qualified stage name throughout — the same
+    # string core/reasoning.py's budget table is keyed by, so no stage name here
+    # is spelled twice. The interrupt and the routing decision are not stages.
+    graph.set_entry_point(DECOMPOSE_STRANDS)
+    graph.add_edge(DECOMPOSE_STRANDS, GENERATE_BATCH)
+    graph.add_edge(GENERATE_BATCH, "wait_for_answers")
+    graph.add_edge("wait_for_answers", EVALUATE_BATCH)
+    graph.add_edge(EVALUATE_BATCH, "decide_next")
     graph.add_conditional_edges("decide_next", route_after_decide)
 
     return graph.compile(checkpointer=checkpointer)
