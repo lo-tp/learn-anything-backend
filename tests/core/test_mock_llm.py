@@ -153,3 +153,25 @@ class TestMockEchoInvoke:
             [SystemMessage(content="translate"), HumanMessage(content=text)]
         )
         assert resp.content == text
+
+    def test_a_bound_reasoning_budget_changes_nothing(self):
+        """Every graph node now binds a per-phase reasoning budget (#194). The
+        mock is the same canned answer whatever it is asked to think with."""
+        model = MockChatModel()
+        out = (
+            model.with_structured_output(AssessOut)
+            .bind(reasoning_effort="low", max_tokens=1536)
+            .invoke([SystemMessage(content="sys"), HumanMessage(content="user")])
+        )
+        assert isinstance(out, AssessOut)
+        assert out.verdict == "specific"
+
+    def test_echo_invoke_ignores_bound_kwargs_too(self):
+        """``localize_status`` binds its own budget (#194); echoing is unaffected."""
+        model = MockChatModel()
+        text = "I don't know"
+        resp = (
+            model.bind(reasoning_effort="minimal", max_tokens=256)
+            .invoke([SystemMessage(content="translate"), HumanMessage(content=text)])
+        )
+        assert resp.content == text
