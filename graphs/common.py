@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+import operator
 import time
 from collections.abc import Callable, Sequence
-from typing import Any, cast
+from typing import Annotated, Any, TypedDict, cast
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import (
@@ -21,6 +22,7 @@ from pydantic import BaseModel
 
 from core.blocking import await_blocking
 from core.language import DEFAULT_LANGUAGE, localize_status
+from core.reasoning import require_stage
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +33,52 @@ logger = logging.getLogger(__name__)
 _MAX_TOOL_CALL_ROUNDS = 2
 
 
+class StageTimingsState(TypedDict, total=False):
+    """The state channel every graph shares for per-stage wall timings (#194).
+
+    One entry per stage a run executed, shaped the same way in all four graphs:
+    ``{"stage": str, "context": dict, "duration_seconds": float}`` — the stage
+    named without its graph prefix, the attribution that makes a row usable (a
+    round, a batch, a pass), and the seconds it took.
+
+    The channel accumulates *within* a run because a run has several stages.
+    Between runs it is emptied by :func:`services.stage_timings.empty_stage_timings`
+    in the state each driver passes, so a resume records what it ran and not what
+    an earlier request already had written as rows.
+
+    The material graph's nodes write these entries themselves; Clarify, Probe and
+    Plan get them from :func:`timed_node`. Both land in the same
+    ``graph_stage_timings`` rows and the same analysis.
+    """
+
+    stage_timings: Annotated[list[dict], operator.add]
+
+
+def recorded_stage_name(qualified_stage: str) -> str:
+    """The ``graph_stage_timings.stage`` value for a qualified stage name.
+
+    A stage is named ``clarify.assess_goal`` where a graph builds its nodes and
+    where its model call asks for a reasoning budget, and ``assess_goal`` in the
+    timings rows — that is what the material graph already stores there, and what
+    ``scripts/slide_analysis.py`` reads, with the graph in its own column. This
+    is the one place that maps between the two (#194 review).
+    """
+    return require_stage(qualified_stage).split(".", 1)[1]
+
+
 def timed_node[State](
     stage: str,
     node: Callable[[State], dict],
     context: Callable[[State], dict] | None = None,
 ):
-    """Wrap a graph node so every execution records its own wall time (#194).
+    r"""Wrap a graph node so every execution records its own wall time (#194).
+
+    ``stage`` is the qualified stage name —
+    :func:`core.reasoning.stage_name` (``"clarify.assess_goal"``) — the same
+    constant the node passes to :func:`core.reasoning.stage_call_kwargs`. A
+    wrapper is a model call, so it must be a stage this app has a reasoning
+    budget for: ``require_stage`` makes that an error at graph-build time rather
+    than a row in the timings table that no policy knows about.
 
     The returned node is left un-annotated on purpose: LangGraph's node protocol
     wants a function, and a ``Callable[[State], dict]`` annotation is not one —
@@ -49,13 +91,15 @@ def timed_node[State](
     builders wrap what they add, and each driver persists what is new.
 
     Entries are shaped exactly like the material graph's ``stage_timings``
-    (``{"stage", "context", "duration_seconds"}``) so both land in the same
-    ``graph_stage_timings`` rows and the same analysis.
+    (``{"stage", "context", "duration_seconds"}``, the stage named without its
+    graph prefix, as ``graph_stage_timings`` stores it) so both land in the same
+    rows and the same analysis.
 
     Only a node that *does work* is wrapped. An interrupt node's wall time is the
     learner's, spent between requests, and recording it would make the timings
     measure the wrong thing.
     """
+    recorded_stage = recorded_stage_name(stage)
 
     def timed(state: State) -> dict:
         started = time.monotonic()
@@ -67,9 +111,9 @@ def timed_node[State](
             )
             raise
         duration = time.monotonic() - started
-        logger.info("%s: %.1fs", stage, duration)
+        logger.debug("%s: %.1fs", stage, duration)
         entry = {
-            "stage": stage,
+            "stage": recorded_stage,
             "context": context(state) if context is not None else {},
             "duration_seconds": duration,
         }

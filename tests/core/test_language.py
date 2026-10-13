@@ -9,12 +9,15 @@ round trip per question.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
+import core.language
 from core.language import (
     DEFAULT_LANGUAGE,
+    clear_short_text_language_cache,
     clear_status_translation_cache,
     detect_language,
     localize_status,
@@ -22,11 +25,13 @@ from core.language import (
 
 
 @pytest.fixture(autouse=True)
-def _empty_translation_cache():
-    """The translation cache is process-global; each test starts clean."""
+def _empty_caches():
+    """Both caches are process-global; each test starts clean."""
     clear_status_translation_cache()
+    clear_short_text_language_cache()
     yield
     clear_status_translation_cache()
+    clear_short_text_language_cache()
 
 
 def _reply(text: str) -> MagicMock:
@@ -149,3 +154,68 @@ class TestLanguageCallsStateTheirBudget:
             reasoning_effort="minimal", max_tokens=256
         )
         structured.invoke.assert_called_once()
+
+
+def _classifier(code: str) -> tuple[MagicMock, MagicMock]:
+    """A model whose language classification answers ``code``, with its invoke.
+
+    A plain MagicMock would do for the answer except that the helper calls
+    ``.lower()`` on it, so the answer is a real string in a real object.
+    """
+    llm = MagicMock()
+    structured = llm.with_structured_output.return_value.bind.return_value
+    structured.invoke.return_value = SimpleNamespace(language=code)
+    return llm, structured.invoke
+
+
+class TestShortTextLanguageDetection:
+    """#194: every learner reply under the classifier's reliable length goes to
+    the model, and a session answers with the same short replies all the way
+    through it — "yes", "no", "I don't know" — one round trip per ask."""
+
+    def test_the_same_short_reply_is_classified_once(self):
+        llm, invoke = _classifier("en")
+        for _ in range(4):
+            assert detect_language("yes", llm) == "English"
+        assert invoke.call_count == 1
+
+    def test_a_reply_is_recognised_whatever_its_capitalisation(self):
+        llm, invoke = _classifier("en")
+        assert detect_language("Yes", llm) == "English"
+        assert detect_language("  yes  ", llm) == "English"
+        assert invoke.call_count == 1
+
+    def test_different_replies_are_classified_separately(self):
+        llm, invoke = _classifier("en")
+        detect_language("yes", llm)
+        detect_language("maybe not", llm)
+        assert invoke.call_count == 2
+
+    def test_a_failed_classification_is_not_remembered(self):
+        """A model that was down must not become the session's language forever."""
+        llm = MagicMock()
+        structured = llm.with_structured_output.return_value.bind.return_value
+        structured.invoke.side_effect = [ConnectionError("model down"), SimpleNamespace(language="fr")]
+        assert detect_language("oui", llm) == DEFAULT_LANGUAGE
+        assert detect_language("oui", llm) == "French"
+        assert structured.invoke.call_count == 2
+
+    def test_text_the_classifier_can_read_never_reaches_the_model(self):
+        llm, invoke = _classifier("fr")
+        assert detect_language("Je veux apprendre le calcul differentiel", llm) == "French"
+        assert invoke.call_count == 0
+
+    def test_the_cache_is_bounded(self):
+        """Its keys are learner text, which is not a fixed set, so the number of
+        remembered texts has a limit rather than growing with the session."""
+        llm, _ = _classifier("en")
+        for i in range(core.language.MAX_DETECTED_TEXTS + 50):
+            detect_language(f"reply number {i} x", llm)
+        assert len(core.language._SHORT_TEXT_LANGUAGES) <= core.language.MAX_DETECTED_TEXTS
+
+    def test_cleared_cache_classifies_again(self):
+        llm, invoke = _classifier("en")
+        detect_language("yes", llm)
+        clear_short_text_language_cache()
+        detect_language("yes", llm)
+        assert invoke.call_count == 2

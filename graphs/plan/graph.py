@@ -47,6 +47,9 @@ from core.external_tools import SearchToolLoader
 
 from ..common import timed_node
 from .nodes import (
+    DESIGN_PLAN,
+    RENDER_PLAN,
+    RESEARCH_TOPIC,
     make_design_plan,
     make_render_plan,
     make_research_topic,
@@ -69,10 +72,10 @@ def build_plan_graph(
     """
 
     def route_entry(state: PlanState) -> str:
-        return "design_plan" if state.get("research") is not None else "research_topic"
+        return DESIGN_PLAN if state.get("research") is not None else RESEARCH_TOPIC
 
     def route_after_response(state: PlanState) -> str:
-        return END if state.get("approved") else "design_plan"
+        return END if state.get("approved") else DESIGN_PLAN
 
     graph = StateGraph(PlanState)
 
@@ -81,21 +84,24 @@ def build_plan_graph(
         return {"pass_count": state.get("pass_count", 0)}
 
     graph.add_node(
-        "research_topic",
-        timed_node("research_topic", make_research_topic(llm, search_tools)),
+        RESEARCH_TOPIC,
+        timed_node(RESEARCH_TOPIC, make_research_topic(llm, search_tools)),
     )
     graph.add_node(
-        "design_plan", timed_node("design_plan", make_design_plan(llm), pass_context)
+        DESIGN_PLAN, timed_node(DESIGN_PLAN, make_design_plan(llm), pass_context)
     )
     graph.add_node(
-        "render_plan", timed_node("render_plan", make_render_plan(llm), pass_context)
+        RENDER_PLAN, timed_node(RENDER_PLAN, make_render_plan(llm), pass_context)
     )
     # Not timed: an interrupt spans the learner's decision, not this service's work.
     graph.add_node("wait_for_response", make_wait_for_response(llm))
 
-    graph.add_conditional_edges("research_topic", lambda _: "design_plan")
-    graph.add_edge("design_plan", "render_plan")
-    graph.add_edge("render_plan", "wait_for_response")
+    # A model stage is named by its qualified stage name throughout — the same
+    # string core/reasoning.py's budget table is keyed by, so no stage name here
+    # is spelled twice. The interrupt is not a stage.
+    graph.add_conditional_edges(RESEARCH_TOPIC, lambda _: DESIGN_PLAN)
+    graph.add_edge(DESIGN_PLAN, RENDER_PLAN)
+    graph.add_edge(RENDER_PLAN, "wait_for_response")
     graph.add_conditional_edges("wait_for_response", route_after_response)
     graph.add_conditional_edges("__start__", route_entry)
 

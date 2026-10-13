@@ -13,8 +13,10 @@ from graphs.material.sandbox import (
     MAX_BRACE_APPEND,
     MAX_MATERIAL_ATTEMPTS,
     MAX_SLIDE_SELF_REPAIR_TURNS,
+    SLIDE_CONTENTS_MAX_OUTPUT_TOKENS,
     SLIDE_EXTRA_BODY_PARAMS,
     SLIDE_FAILURE_CLASSES,
+    SLIDE_MAX_OUTPUT_TOKENS,
     SLIDE_REASONING_EFFORT,
     SLIDE_SAMPLING_PROFILES,
     _compile_slide,
@@ -25,6 +27,7 @@ from graphs.material.sandbox import (
     classify_compile_error,
     compile_error_for_feedback,
     deterministic_repair,
+    slide_max_output_tokens,
     slide_sampling_bind_kwargs,
     slide_sampling_for_attempt,
     validate_jsx,
@@ -117,10 +120,12 @@ class TestSlideSamplingBindKwargs:
         kwargs = slide_sampling_bind_kwargs(1)
         profile = slide_sampling_for_attempt(1)
         top_level = set(kwargs) - {"extra_body"}
-        # reasoning_effort is not a profile entry; the bind factory adds it to
-        # every slide-writing call (see test_reasoning_effort_is_minimal).
+        # reasoning_effort and max_tokens are not profile entries; the bind
+        # factory adds both to every slide-writing call (see
+        # test_reasoning_effort_is_minimal and TestSlideOutputCaps).
         assert top_level | set(kwargs["extra_body"]) == set(profile) | {
-            "reasoning_effort"
+            "reasoning_effort",
+            "max_tokens",
         }
         assert not (top_level & set(kwargs["extra_body"]))
 
@@ -787,3 +792,32 @@ class TestMaxSelfRepairTurns:
     def test_default_is_two(self):
         # The unconfigured default allows two repair turns (three writes).
         assert MAX_SLIDE_SELF_REPAIR_TURNS == 2
+
+
+class TestSlideOutputCaps:
+    """#194: the slide calls were the only model calls left running under
+    ``core/llm.py``'s global 65536, which bounds nothing a slide needs."""
+
+    def test_every_write_attempt_caps_what_the_model_may_write(self):
+        for attempt in range(1, len(SLIDE_SAMPLING_PROFILES) + 3):
+            assert slide_sampling_bind_kwargs(attempt)["max_tokens"] == SLIDE_MAX_OUTPUT_TOKENS
+
+    def test_the_cap_sits_well_above_the_largest_slide_ever_measured(self):
+        """Real slides came back at 356-686 completion tokens (#194). The cap is
+        a runaway guard, not a budget to fill."""
+        assert 4096 <= SLIDE_MAX_OUTPUT_TOKENS < 65536
+
+    def test_a_step_with_many_slide_specs_gets_a_wider_cap(self):
+        """How many specs a step asks for is the model's choice, so this cap is
+        above a whole plan, not above one slide."""
+        assert SLIDE_CONTENTS_MAX_OUTPUT_TOKENS > SLIDE_MAX_OUTPUT_TOKENS
+
+    def test_the_cap_stays_out_of_extra_body(self):
+        """It is a standard OpenAI field; nesting it is how a param gets ignored."""
+        kwargs = slide_sampling_bind_kwargs(1)
+        assert "max_tokens" not in kwargs.get("extra_body", {})
+
+    def test_the_output_setting_covers_the_slide_calls_too(self, monkeypatch):
+        monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "8192")
+        assert slide_sampling_bind_kwargs(1)["max_tokens"] == 8192
+        assert slide_max_output_tokens() == 8192

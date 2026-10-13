@@ -7,7 +7,7 @@ from langgraph.types import interrupt
 
 from core.external_tools import SearchToolLoader
 from core.language import DEFAULT_LANGUAGE, language_instruction
-from core.reasoning import phase_call_kwargs
+from core.reasoning import stage_call_kwargs, stage_name
 
 from ..common import structured_invoke, structured_invoke_with_tools
 from .prompts import (
@@ -18,6 +18,12 @@ from .prompts import (
 )
 from .schemas import DesignOut, RenderOut, ResearchOut
 from .state import PlanState
+
+# Named once, used twice: by the call that gets the reasoning budget and by the
+# graph builder's timed_node (#194 review).
+RESEARCH_TOPIC = stage_name("plan", "research_topic")
+DESIGN_PLAN = stage_name("plan", "design_plan")
+RENDER_PLAN = stage_name("plan", "render_plan")
 
 
 def make_research_topic(
@@ -38,7 +44,7 @@ def make_research_topic(
             RESEARCH_TOPIC_SYSTEM,
             f"Goal: {state.get('goal', '')}",
             list(search_tools()) if search_tools is not None else [],
-            **phase_call_kwargs("plan.research_topic"),
+            **stage_call_kwargs(RESEARCH_TOPIC),
         )
         return {
             "research": {
@@ -92,7 +98,7 @@ def make_design_plan(llm: BaseChatModel):
             DesignOut,
             system,
             "\n".join(parts),
-            **phase_call_kwargs("plan.design_plan"),
+            **stage_call_kwargs(DESIGN_PLAN),
         )
         return {"design_steps": [s.model_dump() for s in out.steps]}
 
@@ -127,7 +133,7 @@ def make_render_plan(llm: BaseChatModel):
             RenderOut,
             system,
             "\n".join(parts),
-            **phase_call_kwargs("plan.render_plan"),
+            **stage_call_kwargs(RENDER_PLAN),
         )
         return {
             "current_plan": {
