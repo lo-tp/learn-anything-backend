@@ -13,6 +13,7 @@ from core.security import require_auth, require_sign_in
 from db import Phase, Session, get_db
 from graphs import clarify_graph, graph_config, pre_material_llm
 from graphs.clarify import ClarifyState
+from services.stage_timings import empty_stage_timings, record_stage_timings
 
 router = APIRouter(tags=["clarify"], dependencies=[Depends(require_auth)])
 
@@ -105,9 +106,13 @@ def create_session(body: GoalIn, db: DBSession = Depends(get_db)) -> ClarifyResu
     db.add(session)
     db.commit()
     result = clarify_graph.invoke(
-        initial_clarify_state(body.goal, language),
+        {
+            **initial_clarify_state(body.goal, language),
+            "stage_timings": empty_stage_timings(),
+        },
         graph_config(session.session_id, "clarify"),
     )
+    record_stage_timings(db, session.session_id, "clarify", result)
     return interpret_clarify(result, session, db)
 
 
@@ -136,8 +141,12 @@ def clarify_session(
     result = clarify_graph.invoke(
         Command(
             resume={"answer": body.answer},
-            update={"language": session.language or DEFAULT_LANGUAGE},
+            update={
+                "language": session.language or DEFAULT_LANGUAGE,
+                "stage_timings": empty_stage_timings(),
+            },
         ),
         graph_config(session_id, "clarify"),
     )
+    record_stage_timings(db, session_id, "clarify", result)
     return interpret_clarify(result, session, db)

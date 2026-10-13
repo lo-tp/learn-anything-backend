@@ -317,12 +317,15 @@ class FailedSlide(Base):
 class GraphStageTiming(Base):
     """Per-stage wall-clock timing for a graph execution.
 
-    One row per node/stage execution of ANY graph. Currently written by
-    the material graph (plan_slide_contents, each write_slide /
-    compile_slide attempt, write_questions, summarize_step); the ``graph``
-    column identifies the producing graph and ``context`` carries
+    One row per node/stage execution of ANY graph. Written by the material graph
+    (plan_slide_contents, each write_slide / compile_slide attempt,
+    write_questions, summarize_step) by its driver, and by the Clarify, Probe and
+    Plan drivers for the stages of each request they run (``services.stage_timings``).
+    The ``graph`` column identifies the producing graph and ``context`` carries
     stage-specific detail (material rows:
-    ``{"step_id": ..., "slide_index": ... | null, "attempt": ... | null}``).
+    ``{"step_id": ..., "slide_index": ... | null, "attempt": ... | null}``;
+    probe rows ``{"question_count": ...}``, plan rows ``{"pass_count": ...}``,
+    clarify rows ``{"round_count": ...}``).
     Append-only — a regenerated step appends a fresh set of rows; prior
     attempt rows are kept as history (same policy as failed_slides).
     """
@@ -333,8 +336,7 @@ class GraphStageTiming(Base):
     session_id: Mapped[str] = mapped_column(
         ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True
     )
-    # Which graph produced this row: "material" for now;
-    # "plan" / "probe" / "clarify" possible later.
+    # Which graph produced this row: "material", "plan", "probe" or "clarify".
     graph: Mapped[str] = mapped_column(String)
     # Node name within the graph (e.g. "write_slide", "design_plan").
     stage: Mapped[str] = mapped_column(String)
