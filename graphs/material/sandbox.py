@@ -261,13 +261,100 @@ def _unbalanced_open_braces(code: str) -> int:
     return delta
 
 
+# --- MathJax context contract (the render-time rule no compiler can see) ---
+#
+# The system prompt mandates: "Wrap every slide in a single
+# <MathJaxContext config={{ loader: { load: ["input/asciimath"] } }}>."
+# A slide that renders <MathJax> without a <MathJaxContext> ancestor
+# compiles fine (esbuild passes it; the sandbox's headless gate passes it —
+# better-react-mathjax only throws the "MathJax was not loaded" error on the
+# browser-side context path), yet the browser harness renders the whole slide
+# blank. validate_jsx is the seam that enforces the contract: a deterministic
+# wrap when the rewrite is safe, a reported violation (feeding a self-repair
+# turn) otherwise.
+
+# The exact wrapper the prompt mandates — keep these strings identical to it.
+_MATHJAX_CONTEXT_OPEN = '<MathJaxContext config={{ loader: { load: ["input/asciimath"] } }}>'
+_MATHJAX_CONTEXT_CLOSE = "</MathJaxContext>"
+
+# A <MathJax> JSX tag — opening forms only (``<MathJax>``, ``<MathJax inline>``,
+# ``<MathJax/>``). ``<MathJaxContext`` never matches (``C`` is not in the
+# character class), and prose that merely mentions MathJax never matches
+# (the tag requires the ``<``).
+_MATHJAX_TAG_RE = re.compile(r"<MathJax[\s/>]")
+_MATHJAX_CONTEXT_TAG_RE = re.compile(r"<MathJaxContext[\s/>]")
+
+# The first ``export default function`` — optionally named. The prompt pins
+# exactly this module shape ("exactly one export default function
+# component"); any other default-export shape (arrow default, ``export
+# { x as default }``) is not safely rewritable and is reported instead.
+_DEFAULT_EXPORT_RE = re.compile(
+    r"export default function(\s+([A-Za-z_$][A-Za-z0-9_$]*))?(\s*\()"
+)
+
+# The LLM-facing wording of the contract violation (also what
+# ``classify_compile_error`` maps to ``content_spec_invalid``).
+MATHJAX_CONTEXT_RULE = (
+    "The slide renders <MathJax> without a <MathJaxContext> ancestor: it "
+    "compiles, but the slide engine throws when it is served and the iframe "
+    "renders blank. Wrap the entire slide component in a single "
+    f"{_MATHJAX_CONTEXT_OPEN} … {_MATHJAX_CONTEXT_CLOSE}."
+)
+
+
+def _mathjax_without_context(code: str) -> bool:
+    """True when the slide uses a <MathJax> tag but renders no
+    <MathJaxContext> tag. Best-effort by design: a context provided through
+    an aliased component (``const Ctx = MathJaxContext; <Ctx>…``) is not
+    detected — the prompt mandates the tag directly."""
+    return bool(_MATHJAX_TAG_RE.search(code)) and not _MATHJAX_CONTEXT_TAG_RE.search(code)
+
+
+def wrap_mathjax_context(code: str) -> tuple[str, bool]:
+    """Deterministically wrap a slide's default-export component in the
+    mandated <MathJaxContext>.
+
+    When the module has the pinned shape (one ``export default function``),
+    the rewrite is mechanical and purely additive to the model's content:
+    the declaration's ``export default`` keywords are dropped (an anonymous
+    default export gains the name ``__SlideInner`` so it can be rendered),
+    and a new default export is appended that renders the original component
+    inside the mandated wrapper. No model content is moved or deleted.
+
+    Returns ``(wrapped, applied)``. ``applied`` is False when the slide does
+    not use <MathJax> at all, already renders a <MathJaxContext>, or its
+    default export is not the pinned shape — in the last case there is no
+    safe rewrite, so the violation is reported to the model instead.
+    """
+    if not _mathjax_without_context(code):
+        return code, False
+    m = _DEFAULT_EXPORT_RE.search(code)
+    if m is None:
+        return code, False
+    name = m.group(2) or "__SlideInner"
+    wrapper_name = "__SlideWithMathJaxContext"
+    # A name collision would turn the rewrite into a duplicate declaration —
+    # not safe, so decline and report instead.
+    if wrapper_name in code or (m.group(2) is None and "__SlideInner" in code):
+        return code, False
+    decl = "function" + (m.group(1) if m.group(1) else f" {name}") + m.group(3)
+    rewritten = code[: m.start()] + decl + code[m.end() :]
+    wrapper = (
+        f"\n\nexport default function {wrapper_name}() {{\n"
+        f"  return {_MATHJAX_CONTEXT_OPEN}<{name} />{_MATHJAX_CONTEXT_CLOSE};\n"
+        "}\n"
+    )
+    return rewritten + wrapper, True
+
+
 def deterministic_repair(code: str) -> tuple[str, list[str]]:
     """Apply safe, mechanical repairs to raw slide JSX before validation.
 
-    Repairs only ever *add* structure (strip fences, append missing closers);
-    they never delete model content, so they cannot break an already-valid
-    module. Returns ``(repaired_code, names)`` where ``names`` lists the
-    repairs that actually changed the code (empty when nothing needed fixing).
+    Repairs only ever *add* structure (strip fences, append missing closers,
+    wrap a bare slide in the mandated <MathJaxContext>); they never delete
+    model content, so they cannot break an already-valid module. Returns
+    ``(repaired_code, names)`` where ``names`` lists the repairs that
+    actually changed the code (empty when nothing needed fixing).
     """
     repairs: list[str] = []
     src = code
@@ -285,50 +372,100 @@ def deterministic_repair(code: str) -> tuple[str, list[str]]:
         src = src + "\n" + "}" * n
         repairs.append("balance_braces")
 
+    wrapped, wrapped_applied = wrap_mathjax_context(src)
+    if wrapped_applied:
+        src = wrapped
+        repairs.append("wrap_mathjax_context")
+
     return src, repairs
 
 
+def _accept_or_enforce_contract(
+    source: str, compiled: str, repairs: list[str]
+) -> dict:
+    """Finish validating a slide that *compiled*: the MathJax-context
+    contract is the rest of the validation.
+
+    A slide with <MathJax> and no <MathJaxContext> renders blank in the
+    browser harness even though every compiler and the sandbox's headless
+    gate accept it. A safe deterministic wrap (recompiled, so the returned
+    ``compiled_code`` is the wrapped module's own sandbox output) fixes it
+    without involving the model; anything else becomes an ``ok`` False result
+    carrying the contract wording, which feeds a self-repair turn.
+    """
+    if not _mathjax_without_context(source):
+        return {
+            "ok": True,
+            "compiled_code": compiled,
+            "source": source,
+            "error": "",
+            "repairs": repairs,
+        }
+    wrapped, applied = wrap_mathjax_context(source)
+    if applied:
+        recompiled, recompile_error = _compile_slide(wrapped)
+        if recompiled is not None:
+            return {
+                "ok": True,
+                "compiled_code": recompiled,
+                "source": wrapped,
+                "error": "",
+                "repairs": [*repairs, "wrap_mathjax_context"],
+            }
+        # The deterministic rewrite did not compile — abandon it and hand the
+        # real failure (plus the contract) to the model.
+        error = (
+            f"{recompile_error} (the deterministic <MathJaxContext> wrap did "
+            f"not compile, so the slide itself must be repaired) "
+            f"{MATHJAX_CONTEXT_RULE}"
+        )
+    else:
+        error = MATHJAX_CONTEXT_RULE
+    return {
+        "ok": False,
+        "compiled_code": None,
+        "source": source,
+        "error": compile_error_for_feedback(error),
+        "repairs": repairs,
+    }
+
+
 def validate_jsx(code: str) -> dict:
-    """Validate a slide's JSX: compile it; if it fails, apply deterministic
-    repairs and retry.
+    """Validate a slide's JSX: compile it, enforce the MathJax context
+    contract, and if either fails, apply deterministic repairs and retry.
 
     The raw code is compiled *first*, so a valid slide (e.g. one whose text
     contains apostrophes) is returned unchanged and never corrupted by a
     repair. Only code that already failed to compile is touched by the
-    additive, best-effort deterministic repairs — which run before the
-    failure is reported to the model.
+    additive, best-effort deterministic repairs; the MathJax context
+    contract — a render-time rule no compiler can see — is then enforced
+    against whatever source compiles (see ``_accept_or_enforce_contract``).
+    All of this runs before a failure is reported to the model.
 
     This is the tool the ``write_slide`` self-repair loop binds to. It returns
     a structured result rather than raising:
 
     - ``ok`` True: ``compiled_code`` is the sandbox output and ``source`` is
       the (possibly repaired) source that compiled.
-    - ``ok`` False: ``error`` is the reduced, LLM-facing compile error.
+    - ``ok`` False: ``error`` is the reduced, LLM-facing failure — a compile
+      error, the MathJax context contract violation, or both.
     - ``repairs`` lists the deterministic repairs applied to reach ``source``.
     """
     compiled, error = _compile_slide(code)
     if compiled is not None:
-        return {
-            "ok": True,
-            "compiled_code": compiled,
-            "source": code,
-            "error": "",
-            "repairs": [],
-        }
+        return _accept_or_enforce_contract(code, compiled, [])
     # The raw code failed to compile: try the deterministic repairs (additive
     # only, so they cannot break an already-valid module).
     source, repairs = deterministic_repair(code)
     if source != code:
         repaired_compiled, repaired_error = _compile_slide(source)
         if repaired_compiled is not None:
-            return {
-                "ok": True,
-                "compiled_code": repaired_compiled,
-                "source": source,
-                "error": "",
-                "repairs": repairs,
-            }
+            return _accept_or_enforce_contract(source, repaired_compiled, repairs)
         error = repaired_error
+    if _mathjax_without_context(source):
+        # The slide could not even be made to compile; the model that gets
+        # the repair turn must know about both problems it has to fix.
+        error = f"{error} {MATHJAX_CONTEXT_RULE}"
     return {
         "ok": False,
         "compiled_code": None,
@@ -389,6 +526,9 @@ _CONTENT_SPEC_TOKENS: tuple[str, ...] = (
     "default export must be a function",
     "renders empty",
     "component failed the gate",
+    # validate_jsx's own contract rejection: a slide that compiles but renders
+    # <MathJax> outside any <MathJaxContext> (see MATHJAX_CONTEXT_RULE).
+    "without a <mathjaxcontext>",
 )
 # The parser ran out of input: the model's answer was cut off mid-module. Note
 # that esbuild's "Unterminated string literal" is deliberately NOT here — the
