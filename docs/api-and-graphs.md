@@ -33,7 +33,7 @@ The result (a human-readable name, e.g. `"Spanish"`) is stored on `Session.langu
 - **Plan** — step titles/descriptions, the prose summary, and DAG labels. (Topic research stays in English — it feeds internal reasoning, not the learner.)
 - **Material** — slide teaching copy, quiz questions/options/explanations, and key-point summaries.
 
-The one user-facing status message produced outside a graph (the approve acknowledgement) is localized via `language.localize_status()`, which translates it with a graceful English fallback.
+The user-facing status acknowledgements produced outside a graph — plan approval, single-slide regeneration — are localized via `language.localize_status()`, which translates them with a graceful English fallback.
 
 ---
 
@@ -173,7 +173,7 @@ class GraphStageTiming(Base):
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True)
     graph: Mapped[str] = mapped_column(String)                   # which graph produced the row ("material" | "plan" | "probe" | "clarify")
     stage: Mapped[str] = mapped_column(String)                  # node name within the graph (e.g. "write_slide")
-    context: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # stage-specific detail; material rows: {step_id, slide_index (1-based|null), attempt (1-based|null)}; any graph: model_recoveries when an answer needed the second plan (#195)
+    context: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # stage-specific detail; material rows: {step_id, slide_index (1-based|null), attempt (1-based|null)}; a single-slide regeneration's rows add regenerated: true and key slide_index on the deck slot it rewrote (#197); any graph: model_recoveries when an answer needed the second plan (#195)
     duration_seconds: Mapped[float] = mapped_column(Float)      # wall-clock time for that stage execution
     created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
 
@@ -586,7 +586,7 @@ The body is optional:
 |---|---|
 | `content_spec` | `SlideContent.content_spec` — the spec this slide was written from |
 | `step` | `Plan.steps`, matched on `SlideContent.step_id` |
-| `established_concepts` | the `StepMaterial.summary` rows of the plan's earlier steps, in plan order |
+| `established_concepts` | the `summary` of every **complete** `StepMaterial` row for the plan's earlier steps, in plan order — a provisional row (a step that never finished) is skipped, exactly as the deck driver skips it |
 | `learner_context` | `Session.boundary_map` |
 | `language` | `Session.language` |
 
@@ -607,7 +607,7 @@ It then runs the material graph's own `write_slide` and `compile_slide` over tha
 | the plan no longer has the slide's step | `409` (a plan can be adjusted after its deck was generated) |
 | mock mode | `400` |
 
-Every stage a regeneration runs writes its `graph_stage_timings` row as a deck generation does, with `context.regenerated: true` so the two can be told apart afterwards (#194). One regeneration at a time per session: it takes the same per-session lock the deck driver holds.
+Every stage a regeneration runs writes its `graph_stage_timings` row as a deck generation does. Those rows are keyed on the **deck slot** the regeneration rewrote — taken from the slide's own ID, because inside a one-slide run every slide is slide 1 — and carry `context.regenerated: true`, so `scripts/slide_analysis.py` can report asking-for-a-slide-back costs apart from generating-a-deck costs instead of folding them together (#194, #197). The failed attempts land in `failed_slides` under the same deck slot. One regeneration at a time per session: it takes the same per-session lock the deck driver holds.
 
 **Knowing when it is done:** the slide keeps its ID, so `GET /sessions/{id}/materials` is unchanged by a regeneration, and there is no status endpoint for one in flight. A client re-reads the slide (through the Sandbox, which fetches the source from this backend per request). If the frontend needs an explicit in-flight/completed signal, that is separate API surface and not part of #197.
 

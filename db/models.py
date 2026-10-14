@@ -325,13 +325,22 @@ class GraphStageTiming(Base):
 
     One row per node/stage execution of ANY graph. Written by the material graph
     (plan_slide_contents, each write_slide / compile_slide attempt,
-    write_questions, summarize_step) by its driver, and by the Clarify, Probe and
-    Plan drivers for the stages of each request they run (``services.stage_timings``).
+    write_questions, summarize_step) by its driver, by the single-slide
+    regeneration task for the write/compile attempts it runs (#197), and by the
+    Clarify, Probe and Plan drivers for the stages of each request they run
+    (``services.stage_timings``).
     The ``graph`` column identifies the producing graph and ``context`` carries
     stage-specific detail (material rows:
     ``{"step_id": ..., "slide_index": ... | null, "attempt": ... | null}``;
     probe rows ``{"question_count": ...}``, plan rows ``{"pass_count": ...}``,
-    clarify rows ``{"round_count": ...}``). In any graph, a stage whose answer
+    clarify rows ``{"round_count": ...}``). A single-slide regeneration's rows
+    carry ``"regenerated": true`` and key ``slide_index`` on the deck slot it
+    rewrote — taken from the slide's own ID, because inside a one-slide run every
+    slide is slide 1, and these rows are read as one set with a generated deck's
+    by ``scripts/slide_analysis.py`` and ``scripts/classify_slide_failures.py``,
+    which key a slide on ``(session, step, slide_index)``. That marker is what
+    keeps "what does generating a deck cost" answerable when a learner asked for
+    a slide back in between (#194, #197). In any graph, a stage whose answer
     had to be recovered from an unreadable one carries ``model_recoveries``:
     the reason and how many JSON escapes the repair took (#195). Its absence is
     the normal case, and that is what makes the rows that have it findable.
