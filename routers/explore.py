@@ -15,11 +15,11 @@ Explore is a curated public feed, History is a User's own list — and one share
 endpoint would have to be split apart again when they do.
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session as DBSession
 
 from db import Phase, Session, get_db
-from routers.sessions import SessionList, session_list_item
+from routers.sessions import SessionList, language_first_order_by, session_list_item
 
 router = APIRouter(tags=["explore"])
 
@@ -32,20 +32,27 @@ MATERIAL_PHASES: tuple[Phase, ...] = (Phase.GENERATING, Phase.EXECUTING, Phase.C
 
 
 @router.get("/explore/sessions", response_model=SessionList)
-def list_explore_sessions(db: DBSession = Depends(get_db)) -> SessionList:
+def list_explore_sessions(
+    language: str | None = Query(default=None),
+    db: DBSession = Depends(get_db),
+) -> SessionList:
     """List the public Explore feed: Sessions that reached materials.
 
-    Newest first, and every one of them: there is no pager here, so a cap
+    Every eligible Session, and no cap: there is no pager here, so a cap
     would hide Sessions outright rather than defer them (#178 removes the
     twenty-row cap this route used to apply). Reuses the ``SessionList`` /
     ``SessionListItem`` schema from ``/sessions`` and carries no owner
     identity — no email, display name, or user id — so a Visitor sees what
     people are learning without being told who they are.
+
+    Order: the same rule as ``GET /sessions`` (#205) — when the caller passes
+    a language, the Sessions in it come first and the rest after, and newest
+    first within each group; without one, plain newest first.
     """
     rows = (
         db.query(Session)
         .filter(Session.phase.in_([p.value for p in MATERIAL_PHASES]))
-        .order_by(Session.created_at.desc())
+        .order_by(*language_first_order_by(language))
         .all()
     )
     return SessionList(sessions=[session_list_item(s) for s in rows])
