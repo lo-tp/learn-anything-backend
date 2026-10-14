@@ -21,10 +21,20 @@ from db import (
 from routers.plan import (
     StepOut,
     _ordered_materials,
+    clear_abandoned_regenerations,
     generate_materials,
     regenerate_slide_material,
     validate_plan,
 )
+
+
+def _deck_slides(client, sid: str = "a") -> list[dict]:
+    """Every slide item the deck read reports, across the steps it lists."""
+    body = client.get(f"/sessions/{sid}/materials").json()
+    return [
+        item for step in body["generated_steps"] for item in step["items"]
+        if item["type"] == "slide"
+    ]
 
 
 def _valid_plan(**overrides) -> dict:
@@ -453,6 +463,73 @@ class TestApprovePlan:
         assert resp.status_code == 500
 
 
+# --- clear_abandoned_regenerations (app startup) ---
+
+
+class TestAbandonedRegenerationMarks:
+    def test_a_fresh_process_clears_marks_left_by_one_that_died(
+        self, client, db, db_engine, deck, fake_session_factory
+    ):
+        """A mark describes a rewrite only *this* process can be running.
+
+        A rewrite killed mid-flight — a deploy, a reload, an OOM — leaves its mark
+        in a database nothing can finish. That mark is worse than its absence: it
+        tells every reader of the deck that the slide is being replaced, and it
+        refuses the next request for that slide, so the learner has no route back
+        to it. A process that has just started has no rewrite running, so every
+        mark it finds is stale.
+        """
+        db.get(SlideContent, "a_s2_slide_1").is_regenerating = True
+        db.commit()
+
+        clear_abandoned_regenerations()
+
+        assert [i["slide_id"] for i in _deck_slides(client) if i["regenerating"]] == []
+
+    def test_the_app_clears_those_marks_before_it_serves_a_request(
+        self, db, db_engine, make_session
+    ):
+        """The sweep is wired to app startup, not merely available to call.
+
+        Nothing else calls it: a test that only calls the function would still
+        pass after the startup call was deleted. So start the real app and see
+        whether the mark survives it.
+        """
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        sid = make_session(session_id="a", phase=Phase.EXECUTING).session_id
+        db.add(SlideContent(
+            slide_id="a_s1_slide_1", session_id=sid, step_id="s1",
+            content="<div/>", is_regenerating=True,
+        ))
+        db.commit()
+
+        TestingSession = sessionmaker(bind=db_engine)
+        # Entering the TestClient runs the app's startup; leaving it runs shutdown.
+        with (
+            patch("routers.plan.SessionFactory", lambda: TestingSession()),
+            TestClient(app),
+        ):
+            pass
+
+        db.expire_all()
+        assert db.get(SlideContent, "a_s1_slide_1").is_regenerating is False
+
+    def test_a_database_that_is_down_does_not_stop_the_app_starting(self):
+        """Startup reaches the database, but does not depend on it.
+
+        The rule /health already follows: a slow or unreachable Postgres shows up
+        in the logs, not as a restart loop. Clearing stale marks is a tidy-up, so
+        it must not become a reason the app cannot serve a request.
+        """
+        factory = MagicMock()
+        factory.return_value.query.side_effect = RuntimeError("db down")
+        with patch("routers.plan.SessionFactory", factory):
+            clear_abandoned_regenerations()
+
+
 # --- GET /sessions/{session_id}/materials ---
 
 
@@ -507,7 +584,8 @@ class TestGetMaterials:
         # Slides come before questions in the item list.
         assert [i["type"] for i in s2["items"]] == ["slide", "question"]
         assert s2["items"][0] == {"type": "slide",
-                                  "slide_id": "a_s2_slide_1"}
+                                  "slide_id": "a_s2_slide_1",
+                                  "regenerating": False}
         assert s2["items"][1] == {
             "type": "question", "id": "q1", "text": "?",
             "options": ["A", "B"], "correct_index": 0, "explanation": "e",
@@ -537,7 +615,76 @@ class TestGetMaterials:
         assert resp.status_code == 200
         items = resp.json()["generated_steps"][0]["items"]
         # The placeholder slot is omitted from the deck in production.
-        assert items == [{"type": "slide", "slide_id": "a_s1_slide_1"}]
+        assert items == [
+            {"type": "slide", "slide_id": "a_s1_slide_1", "regenerating": False}
+        ]
+
+    def test_a_slide_being_rewritten_is_reported_as_regenerating(
+        self, client, db, make_session
+    ):
+        """The deck read is where a client learns a rewrite is in flight.
+
+        A regenerated slide keeps its ID, so nothing else in this payload says
+        "the slide you are looking at is being replaced." `regenerating` is the
+        client's only signal that the rewrite it asked for is still running.
+        """
+        sid = make_session(session_id="a", phase=Phase.EXECUTING).session_id
+        db.add(Plan(session_id=sid, version=1, prose_summary="ps",
+                    dependency_dag="dag", steps=[{"id": "s1"}], adjustments=[]))
+        db.add(StepMaterial(
+            session_id=sid, step_id="s1",
+            slides=["a_s1_slide_1", "a_s1_slide_2"], questions=[],
+            summary={"step_id": "s1", "title": "T1", "key_points": []},
+        ))
+        db.add(SlideContent(slide_id="a_s1_slide_1", session_id=sid,
+                            step_id="s1", content="<div/>"))
+        db.add(SlideContent(slide_id="a_s1_slide_2", session_id=sid,
+                            step_id="s1", content="<div/>",
+                            is_regenerating=True))
+        db.commit()
+
+        resp = client.get(f"/sessions/{sid}/materials")
+        assert resp.status_code == 200
+        assert resp.json()["generated_steps"][0]["items"] == [
+            {"type": "slide", "slide_id": "a_s1_slide_1", "regenerating": False},
+            {"type": "slide", "slide_id": "a_s1_slide_2", "regenerating": True},
+        ]
+
+    def test_a_slide_being_rewritten_is_never_hidden_from_the_deck(
+        self, client, db, make_session, monkeypatch, auth_cookie
+    ):
+        """The placeholder filter never hides a slide that is being rewritten.
+
+        A placeholder slot is left out of a production deck because there is
+        nothing there to show. A placeholder that is being rewritten is the
+        opposite case — the deck is about to have a real slide in that slot, and
+        the rewrite is the thing a reader is waiting for. A placeholder is
+        regenerable in dev mode; the mark is honoured whatever DEV_MODE is
+        spelled.
+        """
+        monkeypatch.delenv("DEV_MODE", raising=False)
+        sid = make_session(session_id="a", phase=Phase.EXECUTING).session_id
+        db.add(Plan(session_id=sid, version=1, prose_summary="ps",
+                    dependency_dag="dag", steps=[{"id": "s1"}], adjustments=[]))
+        db.add(StepMaterial(
+            session_id=sid, step_id="s1",
+            slides=["a_s1_slide_1", "a_s1_slide_2"], questions=[],
+            summary={"step_id": "s1", "title": "T1", "key_points": []},
+        ))
+        db.add(SlideContent(slide_id="a_s1_slide_1", session_id=sid,
+                            step_id="s1", content="<div/>"))
+        db.add(SlideContent(slide_id="a_s1_slide_2", session_id=sid,
+                            step_id="s1", content="<div>ph</div>",
+                            is_placeholder=True, is_regenerating=True))
+        db.commit()
+
+        resp = client.get(f"/sessions/{sid}/materials",
+                          cookies={COOKIE_NAME: auth_cookie})
+        assert resp.status_code == 200
+        assert resp.json()["generated_steps"][0]["items"] == [
+            {"type": "slide", "slide_id": "a_s1_slide_1", "regenerating": False},
+            {"type": "slide", "slide_id": "a_s1_slide_2", "regenerating": True},
+        ]
 
     def test_placeholder_slides_visible_in_dev(self, client, db, make_session,
                                                monkeypatch):
@@ -562,12 +709,47 @@ class TestGetMaterials:
         items = resp.json()["generated_steps"][0]["items"]
         # In dev mode the placeholder keeps its visible slot.
         assert items == [
-            {"type": "slide", "slide_id": "a_s1_slide_1"},
-            {"type": "slide", "slide_id": "a_s1_slide_2"},
+            {"type": "slide", "slide_id": "a_s1_slide_1", "regenerating": False},
+            {"type": "slide", "slide_id": "a_s1_slide_2", "regenerating": False},
         ]
 
 
 # --- POST /dev/sessions/{session_id}/regenerate (dev-only) ---
+
+    def test_a_placeholder_is_listed_when_dev_mode_is_spelled_true(
+        self, client, db, make_session, monkeypatch
+    ):
+        """The deck read's dev mode is the shared predicate, not a reading of its own.
+
+        ``is_dev_mode`` — what the write gate and this endpoint's own 404 rule
+        use — accepts "true" as well as "1", and "true" is what this suite pins.
+        A deck that hides placeholders under one spelling while the regenerate
+        endpoint accepts them under that same spelling is a deck whose rewrite
+        requests have no slot to answer into.
+        """
+        monkeypatch.setenv("DEV_MODE", "true")
+        sid = make_session(session_id="a", phase=Phase.EXECUTING).session_id
+        db.add(Plan(session_id=sid, version=1, prose_summary="ps",
+                    dependency_dag="dag", steps=[{"id": "s1"}], adjustments=[]))
+        db.add(StepMaterial(
+            session_id=sid, step_id="s1",
+            slides=["a_s1_slide_1", "a_s1_slide_2"], questions=[],
+            summary={"step_id": "s1", "title": "T1", "key_points": []},
+        ))
+        db.add(SlideContent(slide_id="a_s1_slide_1", session_id=sid,
+                            step_id="s1", content="<div/>"))
+        db.add(SlideContent(slide_id="a_s1_slide_2", session_id=sid,
+                            step_id="s1", content="<div>ph</div>",
+                            is_placeholder=True))
+        db.commit()
+
+        resp = client.get(f"/sessions/{sid}/materials")
+        assert resp.status_code == 200
+        assert [i["slide_id"]
+                for i in resp.json()["generated_steps"][0]["items"]] == [
+            "a_s1_slide_1",
+            "a_s1_slide_2",
+        ]
 
 
 class TestDevRegenerate:
@@ -1290,6 +1472,103 @@ def deck(db, make_session):
 
 
 class TestRegenerateSlideMaterial:
+    def test_the_deck_stops_reporting_a_rewrite_when_a_new_slide_compiles(
+        self, client, db, db_engine, deck, fake_session_factory
+    ):
+        """The signal ends with the work, in the commit that lands the slide.
+
+        A flag that stayed true after a rewrite succeeded would be worse than no
+        flag at all: the deck would go on telling every reader that the slide is
+        being replaced, and the learner would be refused the next request for it.
+        """
+        db.get(SlideContent, "a_s2_slide_1").is_regenerating = True  # as the request left it
+        db.commit()
+
+        outcome = {"jsx": "the slide the learner asked for",
+                   "is_placeholder": False, "failed_attempts": [],
+                   "stage_timings": []}
+        with patch("routers.plan.regenerate_slide", return_value=outcome):
+            regenerate_slide_material("a", "a_s2_slide_1", None)
+
+        slides = _deck_slides(client)
+        assert [(i["slide_id"], i["regenerating"]) for i in slides] == [
+            ("a_s1_slide_1", False),
+            ("a_s2_slide_1", False),
+            ("a_s2_slide_2", False),
+        ]
+
+    def test_the_signal_ends_when_the_rewrite_produced_nothing_usable(
+        self, client, db, db_engine, deck, fake_session_factory
+    ):
+        """Keeping the learner's slide still ends the signal.
+
+        Here the deck is unchanged — same slide, same content — so the mark is
+        the only thing a reader can see. Surviving a run that produced nothing
+        would leave the slide looking like it was still being replaced.
+        """
+        db.get(SlideContent, "a_s2_slide_1").is_regenerating = True
+        db.commit()
+
+        # Every attempt failed to compile, and the placeholder could not either.
+        outcome = {"jsx": None, "is_placeholder": False,
+                   "failed_attempts": [], "stage_timings": []}
+        with patch("routers.plan.regenerate_slide", return_value=outcome):
+            regenerate_slide_material("a", "a_s2_slide_1", None)
+
+        db.expire_all()
+        assert db.get(SlideContent, "a_s2_slide_1").content == (
+            "the slide the learner does not like"
+        )
+        assert [i["slide_id"] for i in _deck_slides(client) if i["regenerating"]] == []
+
+    def test_the_signal_ends_when_the_rewrite_crashed(
+        self, client, db, db_engine, deck, fake_session_factory
+    ):
+        """A task that raised must not leave the deck mid-rewrite forever.
+
+        This is the task's normal failure mode — a node that throws, a row it
+        cannot write — and the slide keeps the content it has. A mark left
+        standing would do more than misreport the deck: the learner could never
+        ask for that slide again, because a request for a marked slide is
+        refused.
+        """
+        db.get(SlideContent, "a_s2_slide_1").is_regenerating = True
+        db.commit()
+
+        with patch("routers.plan.regenerate_slide", side_effect=RuntimeError("boom")):
+            regenerate_slide_material("a", "a_s2_slide_1", None)
+
+        db.expire_all()
+        assert db.get(SlideContent, "a_s2_slide_1").content == (
+            "the slide the learner does not like"
+        )
+        assert [i["slide_id"] for i in _deck_slides(client) if i["regenerating"]] == []
+
+        with patch("routers.plan.regenerate_slide_material"):
+            assert client.post(
+                "/sessions/a/slides/a_s2_slide_1/regenerate"
+            ).status_code == 202
+
+    def test_the_signal_ends_when_the_task_refused_the_slide_it_was_handed(
+        self, client, db, db_engine, deck, fake_session_factory
+    ):
+        """A request accepted, then refused under the lock, still ends the signal.
+
+        A plan can be adjusted between the 202 and the task's own re-check, and
+        the task answers by logging and returning. The learner was told the
+        rewrite had started; the deck cannot go on saying it still is.
+        """
+        db.get(SlideContent, "a_s2_slide_1").is_regenerating = True
+        plan = db.get(Session, "a").plan
+        plan.steps = [s for s in plan.steps if s["id"] != "s2"]
+        db.commit()
+
+        with patch("routers.plan.regenerate_slide") as regen:
+            regenerate_slide_material("a", "a_s2_slide_1", None)
+
+        assert regen.call_count == 0
+        assert [i["slide_id"] for i in _deck_slides(client) if i["regenerating"]] == []
+
     def test_the_stored_deck_is_rebuilt_for_the_one_slide(self, db, db_engine,
                                                            deck, fake_session_factory):
         """The slide's own row plus the plan and the prior summaries are enough.
@@ -1523,6 +1802,48 @@ class TestRequestSlideRegeneration:
 
         assert resp.status_code == 202
         task.assert_called_once_with("a", "a_s2_slide_1", None)
+
+    def test_the_deck_reports_the_slide_as_being_rewritten(self, client, db, deck):
+        """The signal lands with the 202, not some time after it.
+
+        A 202 says only "I started something." If the next poll of the deck
+        still looked untouched, the flag would not be a signal: a client polling
+        between the request and the background task would be told nothing is
+        happening. So the request that schedules the work also marks the slide.
+        """
+        with patch("routers.plan.regenerate_slide_material"):
+            resp = client.post("/sessions/a/slides/a_s2_slide_1/regenerate")
+        assert resp.status_code == 202
+
+        slides = _deck_slides(client)
+        assert [(i["slide_id"], i["regenerating"]) for i in slides] == [
+            ("a_s1_slide_1", False),   # another step's slide is untouched
+            ("a_s2_slide_1", True),
+            ("a_s2_slide_2", False),
+        ]
+
+    def test_a_second_request_for_a_slide_being_rewritten_is_refused(
+        self, client, db, deck
+    ):
+        """One rewrite per slide at a time — the deck's rule, applied to a slide.
+
+        `POST /dev/sessions/{id}/regenerate` refuses a session whose deck is
+        being written; this is the same rule for one slide. Without it, two
+        requests for one slide queue behind the session lock and pay for the
+        same slide twice. The rest of the deck is unaffected.
+        """
+        with patch("routers.plan.regenerate_slide_material"):
+            first = client.post("/sessions/a/slides/a_s2_slide_1/regenerate")
+            second = client.post("/sessions/a/slides/a_s2_slide_1/regenerate")
+
+        assert first.status_code == 202
+        assert second.status_code == 409
+        assert "already" in second.json()["detail"].lower()
+
+        with patch("routers.plan.regenerate_slide_material") as task:
+            other = client.post("/sessions/a/slides/a_s2_slide_2/regenerate")
+        assert other.status_code == 202
+        task.assert_called_once_with("a", "a_s2_slide_2", None)
 
     def test_blank_feedback_is_not_passed_as_a_request(self, client, db, deck):
         with patch("routers.plan.regenerate_slide_material") as task:

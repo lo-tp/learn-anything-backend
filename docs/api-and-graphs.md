@@ -148,6 +148,8 @@ class SlideContent(Base):
     step_id: Mapped[str] = mapped_column(String)
     content: Mapped[str] = mapped_column(Text)                        # the slide JSX component source
     content_spec: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {title, key_points, visual_hint} as plan_slide_contents produced it — what write_slide was asked for (#197). NULL on rows written before the column: those slides have no spec to be rewritten from.
+    is_placeholder: Mapped[bool] = mapped_column(Boolean, default=False)  # the stand-in a slide gets when it exhausts its attempts; returned only in dev mode
+    is_regenerating: Mapped[bool] = mapped_column(Boolean, default=False)  # a single-slide rewrite of this row is running; surfaced on the deck read as `regenerating` (#197)
 
     session: Mapped["Session"] = relationship(back_populates="slide_contents")
 
@@ -259,7 +261,7 @@ material_graph = material_graph_fn()
 | `POST` | `/sessions/{id}/plan/adjust` | Submit a free-text adjustment, get regenerated plan |
 | `POST` | `/sessions/{id}/plan/approve` | Approve plan, kick off background material generation (returns `202` immediately) |
 | `POST` | `/sessions/{id}/slides/{slide_id}/regenerate` | Rewrite one slide of a generated deck, from the content spec its own row stores (#197) |
-| `GET` | `/sessions/{id}/materials` | Poll material generation progress (phase + per-step summary and items) |
+| `GET` | `/sessions/{id}/materials` | Poll material generation progress (phase + per-step summary and items — a slide item carries `regenerating` while a rewrite of that slide is in flight) |
 
 ### Execution phase (no LLM — deterministic only)
 
@@ -286,7 +288,7 @@ Three gates, and which one a route uses is stated in its heading below (#178 mov
 | `require_auth` | `401` for a Visitor when `DEV_MODE` is off, open when it is on, so a local run can walk the phases without a cookie (#89) | `POST /sessions/{id}/clarify`, `POST /sessions/{id}/probe`, plan `generate`/`adjust`/`approve`, `POST /dev/sessions/{id}/regenerate`, `POST /sessions/{id}/slides/{slide_id}/regenerate` |
 | always on, `DEV_MODE` never opens it | `401` | `POST /sessions` — a Session with no one who asked for it is impossible (#145); `/auth/me`, `/review/*` — user-scoped, not public records; `GET /slides/{id}` — requires `X-Service-Token` (#103) |
 
-`DEV_MODE` is read per request, never at import.
+`DEV_MODE` is read per request, never at import. It has one meaning: `core.security.is_dev_mode`, which accepts `"true"` or `"1"`. Placeholder slides are the one place the flag decides what *content* a caller is shown rather than who may write, and both surfaces that hide them — the deck read and `GET /slides/{id}` — use that predicate, so a slide is visible in both or in neither.
 
 ### Endpoint details
 
@@ -526,7 +528,7 @@ If generation fails, the session lands in the `error` phase (terminal — the us
 
 **Auth:** none — a public read (#178). The generated deck is the Session's public record; the plan writes above it are gated.
 
-Poll material generation progress. Each generated step carries its **summary** plus an **items** array — slide items (`slide_id` only; the JSX lives in the domain DB / sandbox service) in slide order, then question items in question order. `generated_steps` is in plan step order (deterministic).
+Poll material generation progress. Each generated step carries its **summary** plus an **items** array — slide items (`slide_id`, and `regenerating`: whether a rewrite of that slide is running) in slide order, then question items in question order. `generated_steps` is in plan step order (deterministic).
 
 ```json
 // Response
@@ -537,8 +539,8 @@ Poll material generation progress. Each generated step carries its **summary** p
       "step_id": "s0",
       "summary": { "step_id": "s0", "title": "Truths", "key_points": ["kp1", "kp2"] },
       "items": [
-        { "type": "slide", "slide_id": "abc123_s0_slide_1" },
-        { "type": "slide", "slide_id": "abc123_s0_slide_2" },
+        { "type": "slide", "slide_id": "abc123_s0_slide_1", "regenerating": false },
+        { "type": "slide", "slide_id": "abc123_s0_slide_2", "regenerating": true },
         { "type": "question", "id": "s0_q1", "text": "...", "options": ["a", "b"], "correct_index": 0, "explanation": "..." }
       ]
     }
@@ -546,7 +548,9 @@ Poll material generation progress. Each generated step carries its **summary** p
 }
 ```
 
-- `items` is a discriminated union on `type`: `"slide"` (carries `slide_id` only) and `"question"` (`id`, `text`, `options`, `correct_index`, `explanation`).
+- `items` is a discriminated union on `type`: `"slide"` (carries `slide_id` and `regenerating`) and `"question"` (`id`, `text`, `options`, `correct_index`, `explanation`).
+- `regenerating` is the deck's in-flight signal for a single slide (#197). A rewritten slide keeps its ID, so without it a client has nothing to compare against the request it made: the deck read looks identical before, during and after a rewrite. `phase` is the same kind of signal for a whole deck.
+- A slide with `regenerating: true` is never omitted from the deck, not even where a placeholder slot would be: that slot is about to hold a real slide, and the rewrite is what a reader of it is waiting for.
 
 Behavior by session phase:
 
@@ -603,13 +607,24 @@ It then runs the material graph's own `write_slide` and `compile_slide` over tha
 | `slide_id` is not in this session | `404` |
 | a placeholder slide, outside `DEV_MODE` | `404` — invisible here exactly as in the deck read and `GET /slides/{id}` |
 | session phase is `generating` | `409` — the deck is still being written |
+| a rewrite of this slide is already running | `409` — one rewrite per slide at a time, on the mark the first request left |
 | no stored `content_spec` (a row written before #197) | `409` — the whole-deck route is what remains for that slide |
 | the plan no longer has the slide's step | `409` (a plan can be adjusted after its deck was generated) |
 | mock mode | `400` |
 
 Every stage a regeneration runs writes its `graph_stage_timings` row as a deck generation does. Those rows are keyed on the **deck slot** the regeneration rewrote — taken from the slide's own ID, because inside a one-slide run every slide is slide 1 — and carry `context.regenerated: true`, so `scripts/slide_analysis.py` can report asking-for-a-slide-back costs apart from generating-a-deck costs instead of folding them together (#194, #197). The failed attempts land in `failed_slides` under the same deck slot. One regeneration at a time per session: it takes the same per-session lock the deck driver holds.
 
-**Knowing when it is done:** the slide keeps its ID, so `GET /sessions/{id}/materials` is unchanged by a regeneration, and there is no status endpoint for one in flight. A client re-reads the slide (through the Sandbox, which fetches the source from this backend per request). If the frontend needs an explicit in-flight/completed signal, that is separate API surface and not part of #197.
+**Knowing when it is done.** The request marks the slide — `slide_contents.is_regenerating`, written in the same commit that answers the `202` — and the deck read surfaces that mark as `regenerating` on the slide item. So the work is visible in the very next poll, not whenever the thread pool reaches it: a `202` that left the deck looking untouched would not be a signal at all.
+
+The mark is cleared on every outcome. Where the task makes a commit, it clears it *in that commit* — which is what makes "the new slide is here" and "no rewrite is running" one fact a reader cannot catch out of step — including the outcome where nothing usable compiled and the deck keeps the slide the learner has. Where an exit never reached a commit (a refusal under the lock, a task that raised), a final guard clears it. Either way the slide is open to a new request again; a mark left standing would refuse it forever.
+
+Two requests for one slide that arrive before either has marked the row are both accepted and serialised by the per-session lock the deck driver holds; what the mark refuses is the repeat a client actually makes — a second click, a retry while the first is still running.
+
+The mark describes a rewrite *this process* is running: the work is an in-process `BackgroundTasks` task, so a run killed by a deploy, a reload or an OOM leaves its mark in a database nothing can finish. App startup therefore clears every mark it finds (`clear_abandoned_regenerations`) — a process that has just started is rewriting nothing, so every mark it finds is stale. That premise is the deployment's: production runs **one** backend replica (infra's `manifests/overlays/prod/replica-floor.yaml`), so a starting process never clears a mark a live one owns. The window that does overlap is a rolling replace — a pod still finishing a rewrite inside its 5s graceful shutdown while its replacement boots — and what it costs is a deck briefly reporting "no rewrite running" while one still is, plus a repeat request accepted and paid for. The alternative, a mark that outlives its work and refuses that slide forever, is the worse failure.
+
+Like the rest of startup, the sweep is best-effort: a slow database must not become a reason the app cannot serve a request. Like the rest of startup, it is best-effort: a slow database must not become a reason the app cannot serve a request.
+
+So a client polls `GET /sessions/{id}/materials` for the flag, and re-reads the slide itself through the Sandbox (which fetches the source from this backend per request).
 
 #### `GET /sessions/{id}/steps/{step_id}`
 
