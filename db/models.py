@@ -284,8 +284,14 @@ class SlideContent(Base):
     content_spec: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     # True for the placeholder slide generated when a slide exhausts all
     # attempts. Placeholders are always generated and persisted, but the
-    # endpoints only return them in dev mode (DEV_MODE=1).
+    # endpoints only return them in dev mode (``core.security.is_dev_mode``).
     is_placeholder: Mapped[bool] = mapped_column(Boolean, default=False)
+    # True while a single-slide regeneration of this row is running (#197): the
+    # signal the deck read reports as ``regenerating``, because a rewritten slide
+    # keeps its ID. Written by the request that schedules the work — the way
+    # ``Session.phase`` is set to "generating" before a deck run — and cleared by
+    # the task on every outcome, including a crashed one.
+    is_regenerating: Mapped[bool] = mapped_column(Boolean, default=False)
 
     session: Mapped[Session] = relationship(back_populates="slide_contents")
 
