@@ -3,7 +3,9 @@
 Reads ``graph_stage_timings`` (per-stage wall-clock durations) and
 ``failed_slides`` (one row per failed compile attempt) and prints:
 
-  1. Duration stats per stage (count / min / mean / p50 / p90 / max).
+  1. Duration stats per stage (count / min / mean / p50 / p90 / max),
+     with a single-slide regeneration's rows reported apart from a
+     generated deck's (#197).
   2. write_slide duration by attempt number (1st = most creative, ...).
   3. Retry/failure stats: how many slides needed 1, 2, 3+ attempts,
      overall failure rate, and exhausted slides.
@@ -115,14 +117,27 @@ def analyze(session_id: str | None, graph: str, since: datetime | None) -> None:
         return
 
     # --- 1. Duration stats per stage ---
+    # A single-slide regeneration runs the same stages under the same names, so
+    # its rows are counted apart: a number for what generating a deck costs stays
+    # a number for what generating a deck costs (#194, #197).
     by_stage: dict[str, list[float]] = {}
+    by_stage_regen: dict[str, list[float]] = {}
     for t in timings:
-        by_stage.setdefault(t.stage, []).append(t.duration_seconds)
+        target = (
+            by_stage_regen
+            if (t.context or {}).get("regenerated")
+            else by_stage
+        )
+        target.setdefault(t.stage, []).append(t.duration_seconds)
 
     print("1. Duration by stage")
     print(f"  {'stage':<24} {'stats'}")
     for stage in sorted(by_stage, key=lambda s: -sum(by_stage[s])):
         print(f"  {stage:<24} {_duration_stats(by_stage[stage])}")
+    if by_stage_regen:
+        print("  single-slide regeneration (asked for afterwards):")
+        for stage in sorted(by_stage_regen, key=lambda s: -sum(by_stage_regen[s])):
+            print(f"    {stage:<22} {_duration_stats(by_stage_regen[stage])}")
     print()
 
     # --- 2. write_slide duration by attempt number ---

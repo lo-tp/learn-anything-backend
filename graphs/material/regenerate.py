@@ -46,7 +46,10 @@ class SlideRegeneration(TypedDict):
     slide gets when it exhausts its attempts — a placeholder is what the deck
     already has, so a caller deciding whether to keep it should read it as a
     regeneration that did not succeed. ``failed_attempts`` and
-    ``stage_timings`` are the same records the graph's driver persists.
+    ``stage_timings`` are the records the graph's driver persists, exactly as
+    the nodes wrote them: this module does not know which slide of which deck it
+    was asked about, and the rows are keyed on a deck slot, so the caller that
+    does know attributes them (``routers/plan.py``).
     """
 
     jsx: str | None
@@ -69,19 +72,6 @@ def _advance(state: MaterialState, update: dict[str, Any]) -> MaterialState:
         else:
             merged[key] = value
     return cast(MaterialState, merged)
-
-
-def _attributed(entry: dict[str, Any]) -> dict[str, Any]:
-    """Mark a stage row as the work of a regeneration, not of a generation.
-
-    Both run the same stages under the same names, and #194's rows are read
-    afterwards to ask what generating a deck costs. A regeneration's rows that
-    say nothing would be counted into that number silently.
-    """
-    return {
-        **entry,
-        "context": {**(entry.get("context") or {}), "regenerated": True},
-    }
 
 
 def regenerate_slide(
@@ -111,8 +101,8 @@ def regenerate_slide(
     Retries are the graph's: up to ``MAX_MATERIAL_ATTEMPTS`` write attempts, each
     with the sampling profile its attempt number selects, ending the way the
     graph ends — with a placeholder when the last attempt exhausts. Returns the
-    compiled JSX rather than writing it anywhere; persisting a slide is the
-    caller's.
+    compiled JSX rather than writing it anywhere: persisting a slide, and saying
+    which slide of which deck the rows describe, is the caller's.
     """
     write_slide = make_write_slide(llm)
     compile_slide = make_compile_slide(llm)
@@ -145,9 +135,10 @@ def regenerate_slide(
 
         failed.extend(compiled.get("failed_attempts") or [])
         timings.extend(
-            _attributed(t)
-            for t in [*(wrote.get("stage_timings") or []),
-                      *(compiled.get("stage_timings") or [])]
+            [
+                *(wrote.get("stage_timings") or []),
+                *(compiled.get("stage_timings") or []),
+            ]
         )
 
         if compiled.get("compile_result") == "success":

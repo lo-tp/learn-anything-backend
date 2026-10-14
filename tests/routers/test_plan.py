@@ -1237,13 +1237,18 @@ class TestPlanStageTimings:
 _UNITS_SPEC = {
     "title": "Units", "key_points": ["1 N = 1 kg m/s^2"], "visual_hint": "a scale",
 }
+_UNITS_WORKED_SPEC = {
+    "title": "Working in newtons", "key_points": ["F = 2 kg x 3 m/s^2 = 6 N"],
+    "visual_hint": "a worked example",
+}
 
 
 @pytest.fixture()
 def deck(db, make_session):
-    """A session with a completed step A, a generated step B, and one B slide.
+    """A session with a completed step A and a generated step B of two slides.
 
-    The state a single-slide regeneration has to rebuild for itself.
+    The state a single-slide regeneration has to rebuild for itself — including
+    a deck where the slide being regenerated is not the first one.
     """
     sid = make_session(
         session_id="a",
@@ -1264,7 +1269,7 @@ def deck(db, make_session):
         is_complete=True,
     ))
     db.add(StepMaterial(
-        session_id=sid, step_id="s2", slides=["a_s2_slide_1"],
+        session_id=sid, step_id="s2", slides=["a_s2_slide_1", "a_s2_slide_2"],
         questions=[{"id": "s2_q1", "text": "?", "options": ["A"],
                     "correct_index": 0, "explanation": "e"}],
         summary={"step_id": "s2", "title": "Units", "key_points": ["1 N"]},
@@ -1274,6 +1279,11 @@ def deck(db, make_session):
         slide_id="a_s2_slide_1", session_id=sid, step_id="s2",
         content="the slide the learner does not like",
         content_spec=_UNITS_SPEC,
+    ))
+    db.add(SlideContent(
+        slide_id="a_s2_slide_2", session_id=sid, step_id="s2",
+        content="the deck's second slide",
+        content_spec=_UNITS_WORKED_SPEC,
     ))
     db.commit()
     return sid
@@ -1311,7 +1321,7 @@ class TestRegenerateSlideMaterial:
 
         # Nothing else in the session moved.
         step_row = db.query(StepMaterial).filter_by(session_id="a", step_id="s2").one()
-        assert step_row.slides == ["a_s2_slide_1"]
+        assert step_row.slides == ["a_s2_slide_1", "a_s2_slide_2"]
         assert step_row.summary["key_points"] == ["1 N"]
         assert db.query(StepMaterial).filter_by(step_id="s1").one().slides == [
             "a_s1_slide_1"
@@ -1421,6 +1431,80 @@ class TestRegenerateSlideMaterial:
 # --- POST /sessions/{session_id}/slides/{slide_id}/regenerate ---
 
 
+    def test_a_regeneration_of_a_later_slide_records_the_slot_it_changed(
+        self, db, db_engine, deck, fake_session_factory
+    ):
+        """The rows describe the deck slot, not the one-slide run's counting.
+
+        graph_stage_timings and failed_slides are keyed on
+        (session, step, slide_index) by scripts/slide_analysis.py. Inside a
+        single-slide run every slide is slide 1; a row that said 1 here would
+        attribute this slide's failures to whichever slide already holds that
+        key.
+        """
+        outcome = {
+            "jsx": None, "is_placeholder": False,
+            "failed_attempts": [
+                {"index": 0, "prompt": "p", "jsx": "broken", "error": "syntax error"},
+            ],
+            "stage_timings": [
+                {"stage": "write_slide",
+                 "context": {"step_id": "s2", "slide_index": 1, "attempt": 1},
+                 "duration_seconds": 1.0},
+                {"stage": "compile_slide",
+                 "context": {"step_id": "s2", "slide_index": 1, "attempt": 1},
+                 "duration_seconds": 0.5},
+            ],
+        }
+        with patch("routers.plan.regenerate_slide", return_value=outcome):
+            regenerate_slide_material("a", "a_s2_slide_2", None)
+
+        db.expire_all()
+        assert db.get(SlideContent, "a_s2_slide_2").content == "the deck's second slide"
+        assert db.get(SlideContent, "a_s2_slide_1").content == (
+            "the slide the learner does not like"
+        )
+
+        failed = db.query(FailedSlide).filter_by(session_id="a", step_id="s2").one()
+        assert failed.slide_index == 2
+
+        timings = db.query(GraphStageTiming).filter_by(session_id="a").order_by(
+            GraphStageTiming.id
+        ).all()
+        assert [t.context["slide_index"] for t in timings] == [2, 2]
+        assert all(t.context["regenerated"] is True for t in timings)
+
+    def test_a_step_that_never_finished_is_not_an_established_concept(
+        self, db, db_engine, deck, fake_session_factory
+    ):
+        """A provisional row establishes nothing (the deck driver skips them too).
+
+        A step that crashed mid-generation leaves a row whose summary is an
+        empty placeholder. Feeding it to the model as a concept the learner has
+        already been taught is a fact the deck never taught.
+        """
+        plan = db.get(Session, "a").plan
+        plan.steps = [
+            {"id": "s0", "title": "Half-written", "description": "d",
+             "depends_on": [], "depth": 0},
+            *plan.steps,
+        ]
+        db.add(StepMaterial(
+            session_id="a", step_id="s0", slides=[], questions=[],
+            summary={"step_id": "s0", "title": "Half-written", "key_points": []},
+            is_complete=False,
+        ))
+        db.commit()
+
+        outcome = {"jsx": "new slide", "is_placeholder": False,
+                   "failed_attempts": [], "stage_timings": []}
+        with patch("routers.plan.regenerate_slide", return_value=outcome) as regen:
+            regenerate_slide_material("a", "a_s2_slide_1", None)
+
+        assert regen.call_args.kwargs["established_concepts"] == [
+            {"step_id": "s1", "title": "Force", "key_points": ["F = ma"]},
+        ]
+
 class TestRequestSlideRegeneration:
     def test_accepted_and_started_in_the_background(self, client, db, deck):
         with patch("routers.plan.regenerate_slide_material") as task:
@@ -1448,6 +1532,32 @@ class TestRequestSlideRegeneration:
 
         assert resp.status_code == 202
         task.assert_called_once_with("a", "a_s2_slide_1", None)
+
+    def test_the_acknowledgement_is_in_the_learners_language(self, client, db, deck):
+        """A status reply the learner reads is written in their language.
+
+        The same rule the approve acknowledgement follows (docs: "every
+        user-facing reply … in that language"); the English text is only what
+        ``localize_status`` falls back to when translation fails.
+        """
+        db.get(Session, "a").language = "Spanish"
+        db.commit()
+
+        with (
+            patch("routers.plan.regenerate_slide_material"),
+            patch(
+                "routers.plan.localize_status",
+                return_value="Regeneración empezada.",
+            ) as localize,
+        ):
+            resp = client.post(
+                "/sessions/a/slides/a_s2_slide_1/regenerate",
+                json={"feedback": "más visual"},
+            )
+
+        assert resp.status_code == 202
+        assert resp.json()["message"] == "Regeneración empezada."
+        assert localize.call_args[0][1] == "Spanish"
 
     def test_unknown_slide_is_404(self, client, db, deck):
         with patch("routers.plan.regenerate_slide_material") as task:
@@ -1601,3 +1711,4 @@ class TestRequestSlideRegeneration:
             "the slide the learner does not like"
         )
         assert db.query(GraphStageTiming).filter_by(session_id="a").all() == []
+
