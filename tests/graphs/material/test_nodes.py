@@ -330,6 +330,31 @@ class TestWriteSlide:
         human_content = self._human_content()
         assert "failed to compile" not in human_content
 
+    def test_learner_feedback_reaches_the_slide_request(self):
+        """#197: what the learner asked for is part of what is asked for."""
+        human_content = self._human_content(
+            learner_feedback="make it more visual"
+        )
+        assert "make it more visual" in human_content
+
+    def test_no_feedback_line_when_nothing_was_asked(self):
+        human_content = self._human_content()
+        assert "The learner asked" not in human_content
+
+    def test_repair_turn_keeps_what_the_learner_asked_for(self):
+        """A repair turn must not drop the request it is repairing around."""
+        _, invoke = self._run(
+            self._state(learner_feedback="make it more visual"),
+            writes=[SlideOut(code="broken"), SlideOut(code="fixed")],
+            validates=[
+                self._validate_fail("syntax error at line 2", "broken"),
+                self._validate_ok("fixed"),
+            ],
+        )
+        repair_human = invoke.call_args_list[1][0][2][-1].content
+        assert "make it more visual" in repair_human
+        assert "syntax error" in repair_human
+
     def test_records_stage_timing(self):
         result, _ = self._run(
             self._state(),

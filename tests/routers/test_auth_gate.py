@@ -148,6 +148,12 @@ class TestSessionWritesRefuseAVisitor:
         resp = client.post("/dev/sessions/any-1/regenerate")
         assert resp.status_code == 401
 
+    def test_regenerating_one_slide_refuses_a_visitor(self, client, monkeypatch):
+        # The deck is public; changing a slide in it is a write (#178).
+        monkeypatch.delenv("DEV_MODE", raising=False)
+        resp = client.post("/sessions/any-1/slides/any-1_s1_slide_1/regenerate")
+        assert resp.status_code == 401
+
     def test_a_gated_write_refuses_an_unreadable_cookie(self, client, monkeypatch):
         # A cookie that does not decode is a Visitor, not a User (#89): on a
         # public read it changes nothing (above); on a gated write it is still
