@@ -239,8 +239,8 @@ material_graph = material_graph_fn()
 | Method | Path | Purpose |
 |--------|------|---------|
 | `POST` | `/sessions` | Create session, start goal capture |
-| `GET` | `/sessions` | List all sessions (newest first), optionally filtered by one or more `?phase=` values |
-| `GET` | `/explore/sessions` | The public Explore feed: Sessions that reached materials, newest first |
+| `GET` | `/sessions` | List all sessions, optionally filtered by one or more `?phase=` values, and (with `?language=`) the Sessions in that language first |
+| `GET` | `/explore/sessions` | The public Explore feed: Sessions that reached materials, and (with `?language=`) the Sessions in that language first |
 | `GET` | `/sessions/{id}` | Get current session state & progress |
 | `POST` | `/sessions/{id}/clarify` | Submit clarification answer (if goal was too broad) |
 
@@ -292,7 +292,9 @@ Three gates, and which one a route uses is stated in its heading below (#178 mov
 
 **Auth:** none — a public read (#178). A Visitor is answered the same list as a signed-in User, and the payload carries no owner identity.
 
-Lists all sessions, newest `created_at` first. Filter with a repeatable `phase` query parameter (OR semantics), e.g. `GET /sessions?phase=generating&phase=probing`. An invalid phase value returns `422` (enum validation). Nothing is capped: the surfaces that render this list have no pager.
+Lists all sessions. Filter with a repeatable `phase` query parameter (OR semantics), e.g. `GET /sessions?phase=generating&phase=probing`. An invalid phase value returns `422` (enum validation). Nothing is capped: the surfaces that render this list have no pager.
+
+Language preference (`?language=`, #205): pass the user's preferred language and the Sessions in it come first, the rest after, newest `created_at` first within each group — e.g. `GET /sessions?language=English`. The backend stores no per-User preference; the caller supplies it. Matching ignores case and padding, and a legacy row with no stored language is read as the default language (English). Without the parameter (or with a blank one) the list is plain newest `created_at` first. It changes order only — no Session is hidden or added.
 
 ```json
 // Response
@@ -320,7 +322,7 @@ Lists all sessions, newest `created_at` first. Filter with a repeatable `phase` 
 
 **Auth:** none — a public read, and this router has never asked for a cookie (#144).
 
-The Explore feed: the Sessions that reached material generation (`generating`, `executing`, `complete`), newest `created_at` first, **uncapped** (#178 — this surface has no pager, so a cap drops Sessions outright rather than deferring them; the route used to answer twenty). No `?phase=` parameter: which phases qualify is this feed's own server-side rule (`MATERIAL_PHASES`), kept in step with the phases the app requests from `GET /sessions` until the two surfaces genuinely diverge — which is why they are separate routes, not one. Same `SessionList` / `SessionListItem` schema as `GET /sessions`, and no owner identity in the payload.
+The Explore feed: the Sessions that reached material generation (`generating`, `executing`, `complete`), **uncapped** (#178 — this surface has no pager, so a cap drops Sessions outright rather than deferring them; the route used to answer twenty). Order follows the same rule as `GET /sessions` (#205): with `?language=` the Sessions in that language come first and the rest after, newest `created_at` first within each group; without it, plain newest `created_at` first. No `?phase=` parameter: which phases qualify is this feed's own server-side rule (`MATERIAL_PHASES`), kept in step with the phases the app requests from `GET /sessions` until the two surfaces genuinely diverge — which is why they are separate routes, not one. Same `SessionList` / `SessionListItem` schema as `GET /sessions`, and no owner identity in the payload.
 
 ```json
 // Response — identical shape to GET /sessions
