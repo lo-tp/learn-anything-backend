@@ -2,6 +2,7 @@
 
 import logging
 import os
+from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
@@ -31,7 +32,21 @@ if is_mock_mode():
 
 PORT = int(os.getenv("PORT", "8000"))
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start serving with no work in flight.
+
+    A regeneration mark means "this process is rewriting this slide", and a
+    process that has just started is rewriting nothing — so every mark in the
+    database was left by one that died. Clearing them is what keeps the deck
+    honest and keeps a slide regenerable (a marked slide refuses new requests).
+    """
+    plan.clear_abandoned_regenerations()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 FRONTEND_DOMAIN = os.getenv("FRONTEND_DOMAIN", "http://localhost:3000")
 

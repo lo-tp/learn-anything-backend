@@ -19,10 +19,14 @@ row keeps the content spec it was written from, so
 ``regenerate_slide_material``: a background task that rebuilds everything
 ``write_slide`` needs from this database and runs the graph's own nodes over one
 spec — no graph, no checkpointer, no interrupt (#197).
+
+A rewrite marks the row it is running (``is_regenerating``): the mark is what
+tells a client a rewrite is in flight, what makes a second request for the same
+slide a refusal, and what app startup clears when a previous process left one
+behind. ``docs/api-and-graphs.md`` states the contract.
 """
 
 import logging
-import os
 import threading
 import time
 from collections import deque
@@ -135,6 +139,11 @@ class SummaryOut(BaseModel):
 class SlideItem(BaseModel):
     type: Literal["slide"]
     slide_id: str
+    # "A rewrite of this slide is running." A rewritten slide keeps its ID, so
+    # this is the only thing in the deck a client can compare its own request
+    # against (#197). No default: a slide item that does not say is one that is
+    # lying.
+    regenerating: bool
 
 
 class QuestionItem(BaseModel):
@@ -529,6 +538,60 @@ def _regeneration_timings(timings: list[dict], deck_position: int) -> list[dict]
     ]
 
 
+def _clear_regeneration_mark(db: DBSession, slide_id: str) -> None:
+    """Clear the in-flight mark on a row that still carries it.
+
+    Idempotent: once the task has made its own commit the row is already clear,
+    so this writes nothing. It exists for the exits that never reached that
+    commit — a refusal under the lock, or a task that raised.
+    """
+    slide = db.get(SlideContent, slide_id)
+    if slide is not None and slide.is_regenerating:
+        slide.is_regenerating = False
+        db.commit()
+
+
+def clear_abandoned_regenerations() -> None:
+    """Clear every in-flight mark the previous process left behind.
+
+    A mark describes a rewrite this process is running — the rewrite *is* a
+    FastAPI background task, so it cannot outlive the process that started it.
+    A run killed by a deploy, a reload or an OOM leaves its mark in a database
+    nothing can finish, and that mark is worse than no mark: it tells every
+    reader of the deck that a slide is being replaced, and it refuses the next
+    request for that slide, which is the learner's only route back to it.
+
+    Called from app startup, where no rewrite is running by definition, so every
+    mark found is stale. That premise is the deployment's, not the code's:
+    production runs one backend replica (infra's
+    ``manifests/overlays/prod/replica-floor.yaml``), so a starting process is
+    never clearing a mark some other live process owns. The one window that does
+    overlap is a rolling replace — a pod still finishing a rewrite inside its 5s
+    graceful shutdown while its replacement boots. What that costs is a deck that
+    briefly reports "no rewrite running" while one still is, and a learner's
+    repeat request accepted and paid for; the alternative — a mark that outlives
+    its work and refuses that slide forever — is the worse of the two.
+
+    Best-effort: a slow or unreachable database must not become a reason the app
+    cannot serve a request — the rule ``/health`` follows for the same reason.
+    """
+    db = SessionFactory()
+    try:
+        cleared = db.query(SlideContent).filter(
+            SlideContent.is_regenerating.is_(True)
+        ).update({"is_regenerating": False}, synchronize_session=False)
+        db.commit()
+        if cleared:
+            logger.warning(
+                "Cleared %d regeneration mark(s) left by a previous process", cleared
+            )
+    except Exception:  # startup does not depend on the database — same rule as /health
+        db.rollback()
+        logger.exception("Could not clear stale regeneration marks")
+    finally:
+        db.close()
+
+
 def regenerate_slide_material(
     session_id: str, slide_id: str, feedback: str | None
 ) -> None:
@@ -548,8 +611,16 @@ def regenerate_slide_material(
     append-only history, the same policy the deck driver follows.
 
     Takes the per-session generation lock: a slide is not rewritten while the
-    deck it belongs to is being written, and two requests for the same slide do
-    not both answer it.
+    deck it belongs to is being written. Two requests for the same slide never
+    reach that queue at all — the second is refused by the endpoint, on the mark
+    the first left.
+
+    The request's mark is cleared on every outcome that reached one, in the
+    task's own commit where there is one and in a final guard where there is
+    not. Mock mode returns before any of this, and cannot have a mark to clear:
+    the endpoint refuses a slide rewrite there outright. An abandoned mark — the
+    work died with the process — is what
+    :func:`clear_abandoned_regenerations` answers at startup.
     """
     if is_mock_mode():
         return
@@ -640,6 +711,12 @@ def regenerate_slide_material(
                     "has",
                     session_id, slide_id, len(result["failed_attempts"]),
                 )
+            # The rewrite is over either way: the learner got the slide they
+            # asked for, or the deck kept the one they already have. Clearing
+            # the mark in this same commit is what makes "the new slide is
+            # here" and "no rewrite is running" one fact a reader cannot catch
+            # out of step.
+            slide.is_regenerating = False
             db.commit()
         except Exception:
             db.rollback()
@@ -648,6 +725,10 @@ def regenerate_slide_material(
                 session_id, slide_id, time.monotonic() - started,
             )
         finally:
+            # An exit that never reached that commit — a refusal under the lock,
+            # or a task that raised — still has to end the signal, or the deck
+            # goes on reporting a rewrite that is not running.
+            _clear_regeneration_mark(db, slide_id)
             db.close()
 
 
@@ -1079,6 +1160,14 @@ def request_slide_regeneration(
     in the background and the row is replaced when a new slide compiles. A
     regeneration that exhausts its attempts changes nothing — the slide the
     learner has stays.
+
+    The request also marks the slide (``is_regenerating``), in the commit that
+    answers it, and the deck read surfaces the mark as ``regenerating`` on the
+    slide item. A ``202`` on its own tells a client only that something started,
+    and a rewritten slide keeps its ID, so the mark is the only thing it has to
+    watch; a second request for a marked slide is refused, which is the rule the
+    whole-deck route already holds for a deck. Clearing the mark is the task's
+    job, on every outcome.
     """
     # #118: mock mode never generates slides, so there is no slide to rewrite.
     if is_mock_mode():
@@ -1100,6 +1189,17 @@ def request_slide_regeneration(
             status_code=409,
             detail="Material generation is still running for this session",
         )
+    # One rewrite per slide at a time, which is the rule the whole-deck route
+    # already holds for a deck: a second request is refused instead of queueing
+    # behind the first and paying for the same slide twice. Two requests that
+    # arrive together, before either has marked the row, are still both accepted
+    # and serialised by the task's per-session lock — the mark is what makes the
+    # repeated request visible to ask about, not a second lock.
+    if slide.is_regenerating:
+        raise HTTPException(
+            status_code=409,
+            detail="This slide is already being regenerated",
+        )
     if _plan_position(session, slide.step_id) is None:
         raise HTTPException(
             status_code=409,
@@ -1113,6 +1213,14 @@ def request_slide_regeneration(
                 "before specs were stored. Regenerate the whole deck instead."
             ),
         )
+
+    # The mark is written here, in the request that is answered with the 202,
+    # for the same reason `approve_plan` writes `phase = generating` before it
+    # schedules a deck run: the work has to be visible in the very next read,
+    # not whenever the thread pool gets to it. Clearing it is the task's job, on
+    # every outcome.
+    slide.is_regenerating = True
+    db.commit()
 
     feedback = ((body.feedback or "") if body is not None else "").strip()
     background_tasks.add_task(
@@ -1154,13 +1262,24 @@ def get_materials(session_id: str, db: DBSession = Depends(get_db)) -> Materials
 
     # Placeholder slides (a failed slide's stand-in) are always generated
     # and persisted, but are only returned here in dev mode — in production
-    # the slot is omitted from the deck.
-    if os.getenv("DEV_MODE") == "1":
+    # the slot is omitted from the deck. ``is_dev_mode`` is the only reading of
+    # that flag this endpoint may use, so it agrees with the write gate and with
+    # GET /slides/{slide_id} about which slides exist.
+    #
+    # One pass over the deck's rows: which slots are placeholders, and which are
+    # being rewritten right now. A slide the deck is rewriting is never hidden by
+    # the placeholder filter: that slot is about to hold a real slide, and the
+    # rewrite is what a reader of that slot is waiting for.
+    deck_rows = {s.slide_id: s for s in session.slide_contents}
+    if is_dev_mode():
         placeholder_ids: set[str] = set()
     else:
         placeholder_ids = {
-            s.slide_id for s in session.slide_contents if s.is_placeholder
+            sid for sid, s in deck_rows.items() if s.is_placeholder
         }
+    regenerating_ids = {
+        sid for sid, s in deck_rows.items() if s.is_regenerating
+    }
 
     generated_steps = [
         MaterialOut(
@@ -1168,9 +1287,13 @@ def get_materials(session_id: str, db: DBSession = Depends(get_db)) -> Materials
             summary=SummaryOut(**m.summary),
             items=[
                 *[
-                    SlideItem(type="slide", slide_id=sid)
+                    SlideItem(
+                        type="slide",
+                        slide_id=sid,
+                        regenerating=sid in regenerating_ids,
+                    )
                     for sid in m.slides
-                    if sid not in placeholder_ids
+                    if sid not in placeholder_ids or sid in regenerating_ids
                 ],
                 *[QuestionItem(type="question", **q) for q in m.questions],
             ],
