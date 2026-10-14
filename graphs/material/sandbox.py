@@ -387,6 +387,78 @@ def wrap_mathjax_context(code: str) -> tuple[str, bool]:
     return rewritten + wrapper, True
 
 
+# --- Math-syntax contract: math inside <MathJax> must be AsciiMath ---
+#
+# The slide prompt mandates AsciiMath in backticked strings and forbids
+# LaTeX by name, but the model still emits backslash macros (measured: 526 of
+# 606 stored slide components carry one, #198 problem 2). A backslash inside
+# a <MathJax> string compiles green and passes the sandbox's headless gate,
+# yet the browser harness loads only the AsciiMath input, where a backslash
+# has no meaning — the macro renders as literal text. Like the context
+# contract, this is a render-time rule no compiler can see, so validate_jsx
+# is the seam that enforces it. Unlike the context contract there is no
+# deterministic repair (a macro must be rewritten, not mechanically
+# converted), so a violation is always reported and feeds a self-repair turn.
+
+# A <MathJax> element with its content — the only place math syntax may live.
+_MATHJAX_BLOCK_RE = re.compile(r"<MathJax\b[^>]*>(.*?)</MathJax>", re.DOTALL)
+# A macro token: one or more backslashes (the source may carry the escaped
+# ``\\`` form) followed by a run of macro letters, or one \( / \) delimiter.
+_MACRO_TOKEN_RE = re.compile(r"\\+(?:[a-zA-Z]+|[()])")
+
+# The LLM-facing wording of the math-syntax violation (also what
+# ``classify_compile_error`` maps to ``math_notation``).
+MATHJAX_MATH_RULE = (
+    "Math inside <MathJax> must be AsciiMath: the slide loads only the "
+    "AsciiMath input, so LaTeX (backslash macros such as \\sqrt{I} or "
+    "\\frac{a}{b}) is not rendered and shows up as literal text. Rewrite "
+    "the flagged macros in AsciiMath — \\sqrt{I} → sqrt(I), "
+    "\\frac{a}{b} → frac(a)(b), \\text{x} → text(x)."
+)
+
+
+def _latex_in_mathjax(source: str) -> list[str]:
+    """The offending backslash tokens a slide carries inside <MathJax>
+    elements.
+
+    Returns the offending macro tokens in first-seen order, canonical
+    single-backslash form; empty when no math block carries a backslash. Any
+    backslash in a math block is a violation — AsciiMath has no backslash at
+    all — so a violating block always contributes at least one entry: a
+    block whose backslash(es) have no readable macro name after them is
+    reported as a bare ``\\``. Best-effort by design: an aliased MathJax
+    component is not detected — the prompt mandates the tag directly.
+    """
+    found: list[str] = []
+    for block in _MATHJAX_BLOCK_RE.findall(source):
+        if "\\" not in block:
+            continue
+        tokens = _MACRO_TOKEN_RE.findall(block)
+        if not tokens:
+            if "\\" not in found:
+                found.append("\\")
+            continue
+        for token in tokens:
+            canonical = "\\" + token.lstrip("\\")
+            if canonical not in found:
+                found.append(canonical)
+    return found
+
+
+def math_syntax_violation(source: str) -> str:
+    """The LLM-facing math-syntax contract error for a slide source.
+
+    ``""`` when the math is clean AsciiMath. Otherwise the rule wording plus
+    the offending macros named in canonical single-backslash form, so the
+    self-repair turn — or a persisted failed attempt — shows exactly what to
+    rewrite.
+    """
+    macros = _latex_in_mathjax(source)
+    if not macros:
+        return ""
+    return f"{MATHJAX_MATH_RULE} Flagged: {', '.join(macros)}"
+
+
 def deterministic_repair(code: str) -> tuple[str, list[str]]:
     """Apply safe, mechanical repairs to raw slide JSX before validation.
 
@@ -423,17 +495,41 @@ def deterministic_repair(code: str) -> tuple[str, list[str]]:
 def _accept_or_enforce_contract(
     source: str, compiled: str, repairs: list[str]
 ) -> dict:
-    """Finish validating a slide that *compiled*: the MathJax-context
-    contract is the rest of the validation.
+    """Finish validating a slide that *compiled*: the two render-time
+    contracts are the rest of the validation.
 
     A slide with <MathJax> and no <MathJaxContext> renders blank in the
-    browser harness even though every compiler and the sandbox's headless
-    gate accept it. A safe deterministic wrap (recompiled, so the returned
-    ``compiled_code`` is the wrapped module's own sandbox output) fixes it
-    without involving the model; anything else becomes an ``ok`` False result
-    carrying the contract wording, which feeds a self-repair turn.
+    browser harness, and a slide whose math strings carry LaTeX renders
+    literal macro text — even though every compiler and the sandbox's
+    headless gate accept both. A safe deterministic wrap (recompiled, so the
+    returned ``compiled_code`` is the wrapped module's own sandbox output)
+    fixes the context contract without involving the model; the math-syntax
+    contract has no deterministic repair, so its violation is always
+    reported. Anything unfixable becomes an ``ok`` False result carrying the
+    contract wording(s), which feed a self-repair turn.
     """
-    if not _mathjax_without_context(source):
+    errors: list[str] = []
+    if _mathjax_without_context(source):
+        wrapped, applied = wrap_mathjax_context(source)
+        if applied:
+            recompiled, recompile_error = _compile_slide(wrapped)
+            if recompiled is not None:
+                source, compiled = wrapped, recompiled
+                repairs = [*repairs, "wrap_mathjax_context"]
+            else:
+                # The deterministic rewrite did not compile — abandon it and
+                # hand the real failure (plus the contract) to the model.
+                errors.append(
+                    f"{recompile_error} (the deterministic <MathJaxContext> wrap did "
+                    f"not compile, so the slide itself must be repaired) "
+                    f"{MATHJAX_CONTEXT_RULE}"
+                )
+        else:
+            errors.append(MATHJAX_CONTEXT_RULE)
+    math_error = math_syntax_violation(source)
+    if math_error:
+        errors.append(math_error)
+    if not errors:
         return {
             "ok": True,
             "compiled_code": compiled,
@@ -441,31 +537,11 @@ def _accept_or_enforce_contract(
             "error": "",
             "repairs": repairs,
         }
-    wrapped, applied = wrap_mathjax_context(source)
-    if applied:
-        recompiled, recompile_error = _compile_slide(wrapped)
-        if recompiled is not None:
-            return {
-                "ok": True,
-                "compiled_code": recompiled,
-                "source": wrapped,
-                "error": "",
-                "repairs": [*repairs, "wrap_mathjax_context"],
-            }
-        # The deterministic rewrite did not compile — abandon it and hand the
-        # real failure (plus the contract) to the model.
-        error = (
-            f"{recompile_error} (the deterministic <MathJaxContext> wrap did "
-            f"not compile, so the slide itself must be repaired) "
-            f"{MATHJAX_CONTEXT_RULE}"
-        )
-    else:
-        error = MATHJAX_CONTEXT_RULE
     return {
         "ok": False,
         "compiled_code": None,
         "source": source,
-        "error": compile_error_for_feedback(error),
+        "error": compile_error_for_feedback(" ".join(errors)),
         "repairs": repairs,
     }
 
@@ -488,7 +564,8 @@ def validate_jsx(code: str) -> dict:
     - ``ok`` True: ``compiled_code`` is the sandbox output and ``source`` is
       the (possibly repaired) source that compiled.
     - ``ok`` False: ``error`` is the reduced, LLM-facing failure — a compile
-      error, the MathJax context contract violation, or both.
+      error, the MathJax context contract violation, the math-syntax
+      violation (LaTeX inside <MathJax>), or any combination of them.
     - ``repairs`` lists the deterministic repairs applied to reach ``source``.
     """
     compiled, error = _compile_slide(code)
@@ -506,6 +583,9 @@ def validate_jsx(code: str) -> dict:
         # The slide could not even be made to compile; the model that gets
         # the repair turn must know about both problems it has to fix.
         error = f"{error} {MATHJAX_CONTEXT_RULE}"
+    math_error = math_syntax_violation(source)
+    if math_error:
+        error = f"{error} {math_error}"
     return {
         "ok": False,
         "compiled_code": None,
@@ -529,6 +609,7 @@ SLIDE_FAILURE_CLASSES: tuple[str, ...] = (
     "truncated_output",
     "sandbox_timeout",
     "content_spec_invalid",
+    "math_notation",
     "other",
 )
 
@@ -570,6 +651,12 @@ _CONTENT_SPEC_TOKENS: tuple[str, ...] = (
     # <MathJax> outside any <MathJaxContext> (see MATHJAX_CONTEXT_RULE).
     "without a <mathjaxcontext>",
 )
+# validate_jsx's math-syntax rejection: a slide that compiles but carries
+# LaTeX (backslash macros) inside <MathJax>, which the slide's AsciiMath-only
+# input renders as literal text (see MATHJAX_MATH_RULE).
+_MATH_NOTATION_TOKENS: tuple[str, ...] = (
+    "must be asciimath",
+)
 # The parser ran out of input: the model's answer was cut off mid-module. Note
 # that esbuild's "Unterminated string literal" is deliberately NOT here — the
 # persisted occurrences are complete modules with a quoting bug inside a math
@@ -606,6 +693,9 @@ def classify_compile_error(error: str) -> str:
       returned *as a slide* — too short, not a module (no ``export
       default``), default export is not a component, renders empty, or threw
       while rendering. The parser did not reject the code.
+    - ``math_notation``: validate_jsx's math-syntax gate rejected a slide
+      that compiles but carries LaTeX (backslash macros) inside <MathJax>
+      — the parser did not reject the code, the renderer just cannot show it.
     - ``truncated_output``: the parser hit the end of the input: the model's
       answer was cut off mid-module.
     - ``syntax_error``: esbuild rejected the source ("Build failed with 1
@@ -624,6 +714,8 @@ def classify_compile_error(error: str) -> str:
         return "unknown_component"
     if any(t in e for t in _CONTENT_SPEC_TOKENS):
         return "content_spec_invalid"
+    if any(t in e for t in _MATH_NOTATION_TOKENS):
+        return "math_notation"
     if any(t in e for t in _TRUNCATED_TOKENS):
         return "truncated_output"
     if any(t in e for t in _SYNTAX_TOKENS):
