@@ -8,6 +8,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy.orm import sessionmaker
 
+from core.security import COOKIE_NAME
 from db import (
     FailedSlide,
     GraphStageTiming,
@@ -21,6 +22,7 @@ from routers.plan import (
     StepOut,
     _ordered_materials,
     generate_materials,
+    regenerate_slide_material,
     validate_plan,
 )
 
@@ -669,11 +671,21 @@ def _timing(
     }
 
 
+def _slide_specs() -> list[dict]:
+    """The two content specs ``plan_slide_contents`` would have produced."""
+    return [
+        {"title": "Force and mass", "key_points": ["F = ma"], "visual_hint": "a cart"},
+        {"title": "Units", "key_points": ["1 N = 1 kg m/s^2"], "visual_hint": "a scale"},
+    ]
+
+
 def _two_slide_results() -> list[dict]:
     """A 3-call interrupt/resume sequence: two slides, then the final state.
 
     Each state carries the ACCUMULATING ``stage_timings`` list (3 / 5 / 7
-    entries), exactly as the real material graph would."""
+    entries), the step's full ``slide_contents`` plan, and the 1-based
+    ``slide_index`` the graph advances past the slide it just compiled —
+    exactly as the real material graph would."""
     question = {"id": "q1", "text": "?", "options": ["A", "B"],
                 "correct_index": 0, "explanation": "e"}
     t_plan = _timing("plan_slide_contents", seconds=0.5)
@@ -683,12 +695,16 @@ def _two_slide_results() -> list[dict]:
     t_c2 = _timing("compile_slide", 2, 1, 0.3)
     t_q = _timing("write_questions", seconds=0.4)
     t_s = _timing("summarize_step", seconds=0.1)
+    specs = _slide_specs()
     return [
         {"__interrupt__": object(), "slides": ["<div>1</div>"],
+         "slide_contents": specs, "slide_index": 1,
          "stage_timings": [t_plan, t_w1, t_c1]},
         {"__interrupt__": object(), "slides": ["<div>1</div>", "<div>2</div>"],
+         "slide_contents": specs, "slide_index": 2,
          "stage_timings": [t_plan, t_w1, t_c1, t_w2, t_c2]},
         {"slides": ["<div>1</div>", "<div>2</div>"],
+         "slide_contents": specs, "slide_index": 2,
          "questions": [question],
          "summary": {"step_id": "s1", "title": "T1", "key_points": ["k"]},
          "failed_attempts": [{"index": 0, "prompt": "p", "jsx": "j",
@@ -803,6 +819,73 @@ class TestGenerateMaterials:
         }
         assert timings[-1].duration_seconds > 0
         assert all(t.duration_seconds >= 0 for t in timings)
+
+    def test_each_slide_row_stores_the_spec_it_was_written_from(
+        self, db, db_engine, make_session, fake_session_factory
+    ):
+        """#197: the content spec travels with the slide it produced.
+
+        Without it the spec exists only in graph state, so a single slide can
+        never be regenerated on its own — the only route back is wiping the
+        whole deck.
+        """
+        sid = make_session(
+            session_id="a", phase=Phase.GENERATING, boundary_map={"a": {}}
+        ).session_id
+        db.add(Plan(session_id=sid, version=1, prose_summary="ps",
+                    dependency_dag="dag",
+                    steps=[{"id": "s1", "title": "T1", "description": "d",
+                            "depends_on": [], "depth": 0}],
+                    adjustments=[]))
+        db.commit()
+
+        with patch("routers.plan.material_graph") as graph:
+            graph.invoke.side_effect = _two_slide_results()
+            generate_materials(sid)
+
+        db.expire_all()
+        specs = _slide_specs()
+        assert db.get(SlideContent, "a_s1_slide_1").content_spec == specs[0]
+        assert db.get(SlideContent, "a_s1_slide_2").content_spec == specs[1]
+
+    def test_a_skipped_slide_does_not_shift_specs_onto_the_wrong_rows(
+        self, db, db_engine, make_session, fake_session_factory
+    ):
+        """A slide that was skipped entirely still costs its row its own spec.
+
+        Slide 1 exhausted its attempts and left nothing in the deck, so the one
+        compiled slide lands at `_slide_1` while it is in fact the step's
+        second slide. The row must carry the second spec, not the first.
+        """
+        sid = make_session(
+            session_id="a", phase=Phase.GENERATING, boundary_map={"a": {}}
+        ).session_id
+        db.add(Plan(session_id=sid, version=1, prose_summary="ps",
+                    dependency_dag="dag",
+                    steps=[{"id": "s1", "title": "T1", "description": "d",
+                            "depends_on": [], "depth": 0}],
+                    adjustments=[]))
+        db.commit()
+
+        specs = _slide_specs()
+        sequence = [
+            {"__interrupt__": object(), "slides": ["<div>2</div>"],
+             "slide_contents": specs, "slide_index": 2, "stage_timings": []},
+            {"slides": ["<div>2</div>"], "slide_contents": specs,
+             "slide_index": 2,
+             "questions": [{"id": "q1", "text": "?", "options": ["A"],
+                           "correct_index": 0, "explanation": "e"}],
+             "summary": {"step_id": "s1", "title": "T1", "key_points": ["k"]},
+             "failed_attempts": [], "stage_timings": []},
+        ]
+        with patch("routers.plan.material_graph") as graph:
+            graph.invoke.side_effect = sequence
+            generate_materials(sid)
+
+        db.expire_all()
+        row = db.get(SlideContent, "a_s1_slide_1")
+        assert row.content == "<div>2</div>"
+        assert row.content_spec == specs[1]
 
     def test_placeholder_slide_persists_is_placeholder_flag(
         self, db, db_engine, make_session, fake_session_factory
@@ -1146,3 +1229,375 @@ class TestPlanStageTimings:
 
         assert resp.status_code == 202
         assert db.query(GraphStageTiming).filter_by(session_id=sid, graph="plan").all() == []
+
+
+# --- regenerate_slide_material background task (called directly) ---
+
+
+_UNITS_SPEC = {
+    "title": "Units", "key_points": ["1 N = 1 kg m/s^2"], "visual_hint": "a scale",
+}
+
+
+@pytest.fixture()
+def deck(db, make_session):
+    """A session with a completed step A, a generated step B, and one B slide.
+
+    The state a single-slide regeneration has to rebuild for itself.
+    """
+    sid = make_session(
+        session_id="a",
+        phase=Phase.EXECUTING,
+        boundary_map={"force": {"floor": "knows v = d/t"}},
+    ).session_id
+    db.add(Plan(
+        session_id=sid, version=1, prose_summary="ps", dependency_dag="dag",
+        steps=[
+            {"id": "s1", "title": "Force", "description": "d", "depends_on": [], "depth": 0},
+            {"id": "s2", "title": "Units", "description": "d", "depends_on": ["s1"], "depth": 1},
+        ],
+        adjustments=[],
+    ))
+    db.add(StepMaterial(
+        session_id=sid, step_id="s1", slides=["a_s1_slide_1"], questions=[],
+        summary={"step_id": "s1", "title": "Force", "key_points": ["F = ma"]},
+        is_complete=True,
+    ))
+    db.add(StepMaterial(
+        session_id=sid, step_id="s2", slides=["a_s2_slide_1"],
+        questions=[{"id": "s2_q1", "text": "?", "options": ["A"],
+                    "correct_index": 0, "explanation": "e"}],
+        summary={"step_id": "s2", "title": "Units", "key_points": ["1 N"]},
+        is_complete=True,
+    ))
+    db.add(SlideContent(
+        slide_id="a_s2_slide_1", session_id=sid, step_id="s2",
+        content="the slide the learner does not like",
+        content_spec=_UNITS_SPEC,
+    ))
+    db.commit()
+    return sid
+
+
+class TestRegenerateSlideMaterial:
+    def test_the_stored_deck_is_rebuilt_for_the_one_slide(self, db, db_engine,
+                                                           deck, fake_session_factory):
+        """The slide's own row plus the plan and the prior summaries are enough.
+
+        This is #197's claim: every input write_slide needs is reconstructable
+        from the domain DB, so one slide can be rewritten with no graph, no
+        checkpoint and no other slide touched.
+        """
+        outcome = {"jsx": "a slide the learner asked for", "is_placeholder": False,
+                   "failed_attempts": [], "stage_timings": []}
+        with patch("routers.plan.regenerate_slide", return_value=outcome) as regen:
+            regenerate_slide_material("a", "a_s2_slide_1", "make it more visual")
+
+        call = regen.call_args
+        assert call.kwargs["step"]["id"] == "s2"
+        assert call.kwargs["content_spec"] == _UNITS_SPEC
+        assert call.kwargs["established_concepts"] == [
+            {"step_id": "s1", "title": "Force", "key_points": ["F = ma"]},
+        ]
+        assert call.kwargs["learner_context"] == {"force": {"floor": "knows v = d/t"}}
+        assert call.kwargs["language"] == "English"
+        assert call.kwargs["feedback"] == "make it more visual"
+
+        db.expire_all()
+        row = db.get(SlideContent, "a_s2_slide_1")
+        assert row.content == "a slide the learner asked for"
+        # Rewriting a slide does not rewrite the deck's plan for it.
+        assert row.content_spec == _UNITS_SPEC
+
+        # Nothing else in the session moved.
+        step_row = db.query(StepMaterial).filter_by(session_id="a", step_id="s2").one()
+        assert step_row.slides == ["a_s2_slide_1"]
+        assert step_row.summary["key_points"] == ["1 N"]
+        assert db.query(StepMaterial).filter_by(step_id="s1").one().slides == [
+            "a_s1_slide_1"
+        ]
+        assert db.query(GraphStageTiming).filter_by(session_id="a").all() == []
+        assert db.query(FailedSlide).filter_by(session_id="a").all() == []
+        assert db.get(Session, "a").phase == Phase.EXECUTING.value
+
+    def test_a_regeneration_that_did_not_compile_keeps_the_slide_as_it_is(
+        self, db, db_engine, deck, fake_session_factory
+    ):
+        """A bad slide is not an improvement over a worse one.
+
+        When every attempt fails the graph ends with the placeholder stand-in.
+        Swapping the learner's slide for that is not what they asked for, so the
+        row keeps its content — and the failed attempts are still written down.
+        """
+        outcome = {
+            "jsx": "<div>placeholder</div>", "is_placeholder": True,
+            "failed_attempts": [
+                {"index": 0, "prompt": "p", "jsx": "broken", "error": "syntax error"},
+            ],
+            "stage_timings": [
+                {"stage": "write_slide",
+                 "context": {"step_id": "s2", "slide_index": 1, "attempt": 1,
+                             "regenerated": True},
+                 "duration_seconds": 1.0},
+                {"stage": "compile_slide",
+                 "context": {"step_id": "s2", "slide_index": 1, "attempt": 1,
+                             "regenerated": True},
+                 "duration_seconds": 0.5},
+            ],
+        }
+        with patch("routers.plan.regenerate_slide", return_value=outcome):
+            regenerate_slide_material("a", "a_s2_slide_1", None)
+
+        db.expire_all()
+        row = db.get(SlideContent, "a_s2_slide_1")
+        assert row.content == "the slide the learner does not like"
+        assert row.is_placeholder is False  # not downgraded to a stand-in
+
+        failed = db.query(FailedSlide).filter_by(session_id="a", step_id="s2").one()
+        assert (failed.slide_index, failed.jsx, failed.error) == (1, "broken", "syntax error")
+
+        timings = db.query(GraphStageTiming).filter_by(session_id="a").order_by(
+            GraphStageTiming.id
+        ).all()
+        assert [(t.stage, t.graph) for t in timings] == [
+            ("write_slide", "material"), ("compile_slide", "material"),
+        ]
+        assert all(t.context["regenerated"] is True for t in timings)
+
+    def test_a_placeholder_slide_can_be_regenerated_into_a_real_one(
+        self, db, db_engine, deck, fake_session_factory
+    ):
+        """The slide a deck lost is the slide most worth regenerating.
+
+        Its spec is stored like every other slide's, and a slide that compiles
+        now is not a placeholder any more — so the deck shows it again.
+        """
+        db.get(SlideContent, "a_s2_slide_1").is_placeholder = True
+        db.commit()
+
+        outcome = {"jsx": "a real slide at last", "is_placeholder": False,
+                   "failed_attempts": [], "stage_timings": []}
+        with patch("routers.plan.regenerate_slide", return_value=outcome):
+            regenerate_slide_material("a", "a_s2_slide_1", "explain the units again")
+
+        db.expire_all()
+        row = db.get(SlideContent, "a_s2_slide_1")
+        assert row.content == "a real slide at last"
+        assert row.is_placeholder is False
+
+    def test_a_slide_with_no_stored_spec_is_not_rewritten(self, db, db_engine,
+                                                          deck, fake_session_factory):
+        """A slide generated before #197 has no spec to be rewritten from.
+
+        Its spec was written nowhere but graph state, and that state is gone.
+        The whole-deck route (POST /dev/sessions/{id}/regenerate) is what
+        remains for it, and it is not silently attempted.
+        """
+        db.get(SlideContent, "a_s2_slide_1").content_spec = None
+        db.commit()
+
+        with patch("routers.plan.regenerate_slide") as regen:
+            regenerate_slide_material("a", "a_s2_slide_1", None)
+
+        assert regen.call_count == 0
+        db.expire_all()
+        assert db.get(SlideContent, "a_s2_slide_1").content == (
+            "the slide the learner does not like"
+        )
+
+    def test_a_slide_that_is_not_in_the_deck_it_was_asked_for_is_not_rewritten(
+        self, db, db_engine, deck, fake_session_factory
+    ):
+        """A slide wiped between the request and this task is not rewritten."""
+        db.delete(db.get(SlideContent, "a_s2_slide_1"))
+        db.commit()
+
+        with patch("routers.plan.regenerate_slide") as regen:
+            regenerate_slide_material("a", "a_s2_slide_1", None)
+
+        assert regen.call_count == 0
+
+
+# --- POST /sessions/{session_id}/slides/{slide_id}/regenerate ---
+
+
+class TestRequestSlideRegeneration:
+    def test_accepted_and_started_in_the_background(self, client, db, deck):
+        with patch("routers.plan.regenerate_slide_material") as task:
+            resp = client.post(
+                "/sessions/a/slides/a_s2_slide_1/regenerate",
+                json={"feedback": "make it more visual"},
+            )
+
+        assert resp.status_code == 202
+        assert resp.json()["slide_id"] == "a_s2_slide_1"
+        task.assert_called_once_with("a", "a_s2_slide_1", "make it more visual")
+
+    def test_the_feedback_is_optional(self, client, db, deck):
+        with patch("routers.plan.regenerate_slide_material") as task:
+            resp = client.post("/sessions/a/slides/a_s2_slide_1/regenerate")
+
+        assert resp.status_code == 202
+        task.assert_called_once_with("a", "a_s2_slide_1", None)
+
+    def test_blank_feedback_is_not_passed_as_a_request(self, client, db, deck):
+        with patch("routers.plan.regenerate_slide_material") as task:
+            resp = client.post(
+                "/sessions/a/slides/a_s2_slide_1/regenerate", json={"feedback": "   "}
+            )
+
+        assert resp.status_code == 202
+        task.assert_called_once_with("a", "a_s2_slide_1", None)
+
+    def test_unknown_slide_is_404(self, client, db, deck):
+        with patch("routers.plan.regenerate_slide_material") as task:
+            resp = client.post("/sessions/a/slides/nope_slide_1/regenerate")
+        assert resp.status_code == 404
+        assert task.call_count == 0
+
+    def test_a_slide_from_another_session_is_404(self, client, db, deck):
+        with patch("routers.plan.regenerate_slide_material") as task:
+            resp = client.post("/sessions/other/slides/a_s2_slide_1/regenerate")
+        assert resp.status_code == 404
+        assert task.call_count == 0
+
+    def test_a_slide_is_not_regenerated_while_its_deck_is_still_being_written(
+        self, client, db, deck
+    ):
+        db.get(Session, "a").phase = Phase.GENERATING.value
+        db.commit()
+
+        with patch("routers.plan.regenerate_slide_material") as task:
+            resp = client.post("/sessions/a/slides/a_s2_slide_1/regenerate")
+
+        assert resp.status_code == 409
+        assert task.call_count == 0
+
+    def test_a_slide_with_no_stored_spec_is_refused_rather_than_scheduled(
+        self, client, db, deck
+    ):
+        """The learner is told now, not left waiting for a slide that never comes."""
+        db.get(SlideContent, "a_s2_slide_1").content_spec = None
+        db.commit()
+
+        with patch("routers.plan.regenerate_slide_material") as task:
+            resp = client.post("/sessions/a/slides/a_s2_slide_1/regenerate")
+
+        assert resp.status_code == 409
+        assert "content spec" in resp.json()["detail"]
+        assert task.call_count == 0
+
+    def test_a_slide_whose_step_is_no_longer_in_the_plan_is_refused(
+        self, client, db, deck
+    ):
+        plan = db.get(Session, "a").plan
+        plan.steps = [s for s in plan.steps if s["id"] != "s2"]
+        db.commit()
+
+        with patch("routers.plan.regenerate_slide_material") as task:
+            resp = client.post("/sessions/a/slides/a_s2_slide_1/regenerate")
+
+        assert resp.status_code == 409
+        assert task.call_count == 0
+
+    def test_a_placeholder_slide_is_invisible_outside_dev_mode(self, client, db, deck,
+                                                               monkeypatch, auth_cookie):
+        """The same rule the deck read and GET /slides/{id} apply (#103, dev-only).
+
+        Signed in, so what is being observed is the placeholder rule and not the
+        write gate (the gate itself is tested in test_auth_gate.py).
+        """
+        monkeypatch.delenv("DEV_MODE", raising=False)
+        db.get(SlideContent, "a_s2_slide_1").is_placeholder = True
+        db.commit()
+
+        with patch("routers.plan.regenerate_slide_material") as task:
+            resp = client.post(
+                "/sessions/a/slides/a_s2_slide_1/regenerate",
+                cookies={COOKIE_NAME: auth_cookie},
+            )
+
+        assert resp.status_code == 404
+        assert task.call_count == 0
+
+    def test_in_dev_a_placeholder_slide_can_be_asked_for_a_second_try(
+        self, client, db, deck, monkeypatch
+    ):
+        monkeypatch.setenv("DEV_MODE", "1")
+        db.get(SlideContent, "a_s2_slide_1").is_placeholder = True
+        db.commit()
+
+        with patch("routers.plan.regenerate_slide_material") as task:
+            resp = client.post(
+                "/sessions/a/slides/a_s2_slide_1/regenerate",
+                json={"feedback": "explain it from the units"},
+            )
+
+        assert resp.status_code == 202
+        task.assert_called_once_with(
+            "a", "a_s2_slide_1", "explain it from the units"
+        )
+
+    def test_the_background_task_replaces_the_slide_it_was_asked_about(
+        self, client, db, deck, fake_session_factory
+    ):
+        """End to end: the 202's task writes the row the deck reads."""
+        outcome = {"jsx": "the slide the learner asked for", "is_placeholder": False,
+                   "failed_attempts": [], "stage_timings": []}
+        with (
+            patch("routers.plan.regenerate_slide", return_value=outcome),
+            patch("routers.plan.is_mock_mode", return_value=False),
+        ):
+            resp = client.post(
+                "/sessions/a/slides/a_s2_slide_1/regenerate",
+                json={"feedback": "make it more visual"},
+            )
+        assert resp.status_code == 202
+
+        db.expire_all()
+        assert db.get(SlideContent, "a_s2_slide_1").content == (
+            "the slide the learner asked for"
+        )
+
+    def test_a_session_that_ended_before_the_task_ran_is_left_alone(
+        self, db, db_engine, deck, fake_session_factory
+    ):
+        db.delete(db.get(Session, "a"))
+        db.commit()
+
+        with patch("routers.plan.regenerate_slide") as regen:
+            regenerate_slide_material("a", "a_s2_slide_1", None)  # must not raise
+
+        assert regen.call_count == 0
+
+    def test_a_plan_adjusted_between_the_request_and_the_task_is_not_applied_too(
+        self, db, db_engine, deck, fake_session_factory
+    ):
+        """The 202 was honest when it was sent; the plan moved afterwards."""
+        plan = db.get(Session, "a").plan
+        plan.steps = [s for s in plan.steps if s["id"] != "s2"]
+        db.commit()
+
+        with patch("routers.plan.regenerate_slide") as regen:
+            regenerate_slide_material("a", "a_s2_slide_1", None)
+
+        assert regen.call_count == 0
+        db.expire_all()
+        assert db.get(SlideContent, "a_s2_slide_1").content == (
+            "the slide the learner does not like"
+        )
+
+    def test_a_task_that_throws_leaves_the_deck_it_was_writing(
+        self, db, db_engine, deck, fake_session_factory
+    ):
+        """A failed regeneration is a logged failure, not a broken deck."""
+        with patch(
+            "routers.plan.regenerate_slide", side_effect=RuntimeError("sandbox is down")
+        ):
+            regenerate_slide_material("a", "a_s2_slide_1", None)  # must not raise
+
+        db.expire_all()
+        assert db.get(SlideContent, "a_s2_slide_1").content == (
+            "the slide the learner does not like"
+        )
+        assert db.query(GraphStageTiming).filter_by(session_id="a").all() == []

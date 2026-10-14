@@ -147,6 +147,7 @@ class SlideContent(Base):
     session_id: Mapped[str] = mapped_column(ForeignKey("sessions.session_id", ondelete="CASCADE"), index=True)
     step_id: Mapped[str] = mapped_column(String)
     content: Mapped[str] = mapped_column(Text)                        # the slide JSX component source
+    content_spec: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # {title, key_points, visual_hint} as plan_slide_contents produced it — what write_slide was asked for (#197). NULL on rows written before the column: those slides have no spec to be rewritten from.
 
     session: Mapped["Session"] = relationship(back_populates="slide_contents")
 
@@ -257,6 +258,7 @@ material_graph = material_graph_fn()
 | `POST` | `/sessions/{id}/plan/generate` | Trigger plan generation (auto after probe or explicit) |
 | `POST` | `/sessions/{id}/plan/adjust` | Submit a free-text adjustment, get regenerated plan |
 | `POST` | `/sessions/{id}/plan/approve` | Approve plan, kick off background material generation (returns `202` immediately) |
+| `POST` | `/sessions/{id}/slides/{slide_id}/regenerate` | Rewrite one slide of a generated deck, from the content spec its own row stores (#197) |
 | `GET` | `/sessions/{id}/materials` | Poll material generation progress (phase + per-step summary and items) |
 
 ### Execution phase (no LLM — deterministic only)
@@ -281,7 +283,7 @@ Three gates, and which one a route uses is stated in its heading below (#178 mov
 | Gate | Behaviour | Routes |
 |------|-----------|--------|
 | none | answered whatever `DEV_MODE` says | `GET /sessions`, `GET /explore/sessions`, `GET /sessions/{id}`, `GET /sessions/{id}/materials` |
-| `require_auth` | `401` for a Visitor when `DEV_MODE` is off, open when it is on, so a local run can walk the phases without a cookie (#89) | `POST /sessions/{id}/clarify`, `POST /sessions/{id}/probe`, plan `generate`/`adjust`/`approve`, `POST /dev/sessions/{id}/regenerate` |
+| `require_auth` | `401` for a Visitor when `DEV_MODE` is off, open when it is on, so a local run can walk the phases without a cookie (#89) | `POST /sessions/{id}/clarify`, `POST /sessions/{id}/probe`, plan `generate`/`adjust`/`approve`, `POST /dev/sessions/{id}/regenerate`, `POST /sessions/{id}/slides/{slide_id}/regenerate` |
 | always on, `DEV_MODE` never opens it | `401` | `POST /sessions` — a Session with no one who asked for it is impossible (#145); `/auth/me`, `/review/*` — user-scoped, not public records; `GET /slides/{id}` — requires `X-Service-Token` (#103) |
 
 `DEV_MODE` is read per request, never at import.
@@ -557,6 +559,57 @@ Behavior by session phase:
 | unknown session | `404` |
 
 On `error` the failure message is **not** exposed here — the phase is terminal and the client starts a new session.
+
+#### `POST /sessions/{id}/slides/{slide_id}/regenerate`
+
+**Auth:** `require_auth` — the deck is a public read; changing a slide in it is a write (#178).
+
+Rewrite **one** slide, leaving every other slide of the deck alone. This is what `slide_contents.content_spec` exists for (#197): the content spec is an input to `write_slide` that used to live only in graph state, so the only route back for a slide the learner did not like was wiping the deck and re-running generation (`POST /dev/sessions/{id}/regenerate`).
+
+The body is optional:
+
+```json
+{ "feedback": "make it more visual" }   // what the learner wants different
+```
+
+```json
+// 202 — the work runs in the background
+{
+  "slide_id": "abc123_s0_slide_2",
+  "message": "Regeneration started. The slide is replaced when a new one compiles."
+}
+```
+
+**What it rebuilds.** Everything `write_slide` needs, from the domain DB:
+
+| Input | Source |
+|---|---|
+| `content_spec` | `SlideContent.content_spec` — the spec this slide was written from |
+| `step` | `Plan.steps`, matched on `SlideContent.step_id` |
+| `established_concepts` | the `StepMaterial.summary` rows of the plan's earlier steps, in plan order |
+| `learner_context` | `Session.boundary_map` |
+| `language` | `Session.language` |
+
+It then runs the material graph's own `write_slide` and `compile_slide` over that one spec as plain functions (`graphs.material.regenerate`) — the sampling ladder, the self-repair loop, the attempt bound and the render-time MathJax backstops are the graph's, not a second policy invented for this endpoint. `feedback` is carried into the slide request as `MaterialState.learner_feedback`, which is also how the self-repair turns keep it. There is no graph, no checkpointer and no interrupt: **what the slide covers is the deck's plan, and re-planning it is a different operation.**
+
+**Outcomes:**
+
+| Situation | Result |
+|---|---|
+| a slide compiled | the row's `content` is replaced, and `is_placeholder` is cleared — a slide the deck had lost is in the deck again |
+| every attempt failed | the row keeps the slide the learner has (a placeholder stand-in is not the improvement they asked for); the failed attempts are appended to `failed_slides` as always |
+| `feedback` | shapes how the slide is rendered. The stored `content_spec` is not changed |
+| `StepMaterial` | untouched: the step's `slides`, `questions` and `summary` are not rewritten |
+| `slide_id` is not in this session | `404` |
+| a placeholder slide, outside `DEV_MODE` | `404` — invisible here exactly as in the deck read and `GET /slides/{id}` |
+| session phase is `generating` | `409` — the deck is still being written |
+| no stored `content_spec` (a row written before #197) | `409` — the whole-deck route is what remains for that slide |
+| the plan no longer has the slide's step | `409` (a plan can be adjusted after its deck was generated) |
+| mock mode | `400` |
+
+Every stage a regeneration runs writes its `graph_stage_timings` row as a deck generation does, with `context.regenerated: true` so the two can be told apart afterwards (#194). One regeneration at a time per session: it takes the same per-session lock the deck driver holds.
+
+**Knowing when it is done:** the slide keeps its ID, so `GET /sessions/{id}/materials` is unchanged by a regeneration, and there is no status endpoint for one in flight. A client re-reads the slide (through the Sandbox, which fetches the source from this backend per request). If the frontend needs an explicit in-flight/completed signal, that is separate API surface and not part of #197.
 
 #### `GET /sessions/{id}/steps/{step_id}`
 
@@ -990,7 +1043,7 @@ These live in the `MemorySaver` checkpoint, so the graph resumes from its in-mem
 
 | Node | LLM task |
 |------|----------|
-| `write_slides` | Write 3-7 self-contained React JSX slide components for this step (standalone `export default` components; inline styles; no external assets). Follow teacher.md: establish unconditional truths before building, motivate every step ("how could I have discovered this?"), show the dependency connection to prior steps (referenced via `established_concepts`). Math is written as AsciiMath inside `<MathJax>`; the slide prompt forbids LaTeX there, and `validate_jsx` now rejects a slide whose math strings carry a backslash macro (failure class `math_notation`) — see Notation below. The node returns the JSX component source strings; the driver assigns globally-unique IDs `{session_id}_{step_id}_slide_{n}` and stores one `SlideContent` row per slide. |
+| `write_slides` | Write 3-7 self-contained React JSX slide components for this step (standalone `export default` components; inline styles; no external assets). Follow teacher.md: establish unconditional truths before building, motivate every step ("how could I have discovered this?"), show the dependency connection to prior steps (referenced via `established_concepts`). Math is written as AsciiMath inside `<MathJax>`; the slide prompt forbids LaTeX there, and `validate_jsx` now rejects a slide whose math strings carry a backslash macro (failure class `math_notation`) — see Notation below. The node returns the JSX component source strings; the driver assigns globally-unique IDs `{session_id}_{step_id}_slide_{n}` and stores one `SlideContent` row per slide — carrying the `plan_slide_contents` spec that slide was written from, which is what makes a single slide regenerable on its own (#197, `POST /sessions/{id}/slides/{slide_id}/regenerate`). |
 | `write_questions` | Write 3-5 MCQ/TF questions testing that the step's concepts landed. Follow the option-construction procedure in teacher.md (bare claims, mutate correct → distractors, no asymmetric bolding, explanations separate). The node code assigns IDs `{step_id}_q{n}` (the LLM does not). |
 | `summarize_step` | Given the generated slides, extract 3-5 key points: definitions, formulas, core insights. Output is a compact `ConceptSummary` object stored for use by subsequent steps. |
 
@@ -1114,6 +1167,7 @@ generate_materials (background task, its OWN db session, per-session lock):
 | Don't ship broken slides | Every slide is compiled in the sandbox before persisting; if any slide's JSX fails validation, the step's material is **regenerated** (up to `MAX_MATERIAL_ATTEMPTS`), and the step is committed only once all its slides are valid |
 | Don't corrupt the request session | The task opens its **own** DB session (the request's is closed by the time it runs) |
 | Keep stores independent | Resume state lives in the **DB**, not the graph checkpointer — no double-stored state |
+| Keep each slide's spec with the slide | Every `SlideContent` row stores the `plan_slide_contents` spec it was written from (`content_spec`). Every other input to `write_slide` is already reconstructable from this database, so one slide can be regenerated on its own: `routers/plan.py::regenerate_slide_material` rebuilds them and runs the graph's own nodes over that single spec (#197) |
 | Stage timings | Every material stage records its wall-clock duration into graph state (`stage_timings`); the driver persists one `GraphStageTiming` row per stage execution (`graph="material"`), incrementally at each slide commit and the remainder at step finalization — append-only, so a re-run appends a fresh set of rows. Clarify, Probe and Plan do the same for the stages of each request (`graph="clarify"|"probe"|"plan"`, `services.stage_timings`): their nodes are wrapped in `graphs.common.timed_node`, and each request starts with the timing channel emptied so a later request records only what it ran (#194) |
 | Reasoning and output budgets | Every model call states both values it runs under. `core/reasoning.py` is the table: each stage (`<graph>.<node>`) gets a `reasoning_effort` — `minimal` for the stages that only restate a decision the stage before made, `low` for the ones that make a judgement — and an output cap, and `graphs.common.structured_invoke*` passes them on the call, including both halves of a tool-using turn. A graph may only wrap a node that has an entry there: `timed_node` names the stage it cannot find. The slide calls carry their own pair in `graphs/material/sandbox.py` (`SLIDE_REASONING_EFFORT`, `SLIDE_MAX_OUTPUT_TOKENS`), kept beside the sampling ladder that measurement produced. Both knobs are settable per stage (`REASONING_EFFORT_<GRAPH>_<NODE>`, `LLM_MAX_OUTPUT_TOKENS_<GRAPH>_<NODE>`) or for a whole run (`REASONING_EFFORT`, `LLM_MAX_OUTPUT_TOKENS`), and `core/llm.py` bounds how long any one request may take (#194) |
 | Structured answers the backend will not parse | A structured call asks the backend to enforce the schema, and this backend's grammar lets the model write a backslash (`\int`, `\frac`) that its own JSON validation then rejects: `502 structured_output_failed`. The refusal withholds the completion, so nothing can be repaired on this side of that wire; `graphs.common.structured_invoke_messages` therefore asks once more for the same shape with nothing constraining the decode, reads the text here (`core/model_answers.py`), doubles the escapes JSON rejects — including `\f` and `\b`, which are how `\frac` and `\beta` arrive and are never a form feed or a backspace in this app's text — and validates the result against the same schema. A backend that is busy, and an answer that parsed but did not fit the schema, are not recovered from: one is served by repeating the request and the other is a prompt problem. When both plans fail, `ModelAnswerUnparseable` says which stage. Which calls needed the second plan and how many escapes each needed goes in `context.model_recoveries` on that stage's row; every structured call names the stage it belongs to, which is what makes the log and the row agree (#195) |

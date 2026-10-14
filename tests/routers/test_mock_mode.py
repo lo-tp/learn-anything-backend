@@ -6,14 +6,15 @@ Acceptance criteria:
   message that slide generation is disabled.
 - generate_materials is a defensive no-op in mock mode.
 - dev_regenerate is refused in mock mode (it's dev-only).
+- regenerating a single slide is refused too (#197): mock mode has no slides.
 """
 
 from __future__ import annotations
 
 from unittest.mock import patch
 
-from db import Phase, Plan, Session
-from routers.plan import generate_materials
+from db import Phase, Plan, Session, SlideContent
+from routers.plan import generate_materials, regenerate_slide_material
 
 
 def _valid_plan() -> dict:
@@ -106,5 +107,47 @@ class TestMockDevRegenerateRefused:
         sid = make_session(session_id="a", phase=Phase.GENERATING).session_id
 
         resp = client.post(f"/dev/sessions/{sid}/regenerate")
+        assert resp.status_code == 400
+        assert "mock" in resp.json()["detail"].lower()
+
+
+class TestMockSlideRegenerationRefused:
+    def test_noop_even_if_the_task_is_somehow_scheduled(
+        self, db, db_engine, make_session, monkeypatch
+    ):
+        """The same guard generate_materials carries: mock mode has no slides."""
+        monkeypatch.setenv("MOCK_LLM", "1")
+        sid = make_session(session_id="a", phase=Phase.EXECUTING).session_id
+        db.add(
+            SlideContent(
+                slide_id="a_s1_slide_1", session_id=sid, step_id="s1",
+                content="x",
+                content_spec={"title": "T", "key_points": ["k"], "visual_hint": "v"},
+            )
+        )
+        db.commit()
+
+        with patch("routers.plan.regenerate_slide") as regen:
+            regenerate_slide_material(sid, "a_s1_slide_1", None)
+
+        assert regen.call_count == 0
+
+    def test_refused_even_for_a_slide_that_has_a_stored_spec(
+        self, client, db, make_session, monkeypatch
+    ):
+        """Mock mode never writes a slide, so there is none to rewrite."""
+        monkeypatch.setenv("MOCK_LLM", "1")
+        monkeypatch.setenv("DEV_MODE", "1")
+        sid = make_session(session_id="a", phase=Phase.EXECUTING).session_id
+        db.add(
+            SlideContent(
+                slide_id="a_s1_slide_1", session_id=sid, step_id="s1",
+                content="x",
+                content_spec={"title": "T", "key_points": ["k"], "visual_hint": "v"},
+            )
+        )
+        db.commit()
+
+        resp = client.post(f"/sessions/{sid}/slides/a_s1_slide_1/regenerate")
         assert resp.status_code == 400
         assert "mock" in resp.json()["detail"].lower()

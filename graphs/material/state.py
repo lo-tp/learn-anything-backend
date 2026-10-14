@@ -22,6 +22,11 @@ class MaterialState(StageTimingsState, total=False):
     # failed_slides on failure for debugging: prompt -> result -> error).
     current_slide_prompt: str | None
     last_compile_error: str | None
+    # What the learner asked to be different about the slide being written
+    # (#197). Written by a single-slide regeneration, which runs these nodes
+    # outside the graph; never written by the graph itself, where no one is
+    # between the slides.
+    learner_feedback: str
     failed_attempts: Annotated[list[dict], operator.add]
     # stage_timings: the shared channel (StageTimingsState); this graph's nodes
     # write the entries themselves, because its driver persists them between
