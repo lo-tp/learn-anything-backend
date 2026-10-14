@@ -39,6 +39,7 @@ from .sandbox import (
     _placeholder_slide_jsx,
     classify_compile_error,
     compile_error_for_feedback,
+    math_syntax_violation,
     slide_contents_max_output_tokens,
     slide_sampling_bind_kwargs,
     validate_jsx,
@@ -353,15 +354,27 @@ def make_compile_slide(llm: BaseChatModel):
         started = time.monotonic()
         compiled_code, error = _compile_slide(jsx)
 
-        # Backstop for the render-time MathJax contract: a slide with
-        # <MathJax> and no <MathJaxContext> compiles green everywhere but
-        # renders blank in the browser harness. write_slide's validate_jsx
-        # normally enforces it (deterministic wrap, or a repair turn); this
-        # catches a source it could not rewrite and the model did not fix —
-        # the attempt fails with the real reason, so the deck ends with a
-        # placeholder, never a blank slide.
-        if compiled_code is not None and _mathjax_without_context(jsx):
-            compiled_code, error = None, MATHJAX_CONTEXT_RULE
+        # Backstop for the render-time MathJax contracts: a slide that
+        # compiles green but renders broken in the browser harness —
+        # <MathJax> with no <MathJaxContext> (renders blank), or LaTeX
+        # inside <MathJax> (renders literal macro text under the slide's
+        # AsciiMath-only input). write_slide's validate_jsx normally
+        # enforces both (deterministic wrap, or a repair turn); this catches
+        # a source it could not repair — the attempt fails with the real
+        # reason, so the deck ends with a placeholder, never a blank or
+        # literal-math slide.
+        context_violation = _mathjax_without_context(jsx)
+        math_violation = math_syntax_violation(jsx)
+        if compiled_code is not None and (context_violation or math_violation):
+            compiled_code = None
+            error = " ".join(
+                rule
+                for rule in (
+                    MATHJAX_CONTEXT_RULE if context_violation else "",
+                    math_violation,
+                )
+                if rule
+            )
 
         if compiled_code is not None:
             logger.debug(
