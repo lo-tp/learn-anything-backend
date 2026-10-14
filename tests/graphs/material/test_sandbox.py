@@ -10,6 +10,7 @@ import pytest
 
 from graphs.material.sandbox import (
     MATHJAX_CONTEXT_RULE,
+    MATHJAX_MATH_RULE,
     MAX_BRACE_APPEND,
     MAX_MATERIAL_ATTEMPTS,
     MAX_SLIDE_SELF_REPAIR_TURNS,
@@ -20,6 +21,7 @@ from graphs.material.sandbox import (
     SLIDE_REASONING_EFFORT,
     SLIDE_SAMPLING_PROFILES,
     _compile_slide,
+    _latex_in_mathjax,
     _mathjax_without_context,
     _placeholder_slide_jsx,
     _strip_markdown_fences,
@@ -656,6 +658,182 @@ class TestMathjaxContractClassification:
         )
 
 
+class TestMathSyntaxClassification:
+    def test_math_rule_is_math_notation(self):
+        assert classify_compile_error(MATHJAX_MATH_RULE) == "math_notation"
+
+    def test_flagged_macros_do_not_change_the_class(self):
+        assert (
+            classify_compile_error(f"{MATHJAX_MATH_RULE} Flagged: \\sqrt, \\frac")
+            == "math_notation"
+        )
+
+    def test_math_rule_wins_over_a_generic_syntax_error(self):
+        # The self-repair turn fixes the math first; the generic parser
+        # complaint riding along does not steal the class.
+        assert (
+            classify_compile_error("syntax error at line 3 " + MATHJAX_MATH_RULE)
+            == "math_notation"
+        )
+
+    def test_syntax_errors_are_not_swallowed_by_the_math_token(self):
+        assert (
+            classify_compile_error('500 Build failed with 1 error: Unexpected ">"')
+            == "syntax_error"
+        )
+
+    def test_both_contracts_classify_as_content_spec_invalid(self):
+        # A slide that breaks both render-time contracts carries both rule
+        # wordings; the context token is checked first, matching how a
+        # compile error plus the context rule has always classified.
+        combined = f"{MATHJAX_CONTEXT_RULE} {MATHJAX_MATH_RULE} Flagged: \\sqrt"
+        assert classify_compile_error(combined) == "content_spec_invalid"
+
+
+# --- Math-syntax contract: math inside <MathJax> must be AsciiMath ---
+#
+# A backslash macro inside a <MathJax> string compiles green and passes the
+# sandbox's headless gate, but the browser harness loads only the AsciiMath
+# input, where a backslash has no meaning — the macro renders as literal
+# text (measured: 526 of 606 stored components carry one, #198 problem 2).
+
+_CLEAN_MATH_SLIDE = (
+    "export default function Slide() {\n"
+    '  return <MathJaxContext config={{ loader: { load: ["input/asciimath"] } }}>'
+    '<div>'
+    '<MathJax>{"`I(V(I)) = sqrt(I)`"}</MathJax>'
+    "</div></MathJaxContext>;\n"
+    "}"
+)
+# The source form a model actually writes: a backslash inside a JS string is
+# escaped, so the file carries ``\\sqrt`` (two backslash characters).
+_LATEX_MATH_SLIDE = (
+    "export default function Slide() {\n"
+    '  return <MathJaxContext config={{ loader: { load: ["input/asciimath"] } }}>'
+    '<div>'
+    '<MathJax>{"`\\\\sqrt{I}`"}</MathJax>'
+    "</div></MathJaxContext>;\n"
+    "}"
+)
+_LATEX_MATH_NO_CONTEXT_SLIDE = (
+    "export default function Slide() {\n"
+    '  return <div><MathJax>{"`\\\\sqrt{I}`"}</MathJax></div>;\n'
+    "}"
+)
+_LATEX_MATH_ARROW_SLIDE = (
+    # No context, unwritable (arrow) shape.
+    "export default () => <div><MathJax>{\"`\\\\sqrt{I}`\"}</MathJax></div>;\n"
+)
+_PROSE_BACKSLASH_SLIDE = (
+    "export default function Slide() {\n"
+    '  return <MathJaxContext config={{ loader: { load: ["input/asciimath"] } }}>'
+    '<div><p>the \\sqrt notation in prose</p>'
+    '<MathJax>{"`sqrt(I)`"}</MathJax></div></MathJaxContext>;\n'
+    "}"
+)
+
+
+class TestLatexInMathjaxDetection:
+    def test_finds_escaped_macros_in_math_blocks(self):
+        assert _latex_in_mathjax(_LATEX_MATH_SLIDE) == ["\\sqrt"]
+
+    def test_single_backslash_form_is_found(self):
+        # A source carrying a lone (unescaped) backslash in a math string.
+        code = '<div><MathJax>{"`\\sqrt{I}`"}</MathJax></div>'
+        assert _latex_in_mathjax(code) == ["\\sqrt"]
+
+    def test_multiple_macros_keep_first_seen_order_and_dedupe(self):
+        code = '<MathJax>{"`\\\\frac{a}{b} \\sqrt{I} \\\\frac{c}{d}`"}</MathJax>'
+        assert _latex_in_mathjax(code) == ["\\frac", "\\sqrt"]
+
+    def test_delimiter_macros_are_named(self):
+        code = '<MathJax>{"`\\\\(x\\\\)`"}</MathJax>'
+        assert _latex_in_mathjax(code) == ["\\(", "\\)"]
+
+    def test_clean_asciimath_is_absent(self):
+        assert _latex_in_mathjax(_CLEAN_MATH_SLIDE) == []
+
+    def test_backslash_outside_math_blocks_is_not_math(self):
+        assert _latex_in_mathjax(_PROSE_BACKSLASH_SLIDE) == []
+
+    def test_unnamed_backslash_is_still_reported(self):
+        # A backslash with no macro letters after it is still a violation —
+        # AsciiMath has no backslash at all.
+        code = '<MathJax>{"`a \\ b`"}</MathJax>'
+        assert _latex_in_mathjax(code) == ["\\"]
+
+
+class TestValidateJsxMathSyntax:
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_compiled_latex_math_is_rejected_and_named(self, mock_compile):
+        mock_compile.return_value = ("compiled", "")
+        result = validate_jsx(_LATEX_MATH_SLIDE)
+        assert result["ok"] is False
+        assert result["compiled_code"] is None
+        assert MATHJAX_MATH_RULE in result["error"]
+        # The macro the model must fix is named, in canonical single-backslash
+        # form.
+        assert "\\sqrt" in result["error"]
+        # No deterministic repair exists for this contract: the source is
+        # untouched and the violation feeds a self-repair turn.
+        assert result["source"] == _LATEX_MATH_SLIDE
+        assert result["repairs"] == []
+        assert mock_compile.call_count == 1
+
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_clean_asciimath_slide_is_untouched(self, mock_compile):
+        mock_compile.return_value = ("compiled", "")
+        result = validate_jsx(_CLEAN_MATH_SLIDE)
+        assert result["ok"] is True
+        assert result["source"] == _CLEAN_MATH_SLIDE
+        assert result["repairs"] == []
+
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_backslash_in_prose_is_not_flagged(self, mock_compile):
+        # The contract is on the math: a backslash in a text node is a
+        # different (transport) problem, not this gate's.
+        mock_compile.return_value = ("compiled", "")
+        result = validate_jsx(_PROSE_BACKSLASH_SLIDE)
+        assert result["ok"] is True
+        assert result["repairs"] == []
+
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_failed_compile_carries_the_math_rule_too(self, mock_compile):
+        mock_compile.return_value = (None, "syntax error at line 3")
+        result = validate_jsx(_LATEX_MATH_SLIDE)
+        assert result["ok"] is False
+        assert "syntax error at line 3" in result["error"]
+        assert MATHJAX_MATH_RULE in result["error"]
+        assert "\\sqrt" in result["error"]
+
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_wrappable_slide_with_latex_math_is_rejected_after_the_wrap(self, mock_compile):
+        # The context wrap is applied (and recompiled) but cannot fix the
+        # math: the slide must still fail, naming the macro.
+        mock_compile.side_effect = [
+            ("compiled-raw", ""),
+            ("compiled-wrapped", ""),
+        ]
+        result = validate_jsx(_LATEX_MATH_NO_CONTEXT_SLIDE)
+        assert result["ok"] is False
+        assert result["repairs"] == ["wrap_mathjax_context"]
+        assert "MathJaxContext" in result["source"]
+        assert MATHJAX_MATH_RULE in result["error"]
+        assert "\\sqrt" in result["error"]
+
+    @patch("graphs.material.sandbox._compile_slide")
+    def test_unwritable_slide_reports_both_contracts(self, mock_compile):
+        # No context and LaTeX math, in a shape no deterministic wrap can
+        # fix: the repair turn must see both contracts it has to repair.
+        mock_compile.return_value = ("compiled", "")
+        result = validate_jsx(_LATEX_MATH_ARROW_SLIDE)
+        assert result["ok"] is False
+        assert "<MathJaxContext>" in result["error"]
+        assert MATHJAX_MATH_RULE in result["error"]
+        assert "\\sqrt" in result["error"]
+        assert result["repairs"] == []
+
+
 # --- Failure-class classifier (supports the skip-rate measurement) ---
 
 
@@ -774,6 +952,8 @@ class TestClassifyCompileError:
             ),
             "sandbox_timeout": "Transport/HTTP error: Read timed out.",
             "content_spec_invalid": "400 code must declare `export default`",
+            # The math-syntax gate's own rejection (validate_jsx), as emitted.
+            "math_notation": f"{MATHJAX_MATH_RULE} Flagged: \\sqrt",
             "other": "500 Internal Server Error",
         }
         assert set(samples) == set(SLIDE_FAILURE_CLASSES)

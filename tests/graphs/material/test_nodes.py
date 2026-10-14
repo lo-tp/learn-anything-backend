@@ -509,6 +509,12 @@ _MATHJAX_SLIDE_WITH_CONTEXT = (
     '<div><MathJax inline>{"`x^2`"}</MathJax></div></MathJaxContext>;\n'
     '}'
 )
+_MATHJAX_SLIDE_WITH_LATEX = (
+    "export default function Slide() {\n"
+    '  return <MathJaxContext config={{ loader: { load: ["input/asciimath"] } }}>'
+    '<div><MathJax>{"`\\\\sqrt{I}`"}</MathJax></div></MathJaxContext>;\n'
+    "}"
+)
 
 
 class TestCompileSlide:
@@ -575,6 +581,44 @@ class TestCompileSlide:
         assert "<MathJaxContext>" in result["last_compile_error"]
         assert result["failed_attempts"][0]["failure_class"] == "content_spec_invalid"
         assert mock_compile.call_count == 1  # the wrap is validate_jsx's job, not this gate's
+
+    @patch("graphs.material.nodes._compile_slide")
+    def test_compiled_slide_with_latex_math_fails_with_the_math_rule(self, mock_compile):
+        # Backstop for the math-syntax contract: LaTeX inside <MathJax>
+        # compiles green everywhere, but the slide's AsciiMath-only input
+        # renders the macro as literal text. write_slide's validate_jsx
+        # normally rejects it; this catches a source it could not repair —
+        # the attempt fails with the real reason, tagged, and never lands
+        # in the deck.
+        mock_compile.return_value = ("compiled_code", "")
+        node = make_compile_slide(MagicMock())
+        result = node(self._state(current_slide_jsx=_MATHJAX_SLIDE_WITH_LATEX))
+
+        assert result["compile_result"] == "retry"
+        assert "AsciiMath" in result["last_compile_error"]
+        assert "\\sqrt" in result["last_compile_error"]
+        assert result["failed_attempts"][0]["failure_class"] == "math_notation"
+        assert mock_compile.call_count == 1  # the wrap is validate_jsx's job, not this gate's
+
+    @patch("graphs.material.nodes._compile_slide")
+    def test_exhausted_latex_math_slide_uses_the_placeholder(self, mock_compile):
+        # Same backstop at the outer limit: the attempt is recorded as
+        # math_notation, the deck keeps its slot via the placeholder, and
+        # the render-broken math is never stored.
+        from graphs.material.sandbox import MAX_MATERIAL_ATTEMPTS
+
+        mock_compile.return_value = ("compiled-code", "")
+        node = make_compile_slide(MagicMock())
+        state = self._state(
+            attempts_by_slide=[MAX_MATERIAL_ATTEMPTS],
+            current_slide_jsx=_MATHJAX_SLIDE_WITH_LATEX,
+        )
+        result = node(state)
+
+        assert result["compile_result"] == "success"
+        assert result["current_slide_is_placeholder"] is True
+        assert result["failed_attempts"][0]["failure_class"] == "math_notation"
+        assert mock_compile.call_count == 2  # real slide + placeholder
 
     @patch("graphs.material.nodes._compile_slide")
     def test_compiled_slide_with_mathjax_context_succeeds(self, mock_compile):
