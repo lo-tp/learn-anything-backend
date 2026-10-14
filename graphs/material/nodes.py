@@ -94,6 +94,24 @@ def _established_concepts_block(established: list[dict]) -> str:
     )
 
 
+def _learner_feedback_block(feedback: str | None) -> str:
+    """What the learner asked to be different about this slide (#197).
+
+    ``""`` when nothing was asked, which is every ordinary graph run: no one is
+    between the slides. A single-slide regeneration passes the learner's own
+    words, and the self-repair turns carry them too — a repair that fixes the
+    compile by quietly dropping what was asked for is the same slide failing
+    twice. The wording keeps the request inside the slide's teaching contract
+    rather than above it: the key points still have to be established.
+    """
+    if not feedback:
+        return ""
+    return (
+        f"The learner asked for this slide to be different: {feedback}\n"
+        "Honor that request while still establishing every key point above."
+    )
+
+
 def make_plan_slide_contents(llm: BaseChatModel):
     def plan_slide_contents(state: MaterialState) -> dict:
         step = state.get("step") or {}
@@ -178,6 +196,7 @@ def _repair_slide_code(
     spec: dict,
     language: str,
     bind_kwargs: dict,
+    feedback: str | None = None,
 ) -> str:
     """One bounded self-repair turn.
 
@@ -196,6 +215,8 @@ def _repair_slide_code(
     parts.append(f"Visual hint: {spec.get('visual_hint', '')}")
     if established:
         parts.append(_established_concepts_block(established))
+    if (learner_block := _learner_feedback_block(feedback)):
+        parts.append(learner_block)
     parts.append("Your slide JSX failed to validate against the compiler.")
     parts.append(f"Compile error: {result['error']}")
     if result.get("repairs"):
@@ -223,6 +244,9 @@ def make_write_slide(llm: BaseChatModel):
         established = state.get("established_concepts") or []
         learner_context = state.get("learner_context") or {}
         prev_error = state.get("last_compile_error")
+        # What the learner asked for, when a caller is between the slides
+        # (#197). Absent from every graph run, which is the normal case.
+        feedback = state.get("learner_feedback")
         language = state.get("language") or DEFAULT_LANGUAGE
 
         attempts = list(state.get("attempts_by_slide") or [0] * len(slide_contents))
@@ -249,6 +273,8 @@ def make_write_slide(llm: BaseChatModel):
         ]
         if established:
             parts.append(_established_concepts_block(established))
+        if (learner_block := _learner_feedback_block(feedback)):
+            parts.append(learner_block)
         if new_attempts > 1 and prev_error:
             parts.append(
                 "Your previous version of this slide failed to compile: "
@@ -305,7 +331,7 @@ def make_write_slide(llm: BaseChatModel):
             )
             jsx = _repair_slide_code(
                 llm, jsx, result, step, learner_context, established, spec,
-                language, bind,
+                language, bind, feedback,
             )
 
         logger.info(

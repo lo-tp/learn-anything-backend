@@ -276,6 +276,12 @@ class SlideContent(Base):
     )
     step_id: Mapped[str] = mapped_column(String)
     content: Mapped[str] = mapped_column(Text)
+    # The slide's content spec ({title, key_points, visual_hint}) as
+    # plan_slide_contents produced it (#197). The spec is an input to
+    # write_slide, and until now it existed only in graph state, so a single
+    # slide could not be regenerated on its own. Persisted with the JSX it
+    # produced, in the same commit. NULL on rows written before the column.
+    content_spec: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     # True for the placeholder slide generated when a slide exhausts all
     # attempts. Placeholders are always generated and persisted, but the
     # endpoints only return them in dev mode (DEV_MODE=1).

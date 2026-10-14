@@ -12,6 +12,13 @@ per step. The per-slide retry loop lives inside the material graph
 and persists the results. The domain DB is the resume point — a step with an
 existing ``StepMaterial`` row is skipped; a failure lands the session in the
 ``error`` phase (terminal, per design).
+
+One slide, on its own, is the other half of that storage. Each ``SlideContent``
+row keeps the content spec it was written from, so
+``POST /sessions/{session_id}/slides/{slide_id}/regenerate`` can schedule
+``regenerate_slide_material``: a background task that rebuilds everything
+``write_slide`` needs from this database and runs the graph's own nodes over one
+spec — no graph, no checkpointer, no interrupt (#197).
 """
 
 import logging
@@ -32,6 +39,7 @@ from core.language import (
     has_meaningful_signal,
     localize_status,
 )
+from core.llm import llm
 from core.mock_llm import is_mock_mode
 from core.security import is_dev_mode, require_auth
 from db import (
@@ -52,6 +60,7 @@ from graphs import (
     plan_graph,
     pre_material_llm,
 )
+from graphs.material.regenerate import regenerate_slide
 from services.stage_timings import (
     empty_stage_timings,
     record_stage_timings,
@@ -103,6 +112,17 @@ class PlanOut(BaseModel):
 
 class ApproveOut(BaseModel):
     phase: Phase
+    message: str
+
+
+class RegenerateIn(BaseModel):
+    # What the learner wants different about this slide. Optional, and it shapes
+    # how the slide is rendered — not what the deck's plan asks it to cover.
+    feedback: str | None = None
+
+
+class RegenerateOut(BaseModel):
+    slide_id: str
     message: str
 
 
@@ -286,12 +306,21 @@ def generate_materials(session_id: str) -> None:
                     n = len(slides)
                     slide_id = f"{session_id}_{step['id']}_slide_{n}"
                     slide_ids.append(slide_id)
+                    specs = state.get("slide_contents") or []
+                    # The spec this slide was written from (#197). The graph's
+                    # own cursor is the one that says which spec produced the
+                    # JSX just compiled: the two disagree when a slide was
+                    # skipped entirely, because the skipped one added nothing to
+                    # `slides` and every later row shifts down by one.
+                    spec_index = state.get("slide_index", 0) - 1
+                    spec = specs[spec_index] if 0 <= spec_index < len(specs) else None
                     db.add(
                         SlideContent(
                             slide_id=slide_id,
                             session_id=session_id,
                             step_id=step["id"],
                             content=slides[-1],
+                            content_spec=spec,
                             is_placeholder=state.get(
                                 "current_slide_is_placeholder", False
                             ),
@@ -392,6 +421,156 @@ def generate_materials(session_id: str) -> None:
                 logger.exception(
                     "Failed to record error state for session %s", session_id
                 )
+        finally:
+            db.close()
+
+
+# --- Single-slide regeneration driver (#197) ---
+
+
+def _regeneration_inputs(
+    db: DBSession, session: Session, slide: SlideContent
+) -> tuple[dict, list[dict]] | None:
+    """What this slide was written from, rebuilt from the domain DB.
+
+    Returns ``(step, established_concepts)`` — the plan step the slide belongs
+    to, and the summaries of every step before it, in plan order: exactly the
+    values the material generation driver passed the graph on the way to this
+    step. ``None`` when the plan no longer has that step, which is the case a
+    plan adjustment can leave behind: a slide whose step is gone has no title,
+    description or position to be rewritten from.
+
+    A prior step with no row contributes nothing: a step that was never
+    generated never established anything.
+    """
+    if session.plan is None:
+        return None
+    steps = session.plan.steps
+    order = {step["id"]: i for i, step in enumerate(steps)}
+    target = order.get(slide.step_id)
+    if target is None:
+        return None
+
+    rank = len(order)
+    rows = [row for row in db.query(StepMaterial).filter_by(session_id=session.session_id)]
+    before = sorted(
+        (row for row in rows if order.get(row.step_id, rank) < target),
+        key=lambda row: (order.get(row.step_id, rank), row.id),
+    )
+    return steps[target], [row.summary for row in before]
+
+
+def regenerate_slide_material(
+    session_id: str, slide_id: str, feedback: str | None
+) -> None:
+    """Rewrite one slide from the content spec its own row stores.
+
+    Plain ``def`` so FastAPI runs it in the thread pool after the 202 is sent,
+    with its OWN db session. It opens with the one thing that used to be lost —
+    ``SlideContent.content_spec`` — rebuilds the rest of what ``write_slide``
+    needs from the plan, the prior steps' summaries, the session's boundary map
+    and its language, and hands the result to :func:`graphs.material.regenerate`
+    (which runs the material graph's own nodes over that one spec).
+
+    The row is only replaced by a slide that actually compiled: a regeneration
+    that exhausted its attempts ends with the placeholder stand-in, and
+    exchanging a bad slide for a placeholder is not an improvement the learner
+    asked for. The failed attempts and the stage timings are kept either way —
+    append-only history, the same policy the deck driver follows.
+
+    Takes the per-session generation lock: a slide is not rewritten while the
+    deck it belongs to is being written, and two requests for the same slide do
+    not both answer it.
+    """
+    if is_mock_mode():
+        return
+    with _session_lock(session_id):
+        started = time.monotonic()
+        db = SessionFactory()
+        try:
+            slide = db.get(SlideContent, slide_id)
+            if slide is None or slide.session_id != session_id:
+                # The deck changed under the request (a dev regeneration wipes
+                # slides); there is nothing left to rewrite.
+                logger.warning(
+                    "Slide regeneration: slide %s is not part of session %s",
+                    slide_id, session_id,
+                )
+                return
+            session = db.get(Session, session_id)
+            if session is None:
+                logger.warning(
+                    "Slide regeneration: session %s not found", session_id
+                )
+                return
+            inputs = _regeneration_inputs(db, session, slide)
+            if inputs is None:
+                logger.warning(
+                    "Slide regeneration: session %s has no plan step %s",
+                    session_id, slide.step_id,
+                )
+                return
+            step, established_concepts = inputs
+            if slide.content_spec is None:
+                # A row from before the spec was stored (#197): the only route
+                # back for this slide is regenerating the whole deck.
+                logger.warning(
+                    "Slide regeneration: slide %s has no stored content spec",
+                    slide_id,
+                )
+                return
+
+            result = regenerate_slide(
+                llm,
+                step=step,
+                content_spec=slide.content_spec,
+                established_concepts=established_concepts,
+                learner_context=session.boundary_map or {},
+                language=session.language,
+                feedback=feedback,
+            )
+
+            for attempt in result["failed_attempts"]:
+                db.add(
+                    FailedSlide(
+                        session_id=session_id,
+                        step_id=slide.step_id,
+                        slide_index=attempt["index"] + 1,  # 1-based for DB
+                        prompt=attempt.get("prompt", ""),
+                        jsx=attempt["jsx"],
+                        error=attempt["error"],
+                    )
+                )
+            db.add_all(
+                stage_timing_rows(session_id, "material", result["stage_timings"])
+            )
+
+            jsx = result["jsx"]
+            if jsx is not None and not result["is_placeholder"]:
+                slide.content = jsx
+                # A placeholder row that regenerated into a real slide is now a
+                # real slide, and the deck shows it again.
+                slide.is_placeholder = False
+                logger.info(
+                    "Slide regenerated: session=%s slide=%s attempts=%d "
+                    "(%d chars, %.1fs)",
+                    session_id, slide_id, len(result["failed_attempts"]) + 1,
+                    len(jsx), time.monotonic() - started,
+                )
+            else:
+                logger.warning(
+                    "Slide regeneration produced nothing usable for session=%s "
+                    "slide=%s after %d attempt(s); keeping the slide the learner "
+                    "has",
+                    session_id, slide_id, len(result["failed_attempts"]),
+                )
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception(
+                "Slide regeneration failed for session %s slide %s after %.1fs",
+                session_id, slide_id, time.monotonic() - started,
+            )
         finally:
             db.close()
 
@@ -793,6 +972,82 @@ def dev_regenerate(
     return ApproveOut(
         phase=Phase.GENERATING,
         message="Material generation restarted (dev).",
+    )
+
+
+@router.post(
+    "/sessions/{session_id}/slides/{slide_id}/regenerate",
+    response_model=RegenerateOut,
+    status_code=202,
+    dependencies=GATE_THE_WRITES,
+)
+def request_slide_regeneration(
+    session_id: str,
+    slide_id: str,
+    background_tasks: BackgroundTasks,
+    body: RegenerateIn | None = None,
+    db: DBSession = Depends(get_db),
+) -> RegenerateOut:
+    """Regenerate one slide of a deck, leaving every other slide alone.
+
+    A gated write (#178): it changes the deck, and the request that asks for it
+    belongs to whoever is working on that Session.
+
+    Everything needed to write the slide again is already in this backend: the
+    content spec on the slide's own row (#197), the step in the plan, the prior
+    steps' summaries, the boundary map, the language. That is what makes a
+    single slide a self-contained operation instead of a reason to wipe the deck
+    and re-run generation (``POST /dev/sessions/{id}/regenerate``).
+
+    Answers ``202`` because writing a slide is several model calls: the work runs
+    in the background and the row is replaced when a new slide compiles. A
+    regeneration that exhausts its attempts changes nothing — the slide the
+    learner has stays.
+    """
+    # #118: mock mode never generates slides, so there is no slide to rewrite.
+    if is_mock_mode():
+        raise HTTPException(
+            status_code=400, detail="Slide generation is disabled in mock mode."
+        )
+
+    session = _get_session_or_404(db, session_id)
+    slide = db.get(SlideContent, slide_id)
+    if slide is None or slide.session_id != session_id:
+        raise HTTPException(status_code=404, detail="Slide not found")
+    # A placeholder slide is invisible outside dev mode here as everywhere else
+    # in this API (GET /slides/{id}, the deck read): in production it was never
+    # in the deck, so there is nothing on screen to ask about.
+    if slide.is_placeholder and not is_dev_mode():
+        raise HTTPException(status_code=404, detail="Slide not found")
+    if session.phase == Phase.GENERATING.value:
+        raise HTTPException(
+            status_code=409,
+            detail="Material generation is still running for this session",
+        )
+    if session.plan is None or _regeneration_inputs(db, session, slide) is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Session has no plan step for this slide — cannot regenerate",
+        )
+    if slide.content_spec is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This slide has no stored content spec — it was generated "
+                "before specs were stored. Regenerate the whole deck instead."
+            ),
+        )
+
+    feedback = ((body.feedback or "") if body is not None else "").strip()
+    background_tasks.add_task(
+        regenerate_slide_material, session_id, slide_id, feedback or None
+    )
+    return RegenerateOut(
+        slide_id=slide_id,
+        message=(
+            "Regeneration started. The slide is replaced when a new one "
+            "compiles."
+        ),
     )
 
 
