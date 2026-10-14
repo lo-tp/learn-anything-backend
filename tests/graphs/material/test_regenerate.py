@@ -185,18 +185,46 @@ class TestRegenerateSlide:
 
     def test_each_stage_of_a_regeneration_records_what_it_cost(self):
         """A regeneration runs the stages deck generation runs, and #194's rule
-        is that a stage's cost is written down."""
+        is that a stage's cost is written down — including which attempt of the
+        ladder it was. Which slide of which deck those rows describe is not this
+        module's to know, so it invents nothing here (routers/plan.py
+        attributes them)."""
         outcome, _ = _run([SlideOut(code="new slide")], [_validate_ok("new slide")])
 
         stages = [t["stage"] for t in outcome["stage_timings"]]
         assert stages == ["write_slide", "compile_slide"]
         assert all(t["duration_seconds"] >= 0 for t in outcome["stage_timings"])
         assert all(t["context"]["step_id"] == "s1" for t in outcome["stage_timings"])
-        # A row that does not say which run it came from cannot be told apart
-        # from a deck generation afterwards.
-        assert all(
-            t["context"]["regenerated"] is True for t in outcome["stage_timings"]
+        assert [t["context"]["attempt"] for t in outcome["stage_timings"]] == [1, 1]
+
+    def test_a_slide_and_its_placeholder_that_neither_compiled_returns_nothing(
+        self,
+    ):
+        """The one case with no slide to hand back.
+
+        Every attempt failed and the placeholder the exhausted branch
+        substitutes could not compile either — the same outcome the graph calls
+        "exhausted", where the deck simply loses that slot. Here it is the
+        caller's signal to leave the slide the learner already has.
+        """
+        attempts = MAX_MATERIAL_ATTEMPTS
+        writes = [SlideOut(code=f"try {n}") for n in range(attempts)]
+        validates = [
+            _validate_fail(f"try {n}", "syntax error at line 2")
+            for n in range(attempts)
+        ]
+
+        outcome, invoke = _run(
+            writes,
+            validates,
+            extra_compiles=[_validate_fail("placeholder", "sandbox is down")],
         )
+
+        assert invoke.call_count == attempts
+        assert outcome["jsx"] is None
+        assert outcome["is_placeholder"] is False
+        assert len(outcome["failed_attempts"]) == attempts
+        assert len(outcome["stage_timings"]) == attempts * 2
 
     def test_a_model_call_that_fails_is_not_silently_a_finished_slide(self):
         """An exception from the model reaches the caller.

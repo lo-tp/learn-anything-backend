@@ -428,36 +428,105 @@ def generate_materials(session_id: str) -> None:
 # --- Single-slide regeneration driver (#197) ---
 
 
-def _regeneration_inputs(
-    db: DBSession, session: Session, slide: SlideContent
-) -> tuple[dict, list[dict]] | None:
-    """What this slide was written from, rebuilt from the domain DB.
+def _plan_position(session: Session, step_id: str) -> int | None:
+    """Where this step sits in the plan, or ``None`` if the plan no longer has it.
 
-    Returns ``(step, established_concepts)`` — the plan step the slide belongs
-    to, and the summaries of every step before it, in plan order: exactly the
-    values the material generation driver passed the graph on the way to this
-    step. ``None`` when the plan no longer has that step, which is the case a
-    plan adjustment can leave behind: a slide whose step is gone has no title,
-    description or position to be rewritten from.
-
-    A prior step with no row contributes nothing: a step that was never
-    generated never established anything.
+    A plan can be adjusted after its deck was generated, and a slide whose step
+    is gone has no title, description or position to be rewritten from.
     """
     if session.plan is None:
         return None
-    steps = session.plan.steps
-    order = {step["id"]: i for i, step in enumerate(steps)}
-    target = order.get(slide.step_id)
-    if target is None:
+    for position, step in enumerate(session.plan.steps):
+        if step.get("id") == step_id:
+            return position
+    return None
+
+
+def _deck_position(slide: SlideContent) -> int:
+    """Which slot of its step's deck this row is, 1-based.
+
+    The slide's own name carries it: the deck driver assigns
+    ``{session_id}_{step_id}_slide_{n}`` where ``n`` is the slide's position in
+    the deck. That position — not the one-slide run's counting, where every
+    slide is slide 1 — is what a regeneration's ``failed_slides`` and
+    ``graph_stage_timings`` rows must key on, because those tables are keyed on
+    ``(session, step, slide_index)`` and read as one set by
+    ``scripts/slide_analysis.py`` and ``scripts/classify_slide_failures.py``.
+
+    A generated run keys its rows on the position in the *spec* list; the two
+    differ only when a slide was skipped entirely (its attempts exhausted *and*
+    the placeholder could not compile), which shifts every later deck slot down
+    by one. A stored row cannot tell which slide was skipped — no row was
+    written for it — so a regeneration keys on the deck slot it can see.
+
+    Falls back to 1 for a slide_id that does not carry the suffix.
+    """
+    _, separator, suffix = slide.slide_id.rpartition("_slide_")
+    if separator and suffix.isdigit():
+        return int(suffix)
+    return 1
+
+
+def _regeneration_inputs(
+    db: DBSession, session: Session, slide: SlideContent
+) -> tuple[dict, list[dict]] | None:
+    """The plan step this slide belongs to, and the concepts it was built on.
+
+    The step is the one the slide was generated for; the concepts are the
+    summaries of every earlier plan step, in plan order — the values the
+    material generation driver had accumulated by the time it reached this step.
+    A prior step whose row is still provisional is skipped for the same reason
+    the driver skips it: a step that never finished established nothing, and its
+    placeholder summary would be offered to the model as something the learner
+    has already been taught.
+
+    Returns ``None`` when the plan no longer has the step.
+    """
+    target = _plan_position(session, slide.step_id)
+    if target is None or session.plan is None:
         return None
 
-    rank = len(order)
-    rows = [row for row in db.query(StepMaterial).filter_by(session_id=session.session_id)]
-    before = sorted(
-        (row for row in rows if order.get(row.step_id, rank) < target),
-        key=lambda row: (order.get(row.step_id, rank), row.id),
-    )
-    return steps[target], [row.summary for row in before]
+    steps = session.plan.steps
+    order = {step["id"]: rank for rank, step in enumerate(steps)}
+    earlier = [step["id"] for step in steps[:target]]
+    summaries: list[dict] = []
+    if earlier:
+        rows = (
+            db.query(StepMaterial)
+            .filter(
+                StepMaterial.session_id == session.session_id,
+                StepMaterial.step_id.in_(earlier),
+                StepMaterial.is_complete.is_(True),
+            )
+            .all()
+        )
+        rows.sort(key=lambda row: (order[row.step_id], row.id))
+        summaries = [row.summary for row in rows]
+    return steps[target], summaries
+
+
+def _regeneration_timings(timings: list[dict], deck_position: int) -> list[dict]:
+    """A regeneration's stage rows, attributed to the deck slot they changed.
+
+    The nodes record a stage as the graph's own run sees it — the cursor inside
+    a one-slide run is always slide 1 — and the rows are read afterwards
+    alongside a generated deck's rows. Re-keying on the deck slot is what makes
+    a regenerated slide's costs land on the slide they belong to;
+    ``regenerated`` says which of the two runs wrote the row, so "what does
+    generating a deck cost" and "what does asking for one slide back cost" can
+    still be answered separately (#194).
+    """
+    return [
+        {
+            **timing,
+            "context": {
+                **(timing.get("context") or {}),
+                "slide_index": deck_position,
+                "regenerated": True,
+            },
+        }
+        for timing in timings
+    ]
 
 
 def regenerate_slide_material(
@@ -519,6 +588,9 @@ def regenerate_slide_material(
                     slide_id,
                 )
                 return
+            # Every row this task writes describes this deck slot, not the
+            # one-slide run that produced it (see _deck_position, #197).
+            position = _deck_position(slide)
 
             result = regenerate_slide(
                 llm,
@@ -535,14 +607,18 @@ def regenerate_slide_material(
                     FailedSlide(
                         session_id=session_id,
                         step_id=slide.step_id,
-                        slide_index=attempt["index"] + 1,  # 1-based for DB
+                        slide_index=position,
                         prompt=attempt.get("prompt", ""),
                         jsx=attempt["jsx"],
                         error=attempt["error"],
                     )
                 )
             db.add_all(
-                stage_timing_rows(session_id, "material", result["stage_timings"])
+                stage_timing_rows(
+                    session_id,
+                    "material",
+                    _regeneration_timings(result["stage_timings"], position),
+                )
             )
 
             jsx = result["jsx"]
@@ -1024,7 +1100,7 @@ def request_slide_regeneration(
             status_code=409,
             detail="Material generation is still running for this session",
         )
-    if session.plan is None or _regeneration_inputs(db, session, slide) is None:
+    if _plan_position(session, slide.step_id) is None:
         raise HTTPException(
             status_code=409,
             detail="Session has no plan step for this slide — cannot regenerate",
@@ -1042,11 +1118,15 @@ def request_slide_regeneration(
     background_tasks.add_task(
         regenerate_slide_material, session_id, slide_id, feedback or None
     )
+    # The acknowledgement is a user-facing reply, so it is in the learner's
+    # language (falls back to the English text if translation fails) — the same
+    # rule the plan approval follows.
     return RegenerateOut(
         slide_id=slide_id,
-        message=(
-            "Regeneration started. The slide is replaced when a new one "
-            "compiles."
+        message=localize_status(
+            pre_material_llm,
+            session.language or DEFAULT_LANGUAGE,
+            "Regeneration started. The slide is replaced when a new one compiles.",
         ),
     )
 
