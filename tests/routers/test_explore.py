@@ -169,6 +169,39 @@ class TestOrderAndNoCap:
         assert goals == [f"material {i:02d}" for i in range(22, -1, -1)]
 
 
+class TestLanguageOrdering:
+    """#205: the feed honours the caller's requested language the way History
+    does — matching Sessions first, newest first within each group."""
+
+    def test_requested_language_comes_first(self, client, db, make_session):
+        make_session(
+            session_id="en-oldest",
+            language="English",
+            phase=Phase.EXECUTING,
+            created_at=BASE,
+        )
+        make_session(
+            session_id="es-newest",
+            language="Spanish",
+            phase=Phase.EXECUTING,
+            created_at=BASE + timedelta(days=2),
+        )
+        make_session(
+            session_id="en-middle",
+            language="English",
+            phase=Phase.EXECUTING,
+            created_at=BASE + timedelta(days=1),
+        )
+
+        resp = client.get("/explore/sessions", params={"language": "English"})
+        assert resp.status_code == 200
+        assert [s["session_id"] for s in resp.json()["sessions"]] == [
+            "en-middle",
+            "en-oldest",
+            "es-newest",
+        ]
+
+
 class TestNoOwnerIdentity:
     def test_payload_carries_no_owner_fields(self, client, db, make_session):
         db.add(

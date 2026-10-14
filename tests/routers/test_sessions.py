@@ -119,6 +119,145 @@ class TestListSessions:
         assert resp.json() == {"sessions": []}
 
 
+class TestLanguageOrdering:
+    """#205: the caller passes the user's preferred language as a parameter.
+
+    Sessions in that language come first, then the rest; within each group
+    the newest come first. Without the parameter (or with a blank one) the
+    list keeps its plain newest-first order. The backend stores no per-User
+    preference — the caller is the one who knows it.
+    """
+
+    def test_requested_language_comes_first(
+        self, client, db, make_session, auth_cookie
+    ):
+        make_session(
+            session_id="en-oldest", language="English", created_at=BASE
+        )
+        make_session(
+            session_id="es-newest",
+            language="Spanish",
+            created_at=BASE + timedelta(days=2),
+        )
+        make_session(
+            session_id="en-middle",
+            language="English",
+            created_at=BASE + timedelta(days=1),
+        )
+
+        resp = client.get(
+            "/sessions",
+            params={"language": "English"},
+            cookies=_signed_in(auth_cookie),
+        )
+        assert resp.status_code == 200
+        ids = [s["session_id"] for s in resp.json()["sessions"]]
+        assert ids == ["en-middle", "en-oldest", "es-newest"]
+
+    def test_match_ignores_case_and_padding(
+        self, client, db, make_session, auth_cookie
+    ):
+        # The stored value is whatever the detection wrote ("English"); the
+        # caller's parameter is matched the way the language helpers match —
+        # stripped and casefolded.
+        make_session(session_id="en-1", language="English", created_at=BASE)
+        make_session(
+            session_id="es-1",
+            language="Spanish",
+            created_at=BASE + timedelta(days=1),
+        )
+
+        resp = client.get(
+            "/sessions",
+            params={"language": "  eNgLiSh "},
+            cookies=_signed_in(auth_cookie),
+        )
+        ids = [s["session_id"] for s in resp.json()["sessions"]]
+        assert ids == ["en-1", "es-1"]
+
+    def test_legacy_null_language_reads_as_the_default(
+        self, client, db, make_session, auth_cookie
+    ):
+        # Readers fall back to language.DEFAULT_LANGUAGE for legacy NULL rows
+        # (db.models.Session), so an English ask sorts them with the first
+        # group and a Spanish ask sorts them after it.
+        make_session(
+            session_id="legacy",
+            language=None,
+            created_at=BASE + timedelta(days=1),
+        )
+        make_session(session_id="spanish", language="Spanish", created_at=BASE)
+
+        resp = client.get(
+            "/sessions",
+            params={"language": "English"},
+            cookies=_signed_in(auth_cookie),
+        )
+        assert [s["session_id"] for s in resp.json()["sessions"]] == [
+            "legacy",
+            "spanish",
+        ]
+
+        resp = client.get(
+            "/sessions",
+            params={"language": "Spanish"},
+            cookies=_signed_in(auth_cookie),
+        )
+        assert [s["session_id"] for s in resp.json()["sessions"]] == [
+            "spanish",
+            "legacy",
+        ]
+
+    def test_blank_language_keeps_newest_first(
+        self, client, db, make_session, auth_cookie
+    ):
+        make_session(session_id="en-1", language="English", created_at=BASE)
+        make_session(
+            session_id="es-1",
+            language="Spanish",
+            created_at=BASE + timedelta(days=1),
+        )
+
+        resp = client.get(
+            "/sessions",
+            params={"language": "   "},
+            cookies=_signed_in(auth_cookie),
+        )
+        ids = [s["session_id"] for s in resp.json()["sessions"]]
+        assert ids == ["es-1", "en-1"]
+
+    def test_language_order_combines_with_the_phase_filter(
+        self, client, db, make_session, auth_cookie
+    ):
+        make_session(
+            session_id="en-1",
+            language="English",
+            phase=Phase.EXECUTING,
+            created_at=BASE,
+        )
+        make_session(
+            session_id="es-1",
+            language="Spanish",
+            phase=Phase.EXECUTING,
+            created_at=BASE + timedelta(days=1),
+        )
+        # Newer than both, but filtered out: it may not reorder the answer.
+        make_session(
+            session_id="en-2",
+            language="English",
+            phase=Phase.CLARIFYING,
+            created_at=BASE + timedelta(days=2),
+        )
+
+        resp = client.get(
+            "/sessions",
+            params={"phase": ["executing"], "language": "English"},
+            cookies=_signed_in(auth_cookie),
+        )
+        ids = [s["session_id"] for s in resp.json()["sessions"]]
+        assert ids == ["en-1", "es-1"]
+
+
 # Every field a list item may carry. Anything else would be a change to the
 # shape the generated client types are built from — and an addition such as an
 # email or a display name would be owner identity (#144).
