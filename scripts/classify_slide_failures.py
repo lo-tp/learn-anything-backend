@@ -4,7 +4,8 @@ Reads ``failed_slides`` — one row per failed slide compile attempt, written by
 the material graph's ``compile_slide`` node — reduces each stored error to the
 message the sandbox actually reported, and maps it to exactly one class of
 ``SLIDE_FAILURE_CLASSES`` (``syntax_error / unknown_component /
-truncated_output / sandbox_timeout / content_spec_invalid / other``).
+truncated_output / sandbox_timeout / content_spec_invalid / math_notation /
+other``).
 
 This is the first honest answer to "how frequent are slide generation failures,
 and why". The class lives in ``graphs/material/sandbox.py`` so the live graph
