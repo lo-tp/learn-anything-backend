@@ -988,18 +988,24 @@ These live in the `MemorySaver` checkpoint, so the graph resumes from its in-mem
 
 | Node | LLM task |
 |------|----------|
-| `write_slides` | Write 3-7 self-contained React JSX slide components for this step (standalone `export default` components; inline styles; no external assets). Follow teacher.md: establish unconditional truths before building, motivate every step ("how could I have discovered this?"), show the dependency connection to prior steps (referenced via `established_concepts`). Math is AsciiMath inside `<MathJax>`; LaTeX is not used in slide JSX. The node returns the JSX component source strings; the driver assigns globally-unique IDs `{session_id}_{step_id}_slide_{n}` and stores one `SlideContent` row per slide. |
+| `write_slides` | Write 3-7 self-contained React JSX slide components for this step (standalone `export default` components; inline styles; no external assets). Follow teacher.md: establish unconditional truths before building, motivate every step ("how could I have discovered this?"), show the dependency connection to prior steps (referenced via `established_concepts`). Math is written as AsciiMath inside `<MathJax>`; the slide prompt forbids LaTeX there (what models actually emit is a separate, open question — see Notation below). The node returns the JSX component source strings; the driver assigns globally-unique IDs `{session_id}_{step_id}_slide_{n}` and stores one `SlideContent` row per slide. |
 | `write_questions` | Write 3-5 MCQ/TF questions testing that the step's concepts landed. Follow the option-construction procedure in teacher.md (bare claims, mutate correct → distractors, no asymmetric bolding, explanations separate). The node code assigns IDs `{step_id}_q{n}` (the LLM does not). |
 | `summarize_step` | Given the generated slides, extract 3-5 key points: definitions, formulas, core insights. Output is a compact `ConceptSummary` object stored for use by subsequent steps. |
 
-**Notation policy:** the two notations in this graph are different on purpose.
+**Notation policy**
 
-| Output | Notation | Why |
+The two notations in this graph are different on purpose.
+
+| Output | Notation asked for | Why this one |
 |---|---|---|
 | Slide math | AsciiMath in backticked `<MathJax>` strings | the slide renderer is loaded with `input/asciimath` |
-| Step key points, question text, options, explanations | **plain-text Unicode math** — `≈ × ÷ ≠ ≤ ≥ ± ∞ → √ π Σ`, `x^2`, `v_0`, `a/b`, `sqrt(2)` | these are displayed exactly as written, and no surface that shows them has a math renderer |
+| Step key points, question text, options, explanations | **plain-text math** — `≈ × ÷ ≠ ≤ ≥ ± ∞ → √ π Σ`, Greek letters, `x^2`, `v_0`, `a/b`, `sqrt(2)` | these are displayed exactly as written, and no surface that shows them has a math renderer |
 
-`prompts.material.PLAIN_MATH_NOTATION` is the one block that says so, carried by `SUMMARIZE_STEP_SYSTEM` and `WRITE_QUESTIONS_SYSTEM`; the slide prompt keeps its own rule. LaTeX was asked for in those two prompts until this was fixed: the measured result was 374 of 553 stored key points containing `$…$`, 1,301 of 3,186 question fields, and 8 of 606 stored slide components carrying the damaged forms (`\text` decoded as a tab plus `ext`). The transport half of the reason matters here too — these strings travel through a structured JSON call, and a lone backslash is read as an escape on the way. `tests/graphs/material/test_notation.py` guards the policy (real prompts only). See lo-tp/learn-anything-frontend#198.
+`x^2` and `sqrt(2)` are written in ASCII on purpose: they read plainly in text, and they are also what the AsciiMath path accepts, so inherited key points do not have to be rewritten before they reach a slide.
+
+`prompts.material.PLAIN_MATH_NOTATION` is the one block that states this, carried by `SUMMARIZE_STEP_SYSTEM` and `WRITE_QUESTIONS_SYSTEM`; `_JSX_SYSTEM_PROMPT` keeps its own rule. `tests/graphs/material/test_notation.py` guards both halves — the shared block, and the system prompt each node actually assembles — against the private prompt package, so it skips when the submodule is absent.
+
+Before this, those two prompts asked for LaTeX. Measured across the local development database (15 sessions) on 2026-10-14: 374 of 553 stored key points contained `$…$` and 297 a literal `\macro`; 1,301 of 3,186 question fields and 848 of them; 526 of 606 stored slide components contained a backslash macro even though the slide prompt forbids LaTeX, and 8 of 606 carried the damaged forms — a tab where `\text` was written, a backspace where `\bar` was. The transport half of the reason belongs in the policy too: these strings travel through a structured JSON call, and a lone backslash is read as an escape on the way. What the model still emits inside slide JSX is unresolved and tracked separately. See lo-tp/learn-anything-frontend#198 and #196.
 
 **Control flow:** Linear. Compiled **without a checkpointer** — it is one-shot per step with no interrupts, so its resume state lives in the domain DB (one committed `StepMaterial` row per step), not in graph state. Called once per step, sequentially through the plan (step 1 → step 2 → … → step N). Each call receives the **accumulated concept summaries** from all prior steps (not the full materials), so context stays small.
 
