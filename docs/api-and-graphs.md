@@ -1003,6 +1003,8 @@ The two notations in this graph are different on purpose.
 
 `x^2` and `sqrt(2)` are written in ASCII on purpose: they read plainly in text, and they are also what the AsciiMath path accepts, so inherited key points do not have to be rewritten before they reach a slide.
 
+The decision itself is recorded in the frontend repository, not here: ADR-0007, "Math that a learner reads as text is written as plain text", and the Notation / Text surface / Rendered surface / Plain-text math terms in its glossary. This repo enforces the decision; that one is where the record and the reasons live.
+
 `prompts.material.PLAIN_MATH_NOTATION` is the one block that states this, carried by `SUMMARIZE_STEP_SYSTEM` and `WRITE_QUESTIONS_SYSTEM`; `_JSX_SYSTEM_PROMPT` keeps its own rule. `tests/graphs/material/test_notation.py` guards both halves — the shared block, and the system prompt each node actually assembles — against the private prompt package, so it skips when the submodule is absent.
 
 Before this, those two prompts asked for LaTeX. Measured across the local development database (15 sessions) on 2026-10-14: 374 of 553 stored key points contained `$…$` and 297 a literal `\macro`; 1,301 of 3,186 question fields and 848 of them; 526 of 606 stored slide components contained a backslash macro even though the slide prompt forbids LaTeX, and 8 of 606 carried the damaged forms — a tab where `\text` was written, a backspace where `\bar` was. The transport half of the reason belongs in the policy too: these strings travel through a structured JSON call, and a lone backslash is read as an escape on the way. What the model still emits inside slide JSX is unresolved and tracked separately. See lo-tp/learn-anything-frontend#198 and #196.
