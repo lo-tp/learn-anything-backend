@@ -5,6 +5,21 @@ https://github.com/lo-tp/learn-anything-frontend/issues
 
 All issues — including backend ones — are filed in `lo-tp/learn-anything-frontend`. Use the `gh` CLI against that repository unless the user specifies otherwise. Example: `gh issue view 155 --repo lo-tp/learn-anything-frontend`
 
+### Priority
+
+Issues carry a priority label from `P0` (highest) to `P5` (lowest):
+
+| Label | Meaning |
+|---|---|
+| `P0` | Drop everything — active incident or data loss |
+| `P1` | Urgent — blocks shipping or a core flow is broken |
+| `P2` | High — important feature or regression, scheduled soon |
+| `P3` | Medium — valuable but not time-sensitive |
+| `P4` | Low — nice to have, no active pressure |
+| `P5` | Backlog — parked, revisit when capacity allows |
+
+When the user says "prioritise" or "set priority", apply the matching label via `gh issue edit <n> --repo lo-tp/learn-anything-frontend --add-label P<n>`.
+
 ## Domain docs
 
 **All context and ADR documentation lives in `lo-tp/learn-anything-frontend` — not in this backend repo.** (The old `lo-tp/learn-anything` repo is archived; it was moved there.)
