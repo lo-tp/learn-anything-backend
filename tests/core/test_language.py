@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from pydantic import ValidationError
 
 import core.language
 from core.language import (
@@ -146,9 +147,9 @@ class TestLanguageCallsStateTheirBudget:
 
         llm = MagicMock()
         structured = llm.with_structured_output.return_value.bind.return_value
-        structured.invoke.return_value = _LanguageDetectionOut(language="es")
+        structured.invoke.return_value = _LanguageDetectionOut(language="zh")
 
-        assert detect_language("hola", llm) == "Spanish"
+        assert detect_language("hola", llm) == "Chinese"
 
         llm.with_structured_output.return_value.bind.assert_called_once_with(
             reasoning_effort="minimal", max_tokens=256
@@ -195,14 +196,17 @@ class TestShortTextLanguageDetection:
         """A model that was down must not become the session's language forever."""
         llm = MagicMock()
         structured = llm.with_structured_output.return_value.bind.return_value
-        structured.invoke.side_effect = [ConnectionError("model down"), SimpleNamespace(language="fr")]
+        structured.invoke.side_effect = [
+            ConnectionError("model down"),
+            SimpleNamespace(language="zh"),
+        ]
         assert detect_language("oui", llm) == DEFAULT_LANGUAGE
-        assert detect_language("oui", llm) == "French"
+        assert detect_language("oui", llm) == "Chinese"
         assert structured.invoke.call_count == 2
 
     def test_text_the_classifier_can_read_never_reaches_the_model(self):
         llm, invoke = _classifier("fr")
-        assert detect_language("Je veux apprendre le calcul differentiel", llm) == "French"
+        assert detect_language("Je veux apprendre le calcul differentiel", llm) == DEFAULT_LANGUAGE
         assert invoke.call_count == 0
 
     def test_the_cache_is_bounded(self):
@@ -219,3 +223,42 @@ class TestShortTextLanguageDetection:
         clear_short_text_language_cache()
         detect_language("yes", llm)
         assert invoke.call_count == 2
+
+
+class TestOnlyEnglishAndChineseAreSupported:
+    """What detection is allowed to name. The app writes learner-facing copy in
+    English and Chinese only; every path — classifier, fallback model, or a
+    model that misbehaves — resolves into one of those two or the default."""
+
+    def test_classifier_chinese_text_resolves_to_chinese(self):
+        llm, invoke = _classifier("en")  # inverted: reaching the model says English
+        assert detect_language("我想学习微积分和线性代数。", llm) == "Chinese"
+        assert invoke.call_count == 0
+
+    def test_classifier_english_text_resolves_to_english(self):
+        llm, invoke = _classifier("zh")  # inverted: reaching the model says Chinese
+        assert detect_language("I want to learn linear algebra and calculus.", llm) == "English"
+        assert invoke.call_count == 0
+
+    def test_a_language_outside_the_two_resolves_to_the_default(self):
+        """A learner may write in any language; Chinese is the only second one."""
+        assert detect_language("ありがとう、微積分を勉強したいです。") == DEFAULT_LANGUAGE
+        assert detect_language("Je veux apprendre le calcul différentiel.") == DEFAULT_LANGUAGE
+
+    def test_short_chinese_text_resolves_through_the_model_path(self):
+        llm, _ = _classifier("zh")
+        assert detect_language("我想学", llm) == "Chinese"
+
+    def test_a_model_answer_outside_the_two_codes_is_the_default(self):
+        """The schema asks for the two codes; the mapping keeps that promise
+        even if a backend hands back something else."""
+        llm, _ = _classifier("ja")
+        assert detect_language("ありがとう", llm) == DEFAULT_LANGUAGE
+
+    def test_the_detection_schema_accepts_only_the_two_codes(self):
+        from core.language import _LanguageDetectionOut
+
+        assert _LanguageDetectionOut(language="zh").language == "zh"
+        assert _LanguageDetectionOut(language="en").language == "en"
+        with pytest.raises(ValidationError):
+            _LanguageDetectionOut.model_validate({"language": "fr"})

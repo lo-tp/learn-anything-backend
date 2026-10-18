@@ -326,19 +326,19 @@ class TestAdjustPlan:
         )
         with (
             patch("routers.plan.plan_graph") as graph,
-            patch("routers.plan.detect_language", return_value="German") as dl,
+            patch("routers.plan.detect_language", return_value="Chinese") as dl,
             patch("routers.plan.has_meaningful_signal", return_value=True),
         ):
             graph.invoke.return_value = {"__interrupt__": object(),
                                          "current_plan": _valid_plan()}
             resp = client.post(
                 f"/sessions/{sid}/plan/adjust",
-                json={"adjustment": "Bitte füge mehr Beispiele hinzu"},
+                json={"adjustment": "请添加更多例子，我想多练一些题"},
             )
         assert resp.status_code == 200
         dl.assert_called_once()
         db.expire_all()
-        assert db.get(Session, sid).language == "German"
+        assert db.get(Session, sid).language == "Chinese"
 
     def test_graph_exception_is_500_and_cleans_thread(self, client, db, make_session):
         sid = _seed_plan_session(
