@@ -33,6 +33,10 @@ from tests.tool_shapes import mcp_shaped_tool as _mcp_shaped_tool
 # node passes to core/reasoning.py and the graph passes to timed_node.
 STAGE = "clarify.assess_goal"
 
+# The one stage that states which repeat of itself a call is, and so the one a
+# per-attempt setting (a ladder) can be read against today.
+WRITE_SLIDE = stage_name("material", "write_slide")
+
 # --- structured_invoke ---
 
 
@@ -81,6 +85,7 @@ class TestStructuredInvoke:
             )
             assert mock_fn.call_args.kwargs == {
                 "stage": STAGE,
+                "stage_position": None,
                 "reasoning_effort": "minimal",
             }
 
@@ -92,7 +97,12 @@ class TestStructuredInvoke:
             "graphs.common.structured_invoke_messages", return_value=mock_result
         ) as mock_fn:
             structured_invoke(llm, _DummySchema, "s", "h", stage=STAGE)
-            assert mock_fn.call_args.kwargs == {"stage": STAGE}
+            # A stage that does not repeat states no position, and none is
+            # forwarded as nothing: only write_slide ever states one.
+            assert mock_fn.call_args.kwargs == {
+                "stage": STAGE,
+                "stage_position": None,
+            }
 
 
 # --- structured_invoke_messages ---
@@ -475,6 +485,46 @@ class TestConfiguredSamplingIsAppliedAtTheCall:
         assert structured.call_args.kwargs["temperature"] == 0.8
 
 
+    def test_a_call_that_states_its_repeat_is_given_that_rung(self, monkeypatch):
+        """The seam is where a ladder is read, because the seam is where the
+        stage's settings are resolved (core/sampling.py)."""
+        monkeypatch.setenv("LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE", "0.45,0.25,0.15")
+        monkeypatch.setenv("LLM_TOP_K_MATERIAL_WRITE_SLIDE", "40,20,5")
+        llm = _answering(MagicMock())
+
+        structured_invoke_messages(
+            llm,
+            _DummySchema,
+            [HumanMessage(content="hi")],
+            stage=WRITE_SLIDE,
+            stage_position=2,
+            temperature=0.4,
+            extra_body={"top_k": 25},
+        )
+
+        assert _bound_kwargs(llm) == {
+            "temperature": 0.25,
+            "extra_body": {"top_k": 20},
+        }
+
+    def test_a_stage_that_does_not_repeat_is_given_no_rung_of_a_ladder(
+        self, monkeypatch, caplog
+    ):
+        """A ladder named for a single-call stage is a mistake worth reporting, not
+        a value to guess at."""
+        monkeypatch.setenv("LLM_TEMPERATURE_CLARIFY_ASSESS_GOAL", "0.45,0.25")
+        llm = _answering(MagicMock())
+
+        with caplog.at_level(logging.WARNING):
+            structured_invoke_messages(
+                llm, _DummySchema, [HumanMessage(content="hi")], stage=STAGE
+            )
+
+        llm.with_structured_output.return_value.bind.assert_not_called()
+        assert "LLM_TEMPERATURE_CLARIFY_ASSESS_GOAL" in caplog.text
+        assert "clarify.assess_goal" in caplog.text
+
+
 # --- unknown_option ---
 
 
@@ -733,6 +783,7 @@ class TestToolTurnCarriesTheReasoningBudget:
             )
         assert structured.call_args.kwargs == {
             "stage": STAGE,
+            "stage_position": None,
             "reasoning_effort": "low",
             "max_tokens": 4096,
         }
@@ -745,7 +796,12 @@ class TestToolTurnCarriesTheReasoningBudget:
             return_value=_DummySchema(value="x"),
         ) as structured:
             structured_invoke_with_tools(llm, _DummySchema, "s", "h", [], stage=STAGE)
-        assert structured.call_args.kwargs == {"stage": STAGE}
+        # Only the stage and its (absent) position travel: a call that states
+        # nothing keeps sending nothing.
+        assert structured.call_args.kwargs == {
+            "stage": STAGE,
+            "stage_position": None,
+        }
 
 
 # --- timed_node (#194) ---

@@ -177,15 +177,20 @@ def make_plan_slide_contents(llm: BaseChatModel):
 
 
 def _slide_code(
-    llm: BaseChatModel, messages: list[BaseMessage], bind_kwargs: dict
+    llm: BaseChatModel, messages: list[BaseMessage], bind_kwargs: dict,
+    stage_position: int,
 ) -> str:
     """One structured slide-writing call: return the JSX code string.
 
     The first attempt and a self-repair turn (#165) are the same stage, so the
-    name is stated here rather than threaded through both callers.
+    name is stated here rather than threaded through both callers — and so is the
+    attempt, because a stage that repeats its call has to say which repeat this
+    is for a per-attempt setting to mean anything (``stage_position``,
+    core/sampling.py).
     """
     out = structured_invoke_messages(
-        llm, SlideOut, messages, stage=WRITE_SLIDE, **bind_kwargs
+        llm, SlideOut, messages, stage=WRITE_SLIDE, stage_position=stage_position,
+        **bind_kwargs,
     )
     return out.code
 
@@ -200,6 +205,7 @@ def _repair_slide_code(
     spec: dict,
     language: str,
     bind_kwargs: dict,
+    stage_position: int,
     feedback: str | None = None,
 ) -> str:
     """One bounded self-repair turn.
@@ -236,7 +242,7 @@ def _repair_slide_code(
     )
     system = _JSX_SYSTEM_PROMPT + language_instruction(language)
     messages = [SystemMessage(content=system), HumanMessage(content="\n".join(parts))]
-    return _slide_code(llm, messages, bind_kwargs)
+    return _slide_code(llm, messages, bind_kwargs, stage_position)
 
 
 def make_write_slide(llm: BaseChatModel):
@@ -309,7 +315,7 @@ def make_write_slide(llm: BaseChatModel):
         # reduced error is handed back for a repair turn. The loop is bounded
         # by MAX_SLIDE_SELF_REPAIR_TURNS; if it exhausts, the best-effort JSX
         # is returned and the outer retry routing (compile_slide) takes over.
-        jsx = _slide_code(llm, initial_messages, bind)
+        jsx = _slide_code(llm, initial_messages, bind, new_attempts)
         last_error: str | None = None
         repair_turns = 0
         for turn in range(MAX_SLIDE_SELF_REPAIR_TURNS + 1):
@@ -335,7 +341,7 @@ def make_write_slide(llm: BaseChatModel):
             )
             jsx = _repair_slide_code(
                 llm, jsx, result, step, learner_context, established, spec,
-                language, bind, feedback,
+                language, bind, new_attempts, feedback,
             )
 
         logger.info(

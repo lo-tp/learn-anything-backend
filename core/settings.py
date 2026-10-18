@@ -16,6 +16,15 @@ apart (#194 review). The rule is short and it should only be written once:
 - the two names a per-stage knob has are derived from the stage name in one
   place, :func:`stage_setting_names`, so two modules with knobs on the same
   stage read the same variable.
+- a numeric knob may be asked for as a **ladder** — one value, or several
+  separated by commas (:func:`bounded_number_ladder`) — because a stage that
+  repeats its call has one deliberate value per repeat, and retuning it needs the
+  same shape. Which value applies to which repeat is not this module's business;
+  it returns the numbers in the order they were written, together with the name
+  that named them, because a warning has to be able to say which setting it is
+  objecting to. Numbers that must not be lists — an output cap, a timeout, a
+  retry count — go through :func:`bounded_number_setting`, which reports a list
+  rather than reading half of it.
 """
 
 from __future__ import annotations
@@ -55,20 +64,17 @@ def _first_set_value(names: Sequence[str]) -> tuple[str, str] | None:
     return None
 
 
-def _parse_number[NumberT](
-    name: str, raw: str, cast: Callable[[str], NumberT], default: NumberT | None
-) -> NumberT | None:
-    """``cast(raw)``, or ``default`` with the bad value named in the log."""
+def _parse_number(raw: str, cast: Callable[[str], float]) -> float | None:
+    """``cast(raw)``, or ``None`` when it is not a number.
+
+    The reporting is the caller's, because what a bad value means depends on the
+    knob it arrived for: one knob falls back to a default, a ladder treats the
+    whole setting as unset.
+    """
     try:
         return cast(raw)
     except ValueError:
-        logger.warning(
-            "%s=%r is not a number; using the default %s",
-            name,
-            raw,
-            _described(default),
-        )
-        return default
+        return None
 
 
 def _described(value: object) -> str:
@@ -96,8 +102,78 @@ def numeric_setting[NumberT](
     if found is None:
         return default
     name, raw = found
-    parsed = _parse_number(name, raw, cast, default)
-    return default if parsed is None else parsed
+    try:
+        return cast(raw)
+    except ValueError:
+        logger.warning(
+            "%s=%r is not a number; using the default %s", name, raw, _described(default)
+        )
+        return default
+
+
+def bounded_number_ladder(
+    names: Sequence[str],
+    cast: Callable[[str], float],
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+) -> tuple[str, tuple[float, ...]] | None:
+    r"""The setting that is set, and the one or more numbers it names.
+
+    A value is a **ladder** when it names several numbers: one per rung of a
+    stage that repeats its call. ``material.write_slide`` is that stage — it
+    writes a slide again, each attempt deliberately less creative than the last —
+    so retuning its ladder from ``.env`` needs one value per rung, not one
+    value. The same knob therefore accepts either shape:
+    ``LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE=0.9`` is 0.9 at every rung, and
+    ``0.9,0.6,0.4`` is a new three-rung ladder. Which rung applies is not this
+    function's business; it returns the values in the order they were written.
+
+    Every number in the list is checked the way a single number is, and one bad
+    one makes the whole setting unusable: half a ladder is not a ladder, and a
+    setting that silently kept two of its three rungs is a behaviour change
+    nobody chose. The rejected value is named in the log.
+
+    Returns ``None`` when nothing is set or the setting is unusable, and the
+    ``(name, values)`` pair when it is — the name because "which of these two
+    settings did I just set?" is the question a warning has to answer.
+    """
+    found = _first_set_value(names)
+    if found is None:
+        return None
+    name, raw = found
+    parts = [part.strip() for part in raw.split(",")]
+    if any(not part for part in parts):
+        logger.warning(
+            "%s=%r is not a list of numbers; treating the whole setting as unset",
+            name,
+            raw,
+        )
+        return None
+    values: list[float] = []
+    for part in parts:
+        number = _parse_number(part, cast)
+        if number is None:
+            logger.warning(
+                "%s=%r contains %r, which is not a number; treating the whole "
+                "setting as unset",
+                name,
+                raw,
+                part,
+            )
+            return None
+        too_low = minimum is not None and number < minimum
+        too_high = maximum is not None and number > maximum
+        if too_low or too_high:
+            logger.warning(
+                "%s=%s is outside %s; treating the whole setting as unset",
+                name,
+                part,
+                _range_text(minimum, maximum),
+            )
+            return None
+        values.append(number)
+    return name, tuple(values)
 
 
 def bounded_number_setting(
@@ -108,39 +184,34 @@ def bounded_number_setting(
     minimum: float | None = None,
     maximum: float | None = None,
 ) -> float | None:
-    r"""A number the backend will actually accept, or ``default`` when it is not one.
+    r"""One number the backend will actually accept, or ``default`` when it is not.
 
-    ``cast`` may be :func:`int` — an integer is a number a ``float`` annotation
-    accepts, and the value that reaches the request is the one that was written.
+    :func:`bounded_number_ladder` is the reading; this is the shape a knob that
+    takes exactly one value wants — including the ladder-shaped mistake, which is
+    reported and answered with the default rather than guessed at.
 
     The same rule as :func:`enumerated_setting`, for a range instead of a fixed
     set: ``LLM_TEMPERATURE=5`` is a request the backend answers with HTTP 400,
     and a rejected request is a generation that failed where a knob ignored is
-    not. The value that was rejected is named in the log.
+    not.
 
     ``default`` may be ``None``, meaning *send nothing* — the backend's own
-    default, which is what every sampling knob here falls back to. That is what
-    makes adding a knob a no-op until someone writes it into ``.env``.
+    default, which is what every sampling knob falls back to. That is what makes
+    adding a knob a no-op until someone writes it into ``.env``.
     """
-    found = _first_set_value(names)
+    found = bounded_number_ladder(names, cast, minimum=minimum, maximum=maximum)
     if found is None:
         return default
-    name, raw = found
-    value = _parse_number(name, raw, cast, default)
-    if value is None:
-        return default
-    too_low = minimum is not None and value < minimum
-    too_high = maximum is not None and value > maximum
-    if too_low or too_high:
+    name, numbers = found
+    if len(numbers) != 1:
         logger.warning(
-            "%s=%s is outside %s; using the default %s",
+            "%s names %d values where this knob takes one; using the default %s",
             name,
-            raw,
-            _range_text(minimum, maximum),
+            len(numbers),
             _described(default),
         )
         return default
-    return value
+    return numbers[0]
 
 
 def stage_setting_names(base_name: str, stage: str) -> tuple[str, str]:
