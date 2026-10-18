@@ -185,23 +185,24 @@ RECOVERED_JSON = "backend_refused_json"
 
 def structured_invoke[Schema: BaseModel](
     llm: BaseChatModel, schema: type[Schema], system: str, human: str,
-    *, stage: str, **bind_kwargs: Any,
+    *, stage: str, stage_position: int | None = None, **bind_kwargs: Any,
 ) -> Schema:
     """Run the LLM with structured output and return a validated schema instance.
 
     ``bind_kwargs`` are forwarded to :func:`structured_invoke_messages` for
     callers that build the messages inline (e.g. ``reasoning_effort="minimal"``
-    on a slide-generation call).
+    on a slide-generation call), and ``stage_position`` with them: which repeat of
+    the stage this call is, for a stage that repeats one.
     """
     return structured_invoke_messages(
         llm, schema, [SystemMessage(content=system), HumanMessage(content=human)],
-        stage=stage, **bind_kwargs,
+        stage=stage, stage_position=stage_position, **bind_kwargs,
     )
 
 
 def structured_invoke_messages[Schema: BaseModel](
     llm: BaseChatModel, schema: type[Schema], messages: list[BaseMessage],
-    *, stage: str, **bind_kwargs: Any,
+    *, stage: str, stage_position: int | None = None, **bind_kwargs: Any,
 ) -> Schema:
     r"""Run the LLM with structured output over an explicit message list.
 
@@ -218,6 +219,15 @@ def structured_invoke_messages[Schema: BaseModel](
     the ones an operator has deliberately retuned, and it is what lets
     ``LLM_TEMPERATURE_PLAN_DESIGN_PLAN`` reach a call without that node knowing
     the knob exists.
+
+    ``stage_position`` is which repeat of this stage the call is, 1-based, and it
+    is what makes a setting that names one value per repeat readable:
+    ``LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE=0.4,0.2,0.1`` is the slide ladder
+    retuned in one line, and only a call that says which attempt it is can be
+    given the right rung. Only ``write_slide`` states a position today; every other
+    call states nothing, including the ones a graph loop asks again round after
+    round (``probe.generate_batch``), which would need their node to carry the
+    round the way that node carries its attempt.
 
     ``stage`` names the call the way this file's caller already names it — the
     qualified constant a pre-slide node passes to
@@ -242,7 +252,7 @@ def structured_invoke_messages[Schema: BaseModel](
     rewriting the request to guess at either is how a real failure becomes
     invisible. Those raise unchanged.
     """
-    bind_kwargs = apply_configured_sampling(bind_kwargs, stage)
+    bind_kwargs = apply_configured_sampling(bind_kwargs, stage, stage_position)
     model = llm.with_structured_output(schema)
     if bind_kwargs:
         model = model.bind(**bind_kwargs)
@@ -336,7 +346,8 @@ def _answer_text(response: AIMessage) -> str:
 
 def structured_invoke_with_tools[Schema: BaseModel](
     llm: BaseChatModel, schema: type[Schema], system: str, human: str,
-    tools: Sequence[BaseTool], *, stage: str, **bind_kwargs: Any,
+    tools: Sequence[BaseTool], *, stage: str,
+    stage_position: int | None = None, **bind_kwargs: Any,
 ) -> Schema:
     """Run the LLM with structured output, offering it tools first.
 
@@ -364,7 +375,7 @@ def structured_invoke_with_tools[Schema: BaseModel](
     # search is a model call like any other, so it runs under the same decoding
     # an operator configured. Applying it again downstream changes nothing —
     # layering the same values twice is layering them once.
-    bind_kwargs = apply_configured_sampling(bind_kwargs, stage)
+    bind_kwargs = apply_configured_sampling(bind_kwargs, stage, stage_position)
 
     messages: list[BaseMessage] = [SystemMessage(content=system), HumanMessage(content=human)]
     if tools:
@@ -378,7 +389,8 @@ def structured_invoke_with_tools[Schema: BaseModel](
             for call in asked.tool_calls:
                 messages.append(_run_tool_call(by_name, call))
     return structured_invoke_messages(
-        llm, schema, messages, stage=stage, **bind_kwargs
+        llm, schema, messages, stage=stage, stage_position=stage_position,
+        **bind_kwargs,
     )
 
 

@@ -190,11 +190,12 @@ def slide_sampling_bind_kwargs(attempt: int, stage: str) -> dict[str, Any]:
     What this function states is the **default**. Whatever an operator has put in
     ``.env`` for this stage sits above it, at the one place every structured call
     is assembled (:func:`core.sampling.apply_configured_sampling`, through
-    :func:`graphs.common.structured_invoke_messages`), so
-    ``LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE`` — or ``LLM_TEMPERATURE`` for the
-    whole run — replaces the ladder's value for that one parameter. Setting a
-    sampling knob globally therefore flattens the ladder for that knob, which is
-    the point: the ladder exists to be retuned.
+    :func:`graphs.common.structured_invoke_messages`), and it is read per attempt
+    because this node says which attempt it is (``stage_position``, threaded from
+    :func:`_slide_code`): ``LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE=0.4,0.2,0.1``
+    replaces the ladder rung for rung, and a single number replaces it at every
+    attempt. Either way the profile below is what stands when nobody has written
+    one — which is the state every run of this app is in until someone does.
     """
     profile = slide_sampling_for_attempt(attempt)
     extra_body = {k: v for k, v in profile.items() if k in SLIDE_EXTRA_BODY_PARAMS}
