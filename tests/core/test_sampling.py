@@ -24,6 +24,7 @@ from core.sampling import (
 )
 
 STAGE = "plan.design_plan"
+WRITE_SLIDE = "material.write_slide"
 
 
 # The parameters that are standard chat-completion fields, spelled here rather
@@ -206,6 +207,105 @@ class TestWhatReachesTheRequest:
         monkeypatch.setenv("LLM_TEMPERATURE_OTHER_GRAPH_OTHER_NODE", "1.5")
         call = {"temperature": 0.4}
         assert apply_configured_sampling(call, STAGE) == call
+
+
+class TestALadderIsReadPerRepeat:
+    r"""``LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE=0.4,0.2,0.1`` — the ladder, retuned.
+
+    A stage that repeats its call can be given one value per repeat. What makes
+    that safe is the two ends: a call beyond the end of the ladder keeps the last
+    value, and a call that does not say which repeat it is cannot be given one at
+    all. Both are the rule the slide ladder in ``graphs/material/sandbox.py``
+    already follows for its own profiles, so a ladder in ``.env`` and a ladder in
+    code behave the same way.
+    """
+
+    LADDER = "0.45,0.25,0.15"
+
+    def test_a_position_picks_the_rung_it_is(self, monkeypatch):
+        monkeypatch.setenv("LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE", self.LADDER)
+        for position, expected in enumerate((0.45, 0.25, 0.15), start=1):
+            assert sampling_value("temperature", WRITE_SLIDE, position) == expected
+
+    def test_a_call_past_the_end_keeps_the_last_rung(self, monkeypatch):
+        """MAX_MATERIAL_ATTEMPTS is configurable; a ladder does not have to match it."""
+        monkeypatch.setenv("LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE", self.LADDER)
+        assert sampling_value("temperature", WRITE_SLIDE, 4) == 0.15
+        assert sampling_value("temperature", WRITE_SLIDE, 40) == 0.15
+
+    def test_a_position_below_the_first_rung_is_the_first(self, monkeypatch):
+        monkeypatch.setenv("LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE", self.LADDER)
+        assert sampling_value("temperature", WRITE_SLIDE, 0) == 0.45
+
+    def test_one_value_is_every_rung_the_same(self, monkeypatch):
+        monkeypatch.setenv("LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE", "0.9")
+        for position in (1, 2, 3, 9):
+            assert sampling_value("temperature", WRITE_SLIDE, position) == 0.9
+
+    def test_a_nested_knowm_can_be_a_ladder_too(self, monkeypatch):
+        monkeypatch.setenv("LLM_TOP_K_MATERIAL_WRITE_SLIDE", "40,20,5")
+        assert sampling_value("top_k", WRITE_SLIDE, 2) == 20
+
+    def test_a_ladder_reaches_a_call_through_extra_body_at_its_rung(self, monkeypatch):
+        monkeypatch.setenv("LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE", self.LADDER)
+        monkeypatch.setenv("LLM_TOP_K_MATERIAL_WRITE_SLIDE", "40,20,5")
+        call = {"temperature": 0.4, "extra_body": {"top_k": 25, "min_p": 0.06}}
+        assert apply_configured_sampling(call, WRITE_SLIDE, position=2) == {
+            "temperature": 0.25,
+            "extra_body": {"top_k": 20, "min_p": 0.06},
+        }
+
+    def test_a_stage_without_a_setting_still_steps_through_its_own_ladder(
+        self, monkeypatch
+    ):
+        """Nothing configured is still nothing sent: the code ladder is untouched."""
+        from graphs.material.sandbox import slide_sampling_bind_kwargs
+
+        for position in (1, 2, 3):
+            assert (
+                apply_configured_sampling(
+                    slide_sampling_bind_kwargs(position, WRITE_SLIDE), WRITE_SLIDE, position
+                )
+                == slide_sampling_bind_kwargs(position, WRITE_SLIDE)
+            )
+
+    def test_a_ladder_for_a_stage_that_does_not_repeat_is_reported(self, monkeypatch, caplog):
+        """There is no rung to pick, so guessing one is the wrong answer."""
+        monkeypatch.setenv("LLM_TEMPERATURE_PROBE_EVALUATE_BATCH", "0.4,0.2")
+        with caplog.at_level(logging.WARNING):
+            assert sampling_value("temperature", "probe.evaluate_batch") is None
+            assert stage_sampling_values("probe.evaluate_batch") == {}
+        assert "LLM_TEMPERATURE_PROBE_EVALUATE_BATCH" in caplog.text
+        assert "probe.evaluate_batch" in caplog.text
+
+    def test_a_ladder_at_a_positionless_call_does_not_reach_the_request(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setenv("LLM_TEMPERATURE_PLAN_DESIGN_PLAN", "0.4,0.2")
+        with caplog.at_level(logging.WARNING):
+            assert bind_for(STAGE) == {}
+
+    def test_a_stage_ladder_beats_a_global_value(self, monkeypatch):
+        monkeypatch.setenv("LLM_TEMPERATURE", "0.2")
+        monkeypatch.setenv("LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE", self.LADDER)
+        assert sampling_value("temperature", WRITE_SLIDE, 1) == 0.45
+        assert sampling_value("temperature", WRITE_SLIDE, 3) == 0.15
+        # the global still stands for the stages the ladder was never meant for
+        assert sampling_value("temperature", "plan.design_plan") == 0.2
+
+    def test_a_global_ladder_is_readable_by_the_stage_that_repeats(self, monkeypatch):
+        """The shape travels with the setting, not with the name it was written under."""
+        monkeypatch.setenv("LLM_TOP_P", "0.9,0.6,0.3")
+        assert sampling_value("top_p", WRITE_SLIDE, 2) == 0.6
+
+    def test_the_same_global_ladder_is_not_readable_by_a_stage_that_does_not_repeat(
+        self, monkeypatch, caplog
+    ):
+        """It is the same value and the same answer: that stage has no rungs."""
+        monkeypatch.setenv("LLM_TOP_P", "0.9,0.6,0.3")
+        with caplog.at_level(logging.WARNING):
+            assert sampling_value("top_p", "plan.render_plan") is None
+        assert "LLM_TOP_P" in caplog.text
 
 
 class TestAValueTheBackendWouldReject:

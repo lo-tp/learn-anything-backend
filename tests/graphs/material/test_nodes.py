@@ -247,6 +247,7 @@ class TestWriteSlide:
         assert self._kwargs_for_attempt([0]) == {
             **slide_sampling_bind_kwargs(1, WRITE_SLIDE),
             "stage": WRITE_SLIDE,
+            "stage_position": 1,
         }
 
     def test_second_attempt_uses_middle_profile(self):
@@ -255,6 +256,7 @@ class TestWriteSlide:
         assert self._kwargs_for_attempt([1]) == {
             **slide_sampling_bind_kwargs(2, WRITE_SLIDE),
             "stage": WRITE_SLIDE,
+            "stage_position": 2,
         }
 
     def test_third_attempt_uses_reliable_profile(self):
@@ -263,6 +265,7 @@ class TestWriteSlide:
         assert self._kwargs_for_attempt([2]) == {
             **slide_sampling_bind_kwargs(3, WRITE_SLIDE),
             "stage": WRITE_SLIDE,
+            "stage_position": 3,
         }
 
     def test_attempt_beyond_profiles_uses_last_profile(self):
@@ -275,6 +278,7 @@ class TestWriteSlide:
         assert self._kwargs_for_attempt([n]) == {
             **slide_sampling_bind_kwargs(n + 1, WRITE_SLIDE),
             "stage": WRITE_SLIDE,
+            "stage_position": n + 1,
         }
 
     def test_non_openai_params_are_nested_in_extra_body(self):
@@ -290,10 +294,12 @@ class TestWriteSlide:
             assert param in kwargs["extra_body"]
             assert param not in kwargs
         # ...and the result matches the shared helper exactly, plus the stage
-        # the call belongs to (#195).
+        # the call belongs to (#195) and which attempt of it this is, which is
+        # what a per-attempt setting is read against (core/sampling.py).
         assert kwargs == {
             **slide_sampling_bind_kwargs(1, WRITE_SLIDE),
             "stage": WRITE_SLIDE,
+            "stage_position": 1,
         }
 
     def test_a_setting_named_for_this_stage_reaches_the_call(self, monkeypatch):

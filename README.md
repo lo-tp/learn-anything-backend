@@ -73,11 +73,30 @@ is not a number, a temperature of 5) is logged and treated as unset. A stage is
 named by its graph and node; the stages are the table in `core/reasoning.py` plus
 the two slide-writing calls.
 
+A sampling value may also be **a list**, which is how a stage that repeats its
+call is retuned one repeat at a time — `material.write_slide` writes a slide
+again, each attempt deliberately less creative, and a list is that ladder written
+in `.env` instead of in `graphs/material/sandbox.py`:
+
+```bash
+LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE=0.4,0.2,0.1   # attempt 1, 2, 3
+LLM_TOP_K_MATERIAL_WRITE_SLIDE=25,15,10
+```
+
+The values are positional: a slide-writing call states which attempt it is and is
+answered at that rung; a call past the end of the list keeps the last value, and
+one below the start gets the first — the same clamping the code-stated ladder
+already does. Only `write_slide` states a position today, so a list written for
+another stage is logged and treated as unset — including a stage a graph loop asks
+again round after round (`probe.generate_batch`), which would need its node to
+carry the round the way that node carries its attempt. One value is a list of one:
+the scalar and the list forms are the same mechanism.
+
 | Variable | What the request carries | Default when unset |
 |---|---|---|
 | `REASONING_EFFORT` | `reasoning_effort` | the per-stage table in `core/reasoning.py` (`minimal` for the stages that only restate a decision, `low` for the ones that judge) |
 | `LLM_MAX_OUTPUT_TOKENS` | `max_tokens` | the per-stage caps in `core/reasoning.py`, and the slide caps in `graphs/material/sandbox.py` |
-| `LLM_TEMPERATURE` | `temperature` | nothing sent — the backend's default, which on this llama.cpp server answers the same request twice with the same completion (measured against `temperature=0, top_k=1`, it is the identical answer) |
+| `LLM_TEMPERATURE` | `temperature` | nothing sent — the backend's own default, which on this llama.cpp server is already deterministic: measured, two identical requests with nothing in the body answered the same |
 | `LLM_TOP_P` | `top_p` | nothing sent |
 | `LLM_TOP_K` | `extra_body.top_k` | nothing sent |
 | `LLM_MIN_P` | `extra_body.min_p` | nothing sent |
@@ -92,10 +111,9 @@ on, and measured what it found there).
 
 Two things this app does **not** offer, on purpose: `LLM_SEED`, because measured
 against this backend two requests with the same seed returned different
-completions; and a knob per write *attempt* — the slide ladder is one table of
-three profiles, so `LLM_TEMPERATURE` or `LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE`
-replaces its temperature for every attempt at once, which is what a ladder built
-to be retuned is for.
+completions; and a knob per write *attempt* named one attempt at a time
+(`…_MATERIAL_WRITE_SLIDE_2`) — a list is the whole ladder at once, which is the
+shape the ladder actually is.
 
 ## Database
 

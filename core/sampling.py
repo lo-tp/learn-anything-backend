@@ -24,6 +24,9 @@ environment, in the shape :mod:`core.settings` already defines:
     LLM_REPEAT_PENALTY / LLM_REPEAT_PENALTY_<GRAPH>_<NODE>
     LLM_PRESENCE_PENALTY / LLM_FREQUENCY_PENALTY (same two forms)
 
+Each of them takes one number, or several separated by commas — see the ladder
+section below.
+
 Precedence, for one stage and one parameter
 ------------------------------------------
 1. ``LLM_<PARAM>_<GRAPH>_<NODE>`` — that stage's own setting;
@@ -38,9 +41,37 @@ call keeps exactly the sampling it had before this module existed, and adding a
 parameter to the table below changes no behaviour until someone writes it into
 ``.env``. It is also why setting one globally flattens the slide ladder: a number
 a person typed beats a number in a source file, and the point of that ladder was
-always to be retunable.
+always to be retunable — which is why a value may also be a list, below.
 
-What this backend reads (measured, not assumed)
+A value may be a ladder: several numbers, one per repeat of the stage
+----------------------------------------------------------------------------
+One stage in this app repeats its call under a policy — ``material.write_slide``
+writes a slide again, each attempt deliberately less creative than the last — so
+retuning *that* from ``.env`` needs one value per rung, not one value. Every
+sampling knob therefore accepts either shape:
+
+    LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE=0.9          # 0.9 at every attempt
+    LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE=0.4,0.2,0.1  # a new three-rung ladder
+
+The values are positional. Which rung a call gets is decided by the
+``stage_position`` the call states (:func:`graphs.common.structured_invoke_messages`),
+clamped at both ends exactly as the code-stated ladder clamps itself: a stage
+asking more times than the ladder has rungs keeps its last value, and a position
+below 1 is the first. Two consequences worth knowing before writing one:
+
+- a setting that names several values is **not** readable by a call that states no
+  position, and only ``material.write_slide`` states one today. A stage a graph
+  loop asks again — ``probe.generate_batch`` per round — or a stage a revision runs
+  again is in the same case until its node says which round it is: reported,
+  naming the setting and the stage, and treated as unset rather than guessed at.
+  Picking rung 1 because it is first is how a settings mistake becomes a silent
+  behaviour change.
+- one value is the one-rung ladder, which is why the scalar form and the list form
+  are the same mechanism. There is no "global list applies everywhere" case to
+  learn: a global list is read by the calls that state a position, and reported to
+  the ones that do not.
+
+What the backend reads (measured, not assumed)
 ----------------------------------------------
 Against the project's llama.cpp server (``OPENAI_BASE_URL``, 2026-10-18), through
 the schema-enforced path a real stage call uses, not a bare completion request:
@@ -92,10 +123,13 @@ rule for reading them.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from typing import Any, Final, NamedTuple
 
-from core.settings import bounded_number_setting, stage_setting_names
+from core.settings import bounded_number_ladder, stage_setting_names
+
+logger = logging.getLogger(__name__)
 
 
 class _Param(NamedTuple):
@@ -150,25 +184,67 @@ def require_param(name: str) -> _Param:
     return param
 
 
-def sampling_value(name: str, stage: str) -> float | None:
-    """The configured value for ``name`` at ``stage``, or ``None`` when nobody set one.
-
-    That stage's setting, then the global one, then nothing. A value the backend
-    would reject — outside the range on the parameter's row, or not a number at
-    all — is reported and treated as unset, so the stage's own default or the
-    backend's default stands.
-    """
+def _setting_values(name: str, stage: str) -> tuple[str, tuple[float, ...]] | None:
+    """The setting for ``name`` that this stage actually reaches, and its values."""
     param = require_param(name)
-    return bounded_number_setting(
+    return bounded_number_ladder(
         stage_setting_names(param.env_name, stage),
-        None,
         param.cast,
         minimum=param.minimum,
         maximum=param.maximum,
     )
 
 
-def stage_sampling_values(stage: str) -> dict[str, float]:
+def _rung(count: int, position: int) -> int:
+    """Which value of a ladder the call at ``position`` uses, clamped at both ends.
+
+    A stage that asks more times than the ladder has rungs keeps the last one —
+    the most deliberate value written — and a position below 1 is the first. This
+    is exactly how ``graphs/material/sandbox.py`` already clamps its own profiles,
+    so a ladder written in ``.env`` and a ladder written in code behave the same.
+    """
+    return max(0, min(position - 1, count - 1))
+
+
+def sampling_value(
+    name: str, stage: str, position: int | None = None
+) -> float | None:
+    r"""The configured value for ``name`` at ``stage``, or ``None`` when there is none.
+
+    That stage's setting, then the global one, then nothing. A value this backend
+    would reject — outside the range on the parameter's row, or not a number at
+    all — is reported and treated as unset, so the stage's own default or the
+    backend's default stands.
+
+    A setting may name several values instead of one: ``0.4,0.2,0.1`` is the
+    ``material.write_slide`` ladder retuned in one line. ``position`` is which
+    repeat of the stage this call is (1-based) and it picks the rung, clamped at
+    both ends by :func:`_rung`. A ladder read by a call that states no position
+    is reported and treated as unset: there is nothing to index it against, and
+    guessing which rung was meant is how a settings mistake becomes a silent
+    behaviour change.
+    """
+    found = _setting_values(name, stage)
+    if found is None:
+        return None
+    setting_name, values = found
+    if len(values) == 1:
+        return values[0]
+    if position is None:
+        logger.warning(
+            "%s names %d values for %s, which is a ladder read per repeat of "
+            "that stage; this call states no repeat, so it is treated as unset",
+            setting_name,
+            len(values),
+            stage,
+        )
+        return None
+    return values[_rung(len(values), position)]
+
+
+def stage_sampling_values(
+    stage: str, position: int | None = None
+) -> dict[str, float]:
     """Every parameter the environment configures for ``stage``.
 
     Empty when nothing is set, which is the state every stage is in until someone
@@ -176,17 +252,17 @@ def stage_sampling_values(stage: str) -> dict[str, float]:
     """
     values: dict[str, float] = {}
     for name in SAMPLING_PARAMS:
-        value = sampling_value(name, stage)
+        value = sampling_value(name, stage, position)
         if value is not None:
             values[name] = value
     return values
 
 
 def apply_configured_sampling(
-    call_kwargs: Mapping[str, Any], stage: str
+    call_kwargs: Mapping[str, Any], stage: str, position: int | None = None
 ) -> dict[str, Any]:
     r"""Return ``call_kwargs`` with whatever the environment configures for
-    ``stage`` layered on top.
+    ``stage``, at the repeat ``position`` of that stage.
 
     This is the one place that joins what a stage states in code (its reasoning
     budget, the slide ladder) with what an operator set in ``.env``, and the
@@ -204,7 +280,7 @@ def apply_configured_sampling(
     is not configured sends byte-identically what it sent before this existed.
     """
     merged = dict(call_kwargs)
-    configured = stage_sampling_values(stage)
+    configured = stage_sampling_values(stage, position)
     if not configured:
         return merged
 
