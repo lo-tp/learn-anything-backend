@@ -33,7 +33,6 @@ from .sandbox import (
     MATHJAX_CONTEXT_RULE,
     MAX_MATERIAL_ATTEMPTS,
     MAX_SLIDE_SELF_REPAIR_TURNS,
-    SLIDE_REASONING_EFFORT,
     _compile_slide,
     _mathjax_without_context,
     _placeholder_slide_jsx,
@@ -41,6 +40,7 @@ from .sandbox import (
     compile_error_for_feedback,
     math_syntax_violation,
     slide_contents_max_output_tokens,
+    slide_reasoning_effort,
     slide_sampling_bind_kwargs,
     validate_jsx,
 )
@@ -57,9 +57,12 @@ logger = logging.getLogger(__name__)
 # This graph's stages, named the qualified way every graph names a stage (#194).
 # The row spelling is derived from these by graphs.common.recorded_stage_name,
 # so a stage has one name in this file. These are also the stages
-# core/reasoning.py does *not* budget: the slide-writing ones keep their
-# reasoning effort and output caps beside the sampling ladder in sandbox.py, and
-# compile_slide calls no model at all.
+# core/reasoning.py does *not* budget: the slide-writing ones keep their default
+# reasoning effort and output caps beside the sampling ladder in sandbox.py —
+# which read the same REASONING_EFFORT / LLM_MAX_OUTPUT_TOKENS names, global and
+# per-stage, that every other stage reads — and compile_slide calls no model at
+# all. The slide functions take these constants rather than restating the name,
+# so a call is named by the same string here whether it is being timed or billed.
 PLAN_SLIDE_CONTENTS = stage_name("material", "plan_slide_contents")
 WRITE_SLIDE = stage_name("material", "write_slide")
 COMPILE_SLIDE = stage_name("material", "compile_slide")
@@ -139,10 +142,11 @@ def make_plan_slide_contents(llm: BaseChatModel):
             # Slide generation runs at the minimum reasoning budget and under an
             # output cap; see SLIDE_REASONING_EFFORT and
             # SLIDE_CONTENTS_MAX_OUTPUT_TOKENS in sandbox.py for the measurements
-            # behind both (#194).
+            # behind both, and slide_reasoning_effort / slide_contents_max_output_tokens
+            # for the settings that retune them without a code change (#194).
             stage=PLAN_SLIDE_CONTENTS,
-            reasoning_effort=SLIDE_REASONING_EFFORT,
-            max_tokens=slide_contents_max_output_tokens(),
+            reasoning_effort=slide_reasoning_effort(PLAN_SLIDE_CONTENTS),
+            max_tokens=slide_contents_max_output_tokens(PLAN_SLIDE_CONTENTS),
         )
         contents = [
             {
@@ -260,7 +264,7 @@ def make_write_slide(llm: BaseChatModel):
         # with_structured_output so the params actually land. Non-OpenAI
         # sampling params (top_k/min_p/repeat_penalty) are nested under
         # extra_body so the OpenAI client forwards them to the request body.
-        bind = slide_sampling_bind_kwargs(new_attempts)
+        bind = slide_sampling_bind_kwargs(new_attempts, WRITE_SLIDE)
 
         kp_lines = "\n".join(f"  - {kp}" for kp in spec.get("key_points", []))
         parts = [

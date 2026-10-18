@@ -348,6 +348,133 @@ class TestStructuredCallIsRecoverable:
         assert result.value == "$\\frac{1}{2}$"
 
 
+# --- what an operator configured for this stage (the decoding knobs) ---
+
+
+def _answering(llm: MagicMock) -> MagicMock:
+    """A model that answers, bound or not, so the bind path can be inspected."""
+    structured = llm.with_structured_output.return_value
+    structured.invoke.return_value = _DummySchema(value="ok")
+    structured.bind.return_value.invoke.return_value = _DummySchema(value="ok")
+    return llm
+
+
+def _bound_kwargs(llm: MagicMock) -> dict:
+    """Exactly what the structured call was bound with."""
+    return llm.with_structured_output.return_value.bind.call_args.kwargs
+
+
+class TestConfiguredSamplingIsAppliedAtTheCall:
+    r"""The stage name is the key, and this is the one place it is looked up.
+
+    A node does not thread ``temperature`` through itself and a graph does not
+    know which knobs exist: a setting in ``.env`` reaches the call it names and no
+    other, both halves of a tool-using turn, and the unconstrained second ask of
+    a recovery. With nothing configured nothing is bound, which is what keeps
+    every stage's sampling exactly as it was.
+    """
+
+    def test_an_unconfigured_stage_binds_nothing_it_did_not_already_bind(self):
+        llm = _answering(MagicMock())
+        structured_invoke_messages(
+            llm, _DummySchema, [HumanMessage(content="hi")], stage=STAGE
+        )
+        llm.with_structured_output.return_value.bind.assert_not_called()
+
+    def test_a_global_setting_reaches_a_call_that_never_named_it(self, monkeypatch):
+        monkeypatch.setenv("LLM_TEMPERATURE", "0.9")
+        llm = _answering(MagicMock())
+        structured_invoke_messages(
+            llm, _DummySchema, [HumanMessage(content="hi")], stage=STAGE
+        )
+        assert _bound_kwargs(llm) == {"temperature": 0.9}
+
+    def test_a_stage_setting_reaches_its_stage_and_not_the_next_one(self, monkeypatch):
+        monkeypatch.setenv("LLM_TEMPERATURE_CLARIFY_ASSESS_GOAL", "1.2")
+        named = _answering(MagicMock())
+        other = _answering(MagicMock())
+
+        structured_invoke_messages(
+            named, _DummySchema, [HumanMessage("hi")], stage=STAGE
+        )
+        structured_invoke_messages(
+            other, _DummySchema, [HumanMessage("hi")], stage="plan.render_plan"
+        )
+
+        assert _bound_kwargs(named) == {"temperature": 1.2}
+        other.with_structured_output.return_value.bind.assert_not_called()
+
+    def test_a_configured_value_sits_above_the_one_the_call_stated(self, monkeypatch):
+        """The order core/settings.py defines for every knob: an operator's number
+        beats a number in a source file, which is what flattens the slide ladder."""
+        monkeypatch.setenv("LLM_TOP_P", "0.4")
+        llm = _answering(MagicMock())
+        structured_invoke_messages(
+            llm,
+            _DummySchema,
+            [HumanMessage(content="hi")],
+            stage=STAGE,
+            temperature=0.1,
+            top_p=0.9,
+        )
+        assert _bound_kwargs(llm) == {"temperature": 0.1, "top_p": 0.4}
+
+    def test_a_backend_only_parameter_is_nested_as_it_has_to_be(self, monkeypatch):
+        """The caller does not choose the transport; the table does."""
+        monkeypatch.setenv("LLM_TOP_K", "12")
+        llm = _answering(MagicMock())
+        structured_invoke_messages(
+            llm, _DummySchema, [HumanMessage(content="hi")], stage=STAGE
+        )
+        assert _bound_kwargs(llm) == {"extra_body": {"top_k": 12}}
+
+    def test_the_second_ask_carries_the_configured_decoding_too(self, monkeypatch):
+        """A recovery is a model call like any other (#194), and a fallback that
+        ignored what an operator configured would be a hole in the policy."""
+        monkeypatch.setenv("LLM_MIN_P", "0.2")
+        llm = _refusing_model(_answering(MagicMock()))
+        _answered_with(llm, '{"value": "x"}')
+
+        structured_invoke_messages(
+            llm,
+            _DummySchema,
+            [HumanMessage(content="hi")],
+            stage=STAGE,
+            reasoning_effort="low",
+            max_tokens=3072,
+        )
+
+        llm.bind.assert_called_once_with(
+            reasoning_effort="low",
+            max_tokens=3072,
+            extra_body={"min_p": 0.2},
+        )
+
+    def test_a_tool_using_turn_runs_under_it_before_it_searches(self, monkeypatch):
+        """Deciding whether to search is where a tool-using node does its
+        thinking, so the decoding applies to that call too (#194's reasoning)."""
+        monkeypatch.setenv("LLM_TEMPERATURE", "0.8")
+        monkeypatch.setenv("LLM_TOP_K", "12")
+        llm = MagicMock()
+        calls: list = []
+        tool = _mcp_shaped_tool("tavily_search", calls, "unused")
+        llm.bind_tools.return_value.invoke.return_value = AIMessage(content="known")
+        with patch(
+            "graphs.common.structured_invoke_messages",
+            return_value=_DummySchema(value="x"),
+        ) as structured:
+            structured_invoke_with_tools(
+                llm, _DummySchema, "s", "h", [tool], stage=STAGE
+            )
+
+        assert llm.bind_tools.call_args.kwargs == {
+            "temperature": 0.8,
+            "extra_body": {"top_k": 12},
+        }
+        assert structured.call_args.kwargs["stage"] == STAGE
+        assert structured.call_args.kwargs["temperature"] == 0.8
+
+
 # --- unknown_option ---
 
 

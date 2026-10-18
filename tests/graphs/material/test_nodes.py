@@ -245,7 +245,7 @@ class TestWriteSlide:
         from graphs.material.sandbox import slide_sampling_bind_kwargs
 
         assert self._kwargs_for_attempt([0]) == {
-            **slide_sampling_bind_kwargs(1),
+            **slide_sampling_bind_kwargs(1, WRITE_SLIDE),
             "stage": WRITE_SLIDE,
         }
 
@@ -253,7 +253,7 @@ class TestWriteSlide:
         from graphs.material.sandbox import slide_sampling_bind_kwargs
 
         assert self._kwargs_for_attempt([1]) == {
-            **slide_sampling_bind_kwargs(2),
+            **slide_sampling_bind_kwargs(2, WRITE_SLIDE),
             "stage": WRITE_SLIDE,
         }
 
@@ -261,7 +261,7 @@ class TestWriteSlide:
         from graphs.material.sandbox import slide_sampling_bind_kwargs
 
         assert self._kwargs_for_attempt([2]) == {
-            **slide_sampling_bind_kwargs(3),
+            **slide_sampling_bind_kwargs(3, WRITE_SLIDE),
             "stage": WRITE_SLIDE,
         }
 
@@ -273,7 +273,7 @@ class TestWriteSlide:
 
         n = len(SLIDE_SAMPLING_PROFILES)
         assert self._kwargs_for_attempt([n]) == {
-            **slide_sampling_bind_kwargs(n + 1),
+            **slide_sampling_bind_kwargs(n + 1, WRITE_SLIDE),
             "stage": WRITE_SLIDE,
         }
 
@@ -291,7 +291,25 @@ class TestWriteSlide:
             assert param not in kwargs
         # ...and the result matches the shared helper exactly, plus the stage
         # the call belongs to (#195).
-        assert kwargs == {**slide_sampling_bind_kwargs(1), "stage": WRITE_SLIDE}
+        assert kwargs == {
+            **slide_sampling_bind_kwargs(1, WRITE_SLIDE),
+            "stage": WRITE_SLIDE,
+        }
+
+    def test_a_setting_named_for_this_stage_reaches_the_call(self, monkeypatch):
+        """Nothing in this node mentions a knob; the stage it is running as is the
+        key the settings use (core/reasoning.py, core/sampling.py)."""
+        from graphs.material.sandbox import SLIDE_SAMPLING_PROFILES
+
+        monkeypatch.setenv("REASONING_EFFORT_MATERIAL_WRITE_SLIDE", "low")
+        monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS_MATERIAL_WRITE_SLIDE", "6144")
+
+        kwargs = self._kwargs_for_attempt([0])
+
+        assert kwargs["reasoning_effort"] == "low"
+        assert kwargs["max_tokens"] == 6144
+        # A parameter nobody set keeps the ladder's value.
+        assert kwargs["top_p"] == SLIDE_SAMPLING_PROFILES[0]["top_p"]
 
     def test_writes_with_the_minimum_reasoning_effort(self):
         """Every slide-writing attempt asks for the smallest reasoning budget."""
