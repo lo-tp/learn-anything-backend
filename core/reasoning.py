@@ -58,18 +58,23 @@ per-stage override for exactly that experiment.
 
 What lives here and what does not
 ---------------------------------
-The slide-writing stages keep their own values in ``graphs/material/sandbox.py``,
-deliberately: ``SLIDE_REASONING_EFFORT`` and ``SLIDE_MAX_OUTPUT_TOKENS`` are
-bound by ``slide_sampling_bind_kwargs``, the one place that assembles a
-slide-writing call, and they belong beside the sampling ladder that measurement
-produced. This module is the authority for every *other* call — and for
-``language.detect`` / ``language.localize_status``, which are called from inside
-stages rather than being graph stages themselves, so they are named by the
-helper they belong to rather than a graph.
+The slide-writing stages keep their own **defaults** in ``graphs/material/sandbox.py``,
+deliberately: ``SLIDE_REASONING_EFFORT`` and ``SLIDE_MAX_OUTPUT_TOKENS`` sit beside
+the sampling ladder that measurement produced, and ``slide_reasoning_effort`` /
+``slide_max_output_tokens`` read them through the same two settings every other
+stage reads — with the stage name the calling node already has, so
+``REASONING_EFFORT`` reaches the slide calls too, and
+``REASONING_EFFORT_MATERIAL_WRITE_SLIDE=minimal`` puts them back afterwards. What
+this module owns is the table for every *other* call — and for ``language.detect``
+/ ``language.localize_status``, which are called from inside stages rather than
+being graph stages themselves, so they are named by the helper they belong to
+rather than a graph.
 
 The knobs are read per call through :mod:`core.settings` (same pattern as
 ``is_mock_mode``): retuning a stage to measure its effect is an environment
-change, not a code change.
+change, not a code change. The names are derived from the stage in
+:func:`core.settings.stage_setting_names`, which is the same pair of names
+:mod:`core.sampling` derives for *how a stage decodes*.
 
     REASONING_EFFORT                          — every stage
     REASONING_EFFORT_<GRAPH>_<NODE>           — one stage (dots → underscores)
@@ -103,6 +108,7 @@ from core.settings import (
     REASONING_EFFORTS,
     enumerated_setting,
     numeric_setting,
+    stage_setting_names,
 )
 
 logger = logging.getLogger(__name__)
@@ -170,11 +176,6 @@ def require_stage(name: str) -> str:
     return name
 
 
-def _setting_names(default_name: str, stage: str) -> tuple[str, str]:
-    """The per-stage setting, then the global one."""
-    return (f"{default_name}_{stage.replace('.', '_').upper()}", default_name)
-
-
 def _budget(stage: str) -> tuple[str, int]:
     """The configured budget for a stage, naming the stage if it is unknown."""
     budget = _STAGE_BUDGETS.get(require_stage(stage))
@@ -191,7 +192,9 @@ def reasoning_effort_for(stage: str) -> str:
     """
     effort_default, _ = _budget(stage)
     return enumerated_setting(
-        _setting_names(REASONING_EFFORT_ENV, stage), REASONING_EFFORTS, effort_default
+        stage_setting_names(REASONING_EFFORT_ENV, stage),
+        REASONING_EFFORTS,
+        effort_default,
     )
 
 
@@ -202,7 +205,7 @@ def max_output_tokens_for(stage: str) -> int:
     """
     _, cap_default = _budget(stage)
     return numeric_setting(
-        _setting_names(LLM_MAX_OUTPUT_TOKENS_ENV, stage), cap_default, int
+        stage_setting_names(LLM_MAX_OUTPUT_TOKENS_ENV, stage), cap_default, int
     )
 
 
@@ -211,9 +214,13 @@ def stage_call_kwargs(stage: str) -> dict[str, Any]:
     :func:`graphs.common.structured_invoke`.
 
     Both values are always present: an unbounded call is exactly the shape #194
-    is about. The slide-writing stages are the one place that states its own
-    values (:data:`graphs.material.sandbox.SLIDE_REASONING_EFFORT` and
-    :data:`graphs.material.sandbox.SLIDE_MAX_OUTPUT_TOKENS`), and does.
+    is about. The slide-writing stages state their own defaults
+    (:func:`graphs.material.sandbox.slide_reasoning_effort` and
+    :func:`graphs.material.sandbox.slide_max_output_tokens`), and read the same
+    settings for them. What a stage *decodes* is the other axis of the same stage
+    name — :mod:`core.sampling` — and it is layered on at the call itself
+    (:func:`graphs.common.structured_invoke_messages`), not here, so a stage that
+    states its own sampling keeps stating it.
     """
     return {
         "reasoning_effort": reasoning_effort_for(stage),

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from itertools import pairwise
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
+from core.reasoning import stage_name
 from graphs.material.sandbox import (
     MATHJAX_CONTEXT_RULE,
     MATHJAX_MATH_RULE,
@@ -30,11 +32,18 @@ from graphs.material.sandbox import (
     compile_error_for_feedback,
     deterministic_repair,
     slide_max_output_tokens,
+    slide_reasoning_effort,
     slide_sampling_bind_kwargs,
     slide_sampling_for_attempt,
     validate_jsx,
     wrap_mathjax_context,
 )
+
+# The stage every slide-writing call belongs to, spelled the way
+# graphs.material.nodes.WRITE_SLIDE spells it (that module's constant is the one
+# the graph actually uses; tests/core/test_reasoning.py and
+# tests/graphs/material/test_nodes.py are where the two are kept agreeing).
+WRITE_SLIDE = stage_name("material", "write_slide")
 
 
 @pytest.mark.real_prompts
@@ -107,7 +116,7 @@ class TestSlideSamplingForAttempt:
 
 class TestSlideSamplingBindKwargs:
     def test_splits_standard_and_extra_body_params(self):
-        kwargs = slide_sampling_bind_kwargs(1)
+        kwargs = slide_sampling_bind_kwargs(1, WRITE_SLIDE)
         profile = slide_sampling_for_attempt(1)
         # Standard params are top-level with their profile values.
         for key in ("temperature", "top_p"):
@@ -119,7 +128,7 @@ class TestSlideSamplingBindKwargs:
             assert key not in kwargs
 
     def test_covers_every_profile_param_exactly_once(self):
-        kwargs = slide_sampling_bind_kwargs(1)
+        kwargs = slide_sampling_bind_kwargs(1, WRITE_SLIDE)
         profile = slide_sampling_for_attempt(1)
         top_level = set(kwargs) - {"extra_body"}
         # reasoning_effort and max_tokens are not profile entries; the bind
@@ -134,7 +143,7 @@ class TestSlideSamplingBindKwargs:
     def test_reasoning_effort_is_minimal_on_every_attempt(self):
         """Slide generation always runs with the smallest reasoning budget."""
         for attempt in range(1, len(SLIDE_SAMPLING_PROFILES) + 2):
-            kwargs = slide_sampling_bind_kwargs(attempt)
+            kwargs = slide_sampling_bind_kwargs(attempt, WRITE_SLIDE)
             assert kwargs["reasoning_effort"] == SLIDE_REASONING_EFFORT == "minimal"
 
     def test_reasoning_effort_stays_out_of_extra_body(self):
@@ -145,7 +154,7 @@ class TestSlideSamplingBindKwargs:
         reasoning, while `chat_template_kwargs: {"thinking": false}` was
         ignored and the model kept thinking.
         """
-        kwargs = slide_sampling_bind_kwargs(1)
+        kwargs = slide_sampling_bind_kwargs(1, WRITE_SLIDE)
         assert "reasoning_effort" not in kwargs["extra_body"]
         assert "reasoning_effort" in kwargs
 
@@ -154,7 +163,7 @@ class TestSlideSamplingBindKwargs:
         # own profile, and temperature steps down monotonically toward the
         # most deterministic profile.
         kwargs = [
-            slide_sampling_bind_kwargs(i)
+            slide_sampling_bind_kwargs(i, WRITE_SLIDE)
             for i in range(1, len(SLIDE_SAMPLING_PROFILES) + 1)
         ]
         for i, kw in enumerate(kwargs, start=1):
@@ -166,9 +175,51 @@ class TestSlideSamplingBindKwargs:
         assert all(a > b for a, b in pairwise(temps))
 
     def test_returns_fresh_dict(self):
-        a = slide_sampling_bind_kwargs(1)
+        a = slide_sampling_bind_kwargs(1, WRITE_SLIDE)
         a["extra_body"]["top_k"] = 999
-        assert slide_sampling_bind_kwargs(1)["extra_body"]["top_k"] != 999
+        assert slide_sampling_bind_kwargs(1, WRITE_SLIDE)["extra_body"]["top_k"] != 999
+
+
+class TestTheSlideCallsReadTheSameNamesEveryOtherStageReads:
+    """#194's knobs, for the two stages that were left out of its table.
+
+    The slide defaults live beside the sampling ladder because that is where the
+    measurements are; they are still only defaults. ``REASONING_EFFORT`` and
+    ``LLM_MAX_OUTPUT_TOKENS`` — with or without ``_MATERIAL_WRITE_SLIDE`` on the
+    end — reach these calls, so a run that turns thinking on for everything can
+    measure what that costs on slides, and one stage can be put back afterwards.
+    """
+
+    def test_a_stage_can_be_put_back_to_the_measured_minimum(self, monkeypatch):
+        monkeypatch.setenv("REASONING_EFFORT", "low")
+        monkeypatch.setenv("REASONING_EFFORT_MATERIAL_WRITE_SLIDE", "minimal")
+        assert slide_reasoning_effort(WRITE_SLIDE) == "minimal"
+        bound = slide_sampling_bind_kwargs(1, WRITE_SLIDE)
+        assert bound["reasoning_effort"] == "minimal"
+
+    def test_the_global_setting_reaches_a_slide_call(self, monkeypatch):
+        monkeypatch.setenv("REASONING_EFFORT", "medium")
+        bound = slide_sampling_bind_kwargs(2, WRITE_SLIDE)
+        assert bound["reasoning_effort"] == "medium"
+
+    def test_an_effort_the_backend_would_reject_leaves_the_measured_default(
+        self, monkeypatch, caplog
+    ):
+        monkeypatch.setenv("REASONING_EFFORT_MATERIAL_WRITE_SLIDE", "extra-high")
+        with caplog.at_level(logging.WARNING):
+            assert slide_reasoning_effort(WRITE_SLIDE) == SLIDE_REASONING_EFFORT
+        assert "extra-high" in caplog.text
+
+    def test_a_slide_cap_can_be_raised_on_its_own(self, monkeypatch):
+        monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS_MATERIAL_WRITE_SLIDE", "8192")
+        assert slide_max_output_tokens(WRITE_SLIDE) == 8192
+        assert slide_sampling_bind_kwargs(1, WRITE_SLIDE)["max_tokens"] == 8192
+
+    def test_a_stage_named_cap_does_not_move_the_pre_slide_stages(self, monkeypatch):
+        from core.reasoning import max_output_tokens_for
+
+        monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS_MATERIAL_WRITE_SLIDE", "9000")
+        assert max_output_tokens_for("plan.design_plan") == 4096
 
 
 class TestCompileErrorForFeedback:
@@ -980,7 +1031,8 @@ class TestSlideOutputCaps:
 
     def test_every_write_attempt_caps_what_the_model_may_write(self):
         for attempt in range(1, len(SLIDE_SAMPLING_PROFILES) + 3):
-            assert slide_sampling_bind_kwargs(attempt)["max_tokens"] == SLIDE_MAX_OUTPUT_TOKENS
+            bound = slide_sampling_bind_kwargs(attempt, WRITE_SLIDE)
+            assert bound["max_tokens"] == SLIDE_MAX_OUTPUT_TOKENS
 
     def test_the_cap_sits_well_above_the_largest_slide_ever_measured(self):
         """Real slides came back at 356-686 completion tokens (#194). The cap is
@@ -994,10 +1046,10 @@ class TestSlideOutputCaps:
 
     def test_the_cap_stays_out_of_extra_body(self):
         """It is a standard OpenAI field; nesting it is how a param gets ignored."""
-        kwargs = slide_sampling_bind_kwargs(1)
+        kwargs = slide_sampling_bind_kwargs(1, WRITE_SLIDE)
         assert "max_tokens" not in kwargs.get("extra_body", {})
 
     def test_the_output_setting_covers_the_slide_calls_too(self, monkeypatch):
         monkeypatch.setenv("LLM_MAX_OUTPUT_TOKENS", "8192")
-        assert slide_sampling_bind_kwargs(1)["max_tokens"] == 8192
-        assert slide_max_output_tokens() == 8192
+        assert slide_sampling_bind_kwargs(1, WRITE_SLIDE)["max_tokens"] == 8192
+        assert slide_max_output_tokens(WRITE_SLIDE) == 8192

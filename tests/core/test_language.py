@@ -141,6 +141,22 @@ class TestLanguageCallsStateTheirBudget:
 
         llm.bind.assert_called_once_with(reasoning_effort="minimal", max_tokens=256)
 
+    def test_a_setting_named_for_a_helper_reaches_its_call(self, monkeypatch):
+        """These two are the model calls with no graph to assemble them from, so
+        they assemble the same composition themselves (#core/sampling)."""
+        monkeypatch.setenv("LLM_TOP_P_LANGUAGE_LOCALIZE_STATUS", "0.2")
+        monkeypatch.setenv("LLM_TOP_K", "8")
+        llm = _reply("Je ne sais pas")
+
+        localize_status(llm, "French", "I don't know")
+
+        llm.bind.assert_called_once_with(
+            reasoning_effort="minimal",
+            max_tokens=256,
+            top_p=0.2,
+            extra_body={"top_k": 8},
+        )
+
     def test_short_text_language_detection_states_its_budget(self):
         """Text too short for ``langid`` is the only case detection asks a model."""
         from core.language import _LanguageDetectionOut

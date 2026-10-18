@@ -5,10 +5,11 @@ by ``graphs.probe.nodes`` at import time. A developer's local ``.env``
 (loaded via ``load_dotenv()`` in ``llm.py`` during test imports) must not
 change test behavior, so the code defaults are pinned *before* any test
 module is imported — same strategy as ``DATABASE_URL`` in
-``tests/routers/conftest.py``. The reasoning-policy knobs
-(``REASONING_EFFORT*``, ``LLM_MAX_OUTPUT_TOKENS*``) are read *per call*
-instead, and their names only appear in the environment once ``load_dotenv``
-has run, so they are blanked at session start — see
+``tests/routers/conftest.py``. The model-call knobs (``REASONING_EFFORT*``,
+``LLM_MAX_OUTPUT_TOKENS*``, and every name in
+``core.sampling.SAMPLING_ENV_NAMES``) are read *per call* instead, and their
+names only appear in the environment once ``load_dotenv`` has run, so they are
+blanked at session start — see
 :meth:`_stage_defaults_win_over_local_env`.
 """
 
@@ -20,6 +21,7 @@ import os
 import pytest
 
 from core.model_answers import drain_model_recoveries
+from core.sampling import SAMPLING_ENV_NAMES
 
 os.environ["MOCK_LLM"] = "false"
 # core/llm.py constructs a real ChatOpenAI at import time whenever MOCK_LLM is off,
@@ -41,20 +43,25 @@ os.environ["PROBE_BATCH_SIZE"] = "3"
 
 @pytest.fixture(autouse=True, scope="session")
 def _stage_defaults_win_over_local_env():
-    """Blank every reasoning-policy knob the local ``.env`` injected.
+    """Blank every model-call knob the local ``.env`` injected.
 
-    ``core/settings.py`` reads ``REASONING_EFFORT*`` / ``LLM_MAX_OUTPUT_TOKENS*``
-    per call, and ``load_dotenv()`` (run when a test module imports
-    ``core.llm``) adds those names *after* the pinning above could blank them
-    — a module-level sweep would see nothing to blank. Blanking here, at
-    session start (all imports done, no test body yet), makes the stage
-    defaults in ``core/reasoning.py`` what the suite asserts whatever a
-    developer's ``.env`` is carrying (e.g. a raised cap mid-experiment).
-    ``core/settings.py`` treats an empty value as unset. A test that wants an
-    override sets one with ``monkeypatch``, which runs after this fixture.
+    ``core/settings.py`` reads the reasoning-policy knobs
+    (``REASONING_EFFORT*`` / ``LLM_MAX_OUTPUT_TOKENS*``) and the decoding knobs
+    (every name in :data:`core.sampling.SAMPLING_ENV_NAMES`) per call, each one
+    also readable with a stage appended to its name, and ``load_dotenv()`` (run
+    when a test module imports ``core.llm``) adds those names *after* the
+    pinning above could blank them — a module-level sweep would see nothing to
+    blank. Blanking here, at session start (all imports done, no test body yet),
+    makes the defaults in ``core/reasoning.py``, ``core/sampling.py`` and
+    ``graphs/material/sandbox.py`` what the suite asserts whatever a developer's
+    ``.env`` is carrying (e.g. a raised cap or a raised temperature
+    mid-experiment). ``core/settings.py`` treats an empty value as unset. A test
+    that wants an override sets one with ``monkeypatch``, which runs after this
+    fixture.
     """
+    pinned = ("REASONING_EFFORT", "LLM_MAX_OUTPUT_TOKENS", *SAMPLING_ENV_NAMES)
     for name in list(os.environ):
-        if name.startswith(("REASONING_EFFORT", "LLM_MAX_OUTPUT_TOKENS")):
+        if name.startswith(pinned):
             os.environ[name] = ""
 
 

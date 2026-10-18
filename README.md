@@ -50,6 +50,8 @@ Copy `.env.example` to `.env` and adjust as needed:
 | `SANDBOX_SERVICE_TOKEN` | Shared token for the internal `/slides` gate (#103) | — |
 | `JWT_SECRET` | Shared sign-in token secret; **must match the frontend** | — |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `LLM_MODEL` | OpenAI-compatible LLM endpoint | `gpt-4o-mini` at api.openai.com |
+| `LLM_REQUEST_TIMEOUT_SECONDS` | How long one model request may take before this app gives up on it; read once at startup, because it belongs to the client (#194) | `120` |
+| `LLM_MAX_RETRIES` | How many times a request that never answered is asked again; read once at startup | `2` |
 | `TAVILY_API_KEY` | Web search for the plan graph's `research_topic` step, through Tavily's MCP server (#166). Unset — or `MOCK_LLM` — means no external search: planning proceeds as before | — |
 | `TAVILY_MCP_URL` | Override the hosted Tavily MCP endpoint | `https://mcp.tavily.com/mcp/` |
 | `DEV_MODE` | `true`/`1` skips the sign-in gate on the Session **write** endpoints (the reads are public — #178) | off |
@@ -57,7 +59,43 @@ Copy `.env.example` to `.env` and adjust as needed:
 | `LA_PROMPTS_STUB` | `1` uses the public prompt stubs when `prompts/` is not checked out | off |
 | `MAX_PROBE_QUESTIONS` | Max questions per probe session | `10` |
 | `MAX_MATERIAL_ATTEMPTS` | Max compile retry attempts per slide | `3` |
+| `MAX_SLIDE_SELF_REPAIR_TURNS` | Model-driven repair turns one `write_slide` attempt makes against `validate_jsx` before the outer retry; `0` disables the inner loop (#165) | `2` |
 | `LOG_LEVEL` | Logging level (`INFO`, `DEBUG`, etc.) | `INFO` |
+
+### Model-call knobs — for every call, or for one stage
+
+These are read **per call**, through `core/settings.py`: the plain name applies to
+every model call, and the `<NAME>_<GRAPH>_<NODE>` form applies to one stage —
+`plan.design_plan` → `…_PLAN_DESIGN_PLAN`, `material.write_slide` →
+`…_MATERIAL_WRITE_SLIDE`. The per-stage name wins over the global one, and a
+value the backend would reject (an effort outside the five it accepts, a cap that
+is not a number, a temperature of 5) is logged and treated as unset. A stage is
+named by its graph and node; the stages are the table in `core/reasoning.py` plus
+the two slide-writing calls.
+
+| Variable | What the request carries | Default when unset |
+|---|---|---|
+| `REASONING_EFFORT` | `reasoning_effort` | the per-stage table in `core/reasoning.py` (`minimal` for the stages that only restate a decision, `low` for the ones that judge) |
+| `LLM_MAX_OUTPUT_TOKENS` | `max_tokens` | the per-stage caps in `core/reasoning.py`, and the slide caps in `graphs/material/sandbox.py` |
+| `LLM_TEMPERATURE` | `temperature` | nothing sent — the backend's default, which on this llama.cpp server answers the same request twice with the same completion (measured against `temperature=0, top_k=1`, it is the identical answer) |
+| `LLM_TOP_P` | `top_p` | nothing sent |
+| `LLM_TOP_K` | `extra_body.top_k` | nothing sent |
+| `LLM_MIN_P` | `extra_body.min_p` | nothing sent |
+| `LLM_REPEAT_PENALTY` | `extra_body.repeat_penalty` | nothing sent |
+| `LLM_PRESENCE_PENALTY` | `presence_penalty` | nothing sent |
+| `LLM_FREQUENCY_PENALTY` | `frequency_penalty` | nothing sent |
+
+The three nested under `extra_body` are not OpenAI parameters; the client
+forwards them into the request body, which is what this project's llama.cpp
+backend reads (`core/sampling.py` records which side of the wire each one travels
+on, and measured what it found there).
+
+Two things this app does **not** offer, on purpose: `LLM_SEED`, because measured
+against this backend two requests with the same seed returned different
+completions; and a knob per write *attempt* — the slide ladder is one table of
+three profiles, so `LLM_TEMPERATURE` or `LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE`
+replaces its temperature for every attempt at once, which is what a ladder built
+to be retuned is for.
 
 ## Database
 

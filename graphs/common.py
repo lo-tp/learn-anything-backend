@@ -32,6 +32,7 @@ from core.model_answers import (
     record_model_recovery,
 )
 from core.reasoning import require_stage
+from core.sampling import apply_configured_sampling
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +211,14 @@ def structured_invoke_messages[Schema: BaseModel](
     ``bind_kwargs`` (e.g. ``temperature=0.1``) are applied via ``bind`` AFTER
     ``with_structured_output`` — binding before it silently drops the params.
 
+    Whatever the environment configures for this stage is layered on top of them
+    here, rather than threaded through every node
+    (:func:`core.sampling.apply_configured_sampling`): it sends nothing for a
+    parameter nobody set, so the only calls this changes are
+    the ones an operator has deliberately retuned, and it is what lets
+    ``LLM_TEMPERATURE_PLAN_DESIGN_PLAN`` reach a call without that node knowing
+    the knob exists.
+
     ``stage`` names the call the way this file's caller already names it — the
     qualified constant a pre-slide node passes to
     :func:`core.reasoning.stage_call_kwargs`, the bare name a material node
@@ -233,6 +242,7 @@ def structured_invoke_messages[Schema: BaseModel](
     rewriting the request to guess at either is how a real failure becomes
     invisible. Those raise unchanged.
     """
+    bind_kwargs = apply_configured_sampling(bind_kwargs, stage)
     model = llm.with_structured_output(schema)
     if bind_kwargs:
         model = model.bind(**bind_kwargs)
@@ -350,6 +360,12 @@ def structured_invoke_with_tools[Schema: BaseModel](
     boundary it serves is: an internal tool (slide JSX validation, #165) is
     bound through this same path, in-process.
     """
+    # Applied once here, before the first half of the turn: deciding whether to
+    # search is a model call like any other, so it runs under the same decoding
+    # an operator configured. Applying it again downstream changes nothing —
+    # layering the same values twice is layering them once.
+    bind_kwargs = apply_configured_sampling(bind_kwargs, stage)
+
     messages: list[BaseMessage] = [SystemMessage(content=system), HumanMessage(content=human)]
     if tools:
         by_name = {t.name: t for t in tools}
