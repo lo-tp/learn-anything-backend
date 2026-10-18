@@ -5,7 +5,11 @@ by ``graphs.probe.nodes`` at import time. A developer's local ``.env``
 (loaded via ``load_dotenv()`` in ``llm.py`` during test imports) must not
 change test behavior, so the code defaults are pinned *before* any test
 module is imported — same strategy as ``DATABASE_URL`` in
-``tests/routers/conftest.py``.
+``tests/routers/conftest.py``. The reasoning-policy knobs
+(``REASONING_EFFORT*``, ``LLM_MAX_OUTPUT_TOKENS*``) are read *per call*
+instead, and their names only appear in the environment once ``load_dotenv``
+has run, so they are blanked at session start — see
+:meth:`_stage_defaults_win_over_local_env`.
 """
 
 from __future__ import annotations
@@ -33,6 +37,25 @@ os.environ["OPENAI_API_KEY"] = "test-only-placeholder-not-a-secret"
 os.environ.setdefault("LA_PROMPTS_STUB", "1")
 os.environ["MAX_PROBE_QUESTIONS"] = "10"
 os.environ["PROBE_BATCH_SIZE"] = "3"
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _stage_defaults_win_over_local_env():
+    """Blank every reasoning-policy knob the local ``.env`` injected.
+
+    ``core/settings.py`` reads ``REASONING_EFFORT*`` / ``LLM_MAX_OUTPUT_TOKENS*``
+    per call, and ``load_dotenv()`` (run when a test module imports
+    ``core.llm``) adds those names *after* the pinning above could blank them
+    — a module-level sweep would see nothing to blank. Blanking here, at
+    session start (all imports done, no test body yet), makes the stage
+    defaults in ``core/reasoning.py`` what the suite asserts whatever a
+    developer's ``.env`` is carrying (e.g. a raised cap mid-experiment).
+    ``core/settings.py`` treats an empty value as unset. A test that wants an
+    override sets one with ``monkeypatch``, which runs after this fixture.
+    """
+    for name in list(os.environ):
+        if name.startswith(("REASONING_EFFORT", "LLM_MAX_OUTPUT_TOKENS")):
+            os.environ[name] = ""
 
 
 @pytest.fixture(autouse=True)
