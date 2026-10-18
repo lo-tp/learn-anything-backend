@@ -5,14 +5,23 @@ answers, and plan adjustments) and uses that language for every user-facing
 reply and for the generated learning materials (slides, quiz questions,
 explanations, and concept summaries).
 
+Detection resolves to two languages only
+---------------------------------------
+The app writes learner-facing copy in exactly two languages: English and
+Chinese. A learner may write in any language, but detection never names a
+third one: text the classifier places outside the supported two is treated
+as :data:`DEFAULT_LANGUAGE`, and the short-text model call is asked for one
+of the two codes only.
+
 Detection strategy
 ------------------
 1. ``langid`` (fast, deterministic n-gram classifier) is used for text that is
    long enough to be reliable — a full goal sentence or paragraph.
 2. Very short / low-signal text (a single foreign word, a fragment) is routed
    to a small constrained LLM call, which handles those cases better than a
-   classifier.
-3. If detection is unavailable or fails, we default to English.
+   classifier. Its schema accepts only the two supported codes.
+3. If detection is unavailable, fails, or lands outside the supported two,
+   we default to English.
 
 The detected language is stored on the ``Session`` row and threaded through
 every graph so all user-facing output stays in the learner's language.
@@ -20,7 +29,7 @@ every graph so all user-facing output stays in the learner's language.
 
 from __future__ import annotations
 
-from typing import cast
+from typing import Literal, cast
 
 import langid
 from langchain_core.language_models import BaseChatModel
@@ -34,13 +43,15 @@ from core.prompts import (
 )
 from core.reasoning import stage_call_kwargs
 
-#: Language used when detection is unavailable or the text has no signal.
+#: Language used when detection is unavailable, the text has no signal, or the
+#: detected language is outside the supported two.
 DEFAULT_LANGUAGE = "English"
 
 # Status lines are written in English, so a learner already writing in English
 # needs no translation at all (#194). The cache below is bounded by
 # construction, not by eviction: its keys are the fixed set of status strings
-# this app produces crossed with the languages in ``_CODE_TO_NAME``.
+# this app produces crossed with the language names it can hold — the
+# supported two plus any legacy name an older Session still carries.
 _STATUS_TRANSLATIONS: dict[tuple[str, str], str] = {}
 
 
@@ -91,88 +102,37 @@ def _remember_short_text(text: str, language: str) -> None:
 # text (e.g. "yes") is not used to switch the session language at all.
 MEANINGFUL_TEXT_LEN = 12
 
-# ISO 639-1 -> human-readable name. Names read better in a prompt than a bare
-# code; unknown codes fall back to the code string itself.
-_CODE_TO_NAME: dict[str, str] = {
+# ISO 639-1 -> language name, for the two languages this app resolves a
+# learner's text to. Detection cannot name anything else; text classified
+# outside these two is answered with the default.
+_SUPPORTED_CODE_TO_NAME: dict[str, str] = {
     "en": "English",
-    "es": "Spanish",
-    "fr": "French",
-    "de": "German",
-    "it": "Italian",
-    "pt": "Portuguese",
-    "nl": "Dutch",
-    "sv": "Swedish",
-    "no": "Norwegian",
-    "nb": "Norwegian",
-    "da": "Danish",
-    "fi": "Finnish",
-    "is": "Icelandic",
-    "pl": "Polish",
-    "cs": "Czech",
-    "sk": "Slovak",
-    "sl": "Slovenian",
-    "hu": "Hungarian",
-    "ro": "Romanian",
-    "bg": "Bulgarian",
-    "ru": "Russian",
-    "uk": "Ukrainian",
-    "be": "Belarusian",
-    "el": "Greek",
-    "tr": "Turkish",
-    "ar": "Arabic",
-    "he": "Hebrew",
-    "fa": "Persian",
-    "ur": "Urdu",
-    "hi": "Hindi",
-    "bn": "Bengali",
-    "ta": "Tamil",
-    "te": "Telugu",
-    "mr": "Marathi",
-    "gu": "Gujarati",
-    "pa": "Punjabi",
     "zh": "Chinese",
-    "ja": "Japanese",
-    "ko": "Korean",
-    "vi": "Vietnamese",
-    "th": "Thai",
-    "id": "Indonesian",
-    "ms": "Malay",
-    "my": "Burmese",
-    "km": "Khmer",
-    "lo": "Lao",
-    "sw": "Swahili",
-    "am": "Amharic",
-    "ha": "Hausa",
-    "yo": "Yoruba",
-    "zu": "Zulu",
-    "af": "Afrikaans",
-    "ca": "Catalan",
-    "eu": "Basque",
-    "ga": "Irish",
-    "cy": "Welsh",
-    "mk": "Macedonian",
-    "sr": "Serbian",
-    "bs": "Bosnian",
-    "hr": "Croatian",
-    "lt": "Lithuanian",
-    "lv": "Latvian",
-    "et": "Estonian",
 }
 
-_COMMON_CODE_HINT = ", ".join(sorted(_CODE_TO_NAME))
+SUPPORTED_LANGUAGES: frozenset[str] = frozenset(_SUPPORTED_CODE_TO_NAME.values())
 
 
 class _LanguageDetectionOut(BaseModel):
-    language: str = Field(
+    language: Literal["en", "zh"] = Field(
         description=(
-            "The language the user wrote the text in, as a 2-letter ISO 639-1 "
-            f"code (one of: {_COMMON_CODE_HINT}). Return 'en' if you cannot tell."
+            "The language the user wrote the text in, as an ISO 639-1 code: "
+            "'zh' for Chinese, 'en' for English. The app answers in those two "
+            "languages only, so place text you cannot identify as Chinese in "
+            "'en'. Return 'en' if you cannot tell."
         )
     )
 
 
-def _code_to_name(code: str) -> str:
-    return _CODE_TO_NAME.get((code or "").lower(), code)
+def _supported_language(code: str) -> str:
+    """The supported language name for a detected code, or the default.
+
+    The classifier answers with any ISO code it knows; only Chinese is a
+    supported language, everything else is the default. The model path's
+    schema already asks for just the two codes — this mapping is what keeps
+    that promise even if a backend hands back something else.
+    """
+    return _SUPPORTED_CODE_TO_NAME.get((code or "").lower(), DEFAULT_LANGUAGE)
 
 
 def has_meaningful_signal(text: str) -> bool:
@@ -185,10 +145,12 @@ def has_meaningful_signal(text: str) -> bool:
 
 
 def detect_language(text: str, llm: BaseChatModel | None = None) -> str:
-    """Detect the learner's language and return a human-readable name.
+    """Detect the learner's language and resolve it to a supported name.
 
-    ``llm`` is a fallback for short / low-signal text; if it is ``None`` or the
-    call fails, detection falls back to :data:`DEFAULT_LANGUAGE`.
+    The answer is always one of the supported languages: Chinese for text the
+    classifier (or fallback model) places in Chinese, :data:`DEFAULT_LANGUAGE`
+    for everything else. ``llm`` is a fallback for short / low-signal text; if
+    it is ``None`` or the call fails, detection falls back to the default.
     """
     cleaned = (text or "").strip()
     if not cleaned:
@@ -201,7 +163,7 @@ def detect_language(text: str, llm: BaseChatModel | None = None) -> str:
         code = langid.classify(cleaned)[0]
     except Exception:  # noqa: BLE001 — classifier may raise on odd input
         return _llm_detect(cleaned, llm) if llm is not None else DEFAULT_LANGUAGE
-    return _code_to_name(code)
+    return _supported_language(code)
 
 
 def _llm_detect(text: str, llm: BaseChatModel | None) -> str:
@@ -231,7 +193,7 @@ def _llm_detect(text: str, llm: BaseChatModel | None) -> str:
                 ]
             ),
         )
-        language = _code_to_name(out.language)
+        language = _supported_language(out.language)
     except Exception:  # noqa: BLE001 — any LLM/schema failure -> default
         return DEFAULT_LANGUAGE
     _remember_short_text(key, language)

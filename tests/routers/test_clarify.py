@@ -85,19 +85,19 @@ class TestCreateSession:
     ):
         with (
             patch("routers.clarify.clarify_graph") as graph,
-            patch("routers.clarify.detect_language", return_value="Spanish"),
+            patch("routers.clarify.detect_language", return_value="Chinese"),
         ):
             graph.invoke.return_value = {"narrowed_goal": "ng"}
             client.post(
                 "/sessions",
-                json={"goal": "Aprender cálculo"},
+                json={"goal": "学习微积分"},
                 cookies=_signed_in(auth_cookie),
             )
 
         args, _kwargs = graph.invoke.call_args
         initial_state = args[0]
-        assert initial_state["goal"] == "Aprender cálculo"
-        assert initial_state["language"] == "Spanish"
+        assert initial_state["goal"] == "学习微积分"
+        assert initial_state["language"] == "Chinese"
         assert initial_state["round_count"] == 0
         config = args[1]
         # Thread is namespaced per (session, graph).
@@ -167,18 +167,18 @@ class TestClarifySession:
         with (
             patch("routers.clarify.clarify_graph") as graph,
             patch("routers.clarify.has_meaningful_signal", return_value=True),
-            patch("routers.clarify.detect_language", return_value="French") as dl,
+            patch("routers.clarify.detect_language", return_value="Chinese") as dl,
         ):
             graph.invoke.return_value = {"narrowed_goal": "ng"}
             resp = client.post(
                 f"/sessions/{sid}/clarify",
-                json={"answer": "Je veux apprendre les dérivées"},
+                json={"answer": "我想学习导数相关的知识"},
             )
 
         assert resp.status_code == 200
-        dl.assert_called_once_with("Je veux apprendre les dérivées", llm)
+        dl.assert_called_once_with("我想学习导数相关的知识", llm)
         db.expire_all()
-        assert db.get(Session, sid).language == "French"
+        assert db.get(Session, sid).language == "Chinese"
 
     def test_keeps_language_for_low_signal_answer(self, client, db, make_session):
         sid = make_session(
