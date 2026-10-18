@@ -29,7 +29,7 @@ every graph so all user-facing output stays in the learner's language.
 
 from __future__ import annotations
 
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 import langid
 from langchain_core.language_models import BaseChatModel
@@ -42,6 +42,7 @@ from core.prompts import (
     localize_status_system,
 )
 from core.reasoning import stage_call_kwargs
+from core.sampling import apply_configured_sampling
 
 #: Language used when detection is unavailable, the text has no signal, or the
 #: detected language is outside the supported two.
@@ -135,6 +136,26 @@ def _supported_language(code: str) -> str:
     return _SUPPORTED_CODE_TO_NAME.get((code or "").lower(), DEFAULT_LANGUAGE)
 
 
+# The two calls this module makes, named the way `core/reasoning.py` names a
+# stage — by the helper rather than a graph, because these are called from
+# inside stages and are not graph nodes themselves.
+_DETECT_STAGE = "language.detect"
+_LOCALIZE_STATUS_STAGE = "language.localize_status"
+
+
+def _call_kwargs(stage: str) -> dict[str, Any]:
+    """What one of this module's calls runs with: its reasoning budget (#194),
+    then whatever decoding an operator configured for it.
+
+    The same composition :func:`graphs.common.structured_invoke_messages` performs
+    for every graph call. These two are the model calls in this app with no
+    graph to assemble them from, so they assemble it themselves — which is what
+    keeps ``LLM_TEMPERATURE_LANGUAGE_DETECT`` meaning the same thing here as it
+    means for ``plan.design_plan``.
+    """
+    return apply_configured_sampling(stage_call_kwargs(stage), stage)
+
+
 def has_meaningful_signal(text: str) -> bool:
     """True if ``text`` is long enough to reliably detect a language from.
 
@@ -185,7 +206,7 @@ def _llm_detect(text: str, llm: BaseChatModel | None) -> str:
         out = cast(
             _LanguageDetectionOut,
             llm.with_structured_output(_LanguageDetectionOut)
-            .bind(**stage_call_kwargs("language.detect"))
+            .bind(**_call_kwargs(_DETECT_STAGE))
             .invoke(
                 [
                     SystemMessage(content=DETECT_LANGUAGE_SYSTEM),
@@ -230,7 +251,7 @@ def localize_status(llm: BaseChatModel | None, language: str, english: str) -> s
     system = localize_status_system(language)
     try:
         resp = (
-            llm.bind(**stage_call_kwargs("language.localize_status"))
+            llm.bind(**_call_kwargs(_LOCALIZE_STATUS_STAGE))
             .invoke([SystemMessage(content=system), HumanMessage(content=text)])
         )
         translated = (getattr(resp, "content", "") or "").strip()

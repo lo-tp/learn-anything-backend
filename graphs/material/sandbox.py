@@ -10,7 +10,14 @@ from typing import Any
 
 import httpx
 
-from core.settings import LLM_MAX_OUTPUT_TOKENS_ENV, numeric_setting
+from core.settings import (
+    LLM_MAX_OUTPUT_TOKENS_ENV,
+    REASONING_EFFORT_ENV,
+    REASONING_EFFORTS,
+    enumerated_setting,
+    numeric_setting,
+    stage_setting_names,
+)
 
 from .prompts import _PLACEHOLDER_JSX_TEMPLATE
 
@@ -81,6 +88,12 @@ SLIDE_SAMPLING_PROFILES: tuple[dict[str, float], ...] = (
 #
 # It lives next to the sampling profiles because `slide_sampling_bind_kwargs`
 # is the single place that assembles what a slide-writing call sends.
+#
+# The value below is the *default*, not the value: `slide_reasoning_effort()`
+# reads `REASONING_EFFORT_MATERIAL_WRITE_SLIDE`, then `REASONING_EFFORT`, the
+# same pair of names every other stage honours, so a run that turns thinking on
+# for everything can measure what that costs on slides too — and one stage can be
+# put back to `minimal` on its own afterwards.
 SLIDE_REASONING_EFFORT: str = "minimal"
 
 # --- Slide-generation output caps (#194) ---
@@ -97,21 +110,44 @@ SLIDE_REASONING_EFFORT: str = "minimal"
 # step asks for is the model's choice, so its guard has to sit above a whole
 # plan rather than above a single slide.
 #
-# Both honour LLM_MAX_OUTPUT_TOKENS, the same setting every other call's cap
-# honours (core/reasoning.py), so a run can raise all of them at once.
+# Both honour the same names every other call's cap honours —
+# `LLM_MAX_OUTPUT_TOKENS_<GRAPH>_<NODE>` for one stage, `LLM_MAX_OUTPUT_TOKENS`
+# for a whole run (`core/reasoning.py`) — so a run can raise all of them at once,
+# or raise only the slide calls and leave the pre-slide stages alone.
 SLIDE_MAX_OUTPUT_TOKENS: int = 4096
 SLIDE_CONTENTS_MAX_OUTPUT_TOKENS: int = 8192
 
 
-def slide_max_output_tokens() -> int:
+def slide_reasoning_effort(stage: str) -> str:
+    """The reasoning effort for a slide call.
+
+    Takes the stage name the caller already has (`graphs.material.nodes.WRITE_SLIDE`
+    or `PLAN_SLIDE_CONTENTS`) rather than restating it here: one call is named
+    in one place, which is what #194's review asked for. Per-stage setting, then
+    the global one, then :data:`SLIDE_REASONING_EFFORT`.
+    """
+    return enumerated_setting(
+        stage_setting_names(REASONING_EFFORT_ENV, stage),
+        REASONING_EFFORTS,
+        SLIDE_REASONING_EFFORT,
+    )
+
+
+def slide_max_output_tokens(stage: str) -> int:
     """The output cap for one slide-writing or slide-repairing call."""
-    return numeric_setting((LLM_MAX_OUTPUT_TOKENS_ENV,), SLIDE_MAX_OUTPUT_TOKENS, int)
+    return numeric_setting(
+        stage_setting_names(LLM_MAX_OUTPUT_TOKENS_ENV, stage),
+        SLIDE_MAX_OUTPUT_TOKENS,
+        int,
+    )
 
 
-def slide_contents_max_output_tokens() -> int:
+def slide_contents_max_output_tokens(stage: str) -> int:
     """The output cap for the call that plans a step's slide contents."""
     return numeric_setting(
-        (LLM_MAX_OUTPUT_TOKENS_ENV,), SLIDE_CONTENTS_MAX_OUTPUT_TOKENS, int
+        stage_setting_names(LLM_MAX_OUTPUT_TOKENS_ENV, stage),
+        SLIDE_CONTENTS_MAX_OUTPUT_TOKENS,
+        int,
     )
 
 
@@ -128,34 +164,45 @@ def slide_sampling_for_attempt(attempt: int) -> dict[str, float]:
 # Profile params that are not part of the standard OpenAI API and must be
 # sent nested under ``extra_body`` (supported by OpenAI-compatible backends
 # such as vLLM). Passing them as top-level kwargs makes the OpenAI client
-# reject the request.
+# reject the request. The same split, with the ranges each one accepts, is what
+# core/sampling.py records for every call this app makes; this constant is the
+# slide-side name for it, and a test keeps the two agreeing.
 SLIDE_EXTRA_BODY_PARAMS: frozenset[str] = frozenset(
     {"top_k", "min_p", "repeat_penalty"}
 )
 
 
-def slide_sampling_bind_kwargs(attempt: int) -> dict[str, Any]:
+def slide_sampling_bind_kwargs(attempt: int, stage: str) -> dict[str, Any]:
     """Bind kwargs for ``structured_invoke_messages`` for a 1-based attempt.
 
     Splits the flat profile into what ``ChatOpenAI`` accepts as top-level
     kwargs (``temperature``/``top_p``) and what must be forwarded to the
     request body via ``extra_body`` (``top_k``/``min_p``/``repeat_penalty``).
-    Adds ``reasoning_effort`` (SLIDE_REASONING_EFFORT) at the top level: it is
-    a standard OpenAI field, so nesting it under ``extra_body`` — the vLLM
+    Adds ``reasoning_effort`` (:func:`slide_reasoning_effort`) at the top level:
+    it is a standard OpenAI field, so nesting it under ``extra_body`` — the vLLM
     ``chat_template_kwargs`` dialect — is ignored by llama.cpp.
     The result is ready to spread into the invoke call:
     ``structured_invoke_messages(llm, schema, msgs, stage=WRITE_SLIDE,
-    **slide_sampling_bind_kwargs(n))`` — the stage name is the constant in
-    ``graphs.material.nodes``, and it is what lets a recovered or unreadable
-    answer say where it came from (#195).
+    **slide_sampling_bind_kwargs(n, WRITE_SLIDE))`` — the stage name is the
+    constant in ``graphs.material.nodes``, and it is what lets a recovered or
+    unreadable answer say where it came from (#195).
+
+    What this function states is the **default**. Whatever an operator has put in
+    ``.env`` for this stage sits above it, at the one place every structured call
+    is assembled (:func:`core.sampling.apply_configured_sampling`, through
+    :func:`graphs.common.structured_invoke_messages`), so
+    ``LLM_TEMPERATURE_MATERIAL_WRITE_SLIDE`` — or ``LLM_TEMPERATURE`` for the
+    whole run — replaces the ladder's value for that one parameter. Setting a
+    sampling knob globally therefore flattens the ladder for that knob, which is
+    the point: the ladder exists to be retuned.
     """
     profile = slide_sampling_for_attempt(attempt)
     extra_body = {k: v for k, v in profile.items() if k in SLIDE_EXTRA_BODY_PARAMS}
     kwargs: dict[str, Any] = {
         k: v for k, v in profile.items() if k not in SLIDE_EXTRA_BODY_PARAMS
     }
-    kwargs["reasoning_effort"] = SLIDE_REASONING_EFFORT
-    kwargs["max_tokens"] = slide_max_output_tokens()
+    kwargs["reasoning_effort"] = slide_reasoning_effort(stage)
+    kwargs["max_tokens"] = slide_max_output_tokens(stage)
     if extra_body:
         kwargs["extra_body"] = extra_body
     return kwargs
