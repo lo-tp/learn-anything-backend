@@ -7,7 +7,8 @@ change test behavior, so the code defaults are pinned *before* any test
 module is imported — same strategy as ``DATABASE_URL`` in
 ``tests/routers/conftest.py``. The model-call knobs (``REASONING_EFFORT*``,
 ``LLM_MAX_OUTPUT_TOKENS*``, and every name in
-``core.sampling.SAMPLING_ENV_NAMES``) are read *per call* instead, and their
+``core.sampling.SAMPLING_ENV_NAMES``) and the list of CORS origins
+(``CORS_ORIGINS``) are read *per call* instead, and their
 names only appear in the environment once ``load_dotenv`` has run, so they are
 blanked at session start — see
 :meth:`_stage_defaults_win_over_local_env`.
@@ -51,7 +52,10 @@ def _stage_defaults_win_over_local_env():
     also readable with a stage appended to its name, and ``load_dotenv()`` (run
     when a test module imports ``core.llm``) adds those names *after* the
     pinning above could blank them — a module-level sweep would see nothing to
-    blank. Blanking here, at session start (all imports done, no test body yet),
+    blank. ``CORS_ORIGINS`` is blanked for the same reason: a laptop's own list
+    (a phone on the home network) must not decide what the suite says about which
+    origins the API answers. Blanking here, at session start (all imports done, no
+    test body yet),
     makes the defaults in ``core/reasoning.py``, ``core/sampling.py`` and
     ``graphs/material/sandbox.py`` what the suite asserts whatever a developer's
     ``.env`` is carrying (e.g. a raised cap or a raised temperature
@@ -59,7 +63,12 @@ def _stage_defaults_win_over_local_env():
     that wants an override sets one with ``monkeypatch``, which runs after this
     fixture.
     """
-    pinned = ("REASONING_EFFORT", "LLM_MAX_OUTPUT_TOKENS", *SAMPLING_ENV_NAMES)
+    pinned = (
+        "REASONING_EFFORT",
+        "LLM_MAX_OUTPUT_TOKENS",
+        "CORS_ORIGINS",
+        *SAMPLING_ENV_NAMES,
+    )
     for name in list(os.environ):
         if name.startswith(pinned):
             os.environ[name] = ""

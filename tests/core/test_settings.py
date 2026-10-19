@@ -15,6 +15,7 @@ from core.settings import (
     bounded_number_setting,
     enumerated_setting,
     numeric_setting,
+    origin_list_setting,
     stage_setting_names,
 )
 
@@ -277,3 +278,66 @@ class TestAStageNameBecomesASettingName:
         )
         assert per_stage == "REASONING_EFFORT_PROBE_EVALUATE_BATCH"
         assert global_name == "REASONING_EFFORT"
+
+
+class TestAListOfOrigins:
+    r"""``CORS_ORIGINS=http://192.168.31.178:3000`` — the one setting that lists names.
+
+    A browser reports a CORS refusal as a problem with *the page*, which is why
+    the two shapes that can only ever produce one are reported here instead of
+    carried into a list that silently never matches.
+    """
+
+    NAME = "CORS_ORIGINS"
+    LAN = "http://192.168.31.178:3000"
+
+    def test_nothing_is_set_so_nothing_is_added(self, monkeypatch):
+        monkeypatch.delenv(self.NAME, raising=False)
+        assert origin_list_setting((self.NAME,)) == []
+
+    def test_one_origin_is_one_entry(self, monkeypatch):
+        monkeypatch.setenv(self.NAME, self.LAN)
+        assert origin_list_setting((self.NAME,)) == [self.LAN]
+
+    def test_several_keep_the_order_written_and_tolerate_spaces(self, monkeypatch):
+        monkeypatch.setenv(
+            self.NAME, "http://192.168.31.178:3000, https://preview.lotp.xyz ,http://localhost:3000"
+        )
+        assert origin_list_setting((self.NAME,)) == [
+            self.LAN,
+            "https://preview.lotp.xyz",
+            "http://localhost:3000",
+        ]
+
+    def test_empty_slots_are_not_origins(self, monkeypatch):
+        monkeypatch.setenv(self.NAME, f"{self.LAN},,{self.LAN},")
+        # The reader keeps what was written, repeats included: merging duplicates
+        # is the caller's decision, because only the caller knows what it already
+        # allows.
+        assert origin_list_setting((self.NAME,)) == [self.LAN, self.LAN]
+
+    def test_a_host_with_no_scheme_is_reported_as_the_mistake_it_is(
+        self, monkeypatch, caplog
+    ):
+        """A browser sends ``Origin: http://host:3000``; a bare host matches nothing."""
+        monkeypatch.setenv(self.NAME, "192.168.31.178:3000")
+        with caplog.at_level(logging.WARNING):
+            assert origin_list_setting((self.NAME,)) == []
+        assert "192.168.31.178:3000" in caplog.text
+        assert "no scheme" in caplog.text
+
+    def test_the_good_origins_survive_the_one_that_cannot_match(self, monkeypatch, caplog):
+        monkeypatch.setenv(self.NAME, f"{self.LAN}, localhost:3000")
+        with caplog.at_level(logging.WARNING):
+            assert origin_list_setting((self.NAME,)) == [self.LAN]
+        assert "localhost:3000" in caplog.text
+
+    def test_a_wildcard_is_reported_because_with_credentials_it_answers_nothing(
+        self, monkeypatch, caplog
+    ):
+        """This API sends the sign-in cookie, and a browser rejects ``*`` there."""
+        monkeypatch.setenv(self.NAME, "*")
+        with caplog.at_level(logging.WARNING):
+            assert origin_list_setting((self.NAME,)) == []
+        assert "wildcard" in caplog.text
+        assert "credentials" in caplog.text
