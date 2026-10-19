@@ -25,6 +25,9 @@ apart (#194 review). The rule is short and it should only be written once:
   objecting to. Numbers that must not be lists — an output cap, a timeout, a
   retry count — go through :func:`bounded_number_setting`, which reports a list
   rather than reading half of it.
+- a setting that names *origins* rather than numbers is read by
+  :func:`origin_list_setting`, which keeps their order and drops the two shapes
+  that could only ever produce a CORS error and no explanation.
 """
 
 from __future__ import annotations
@@ -47,6 +50,9 @@ LLM_MAX_RETRIES_ENV: Final[str] = "LLM_MAX_RETRIES"
 
 REASONING_EFFORT_ENV: Final[str] = "REASONING_EFFORT"
 """How much a model call may think, wherever a call has a budget."""
+
+CORS_ORIGINS_ENV: Final[str] = "CORS_ORIGINS"
+"""Extra browser origins this API answers, beyond the one in ``FRONTEND_DOMAIN``."""
 
 REASONING_EFFORTS: Final[frozenset[str]] = frozenset(
     {"none", "minimal", "low", "medium", "high"}
@@ -212,6 +218,57 @@ def bounded_number_setting(
         )
         return default
     return numbers[0]
+
+
+def origin_list_setting(names: Sequence[str]) -> list[str]:
+    r"""A comma-separated list of browser origins, in the order they were written.
+
+    The one setting that is a list of *names* rather than numbers, because the
+    thing it lists is a policy: which origins may send a browser to this API.
+    A deployment served from one address is the common case; a developer walking
+    a phone through the app over their home network is the case that needs a
+    second one (``CORS_ORIGINS=http://192.168.31.178:3000``), and a staging
+    preview is the case that needs a third.
+
+    Two mistakes are reported rather than carried silently, because both produce
+    a request that is refused with no clue left behind:
+
+    - an origin with no scheme (``192.168.31.178:3000``). A browser sends
+      ``Origin: http://192.168.31.178:3000``, so a bare host can never match
+      anything, and "my phone gets a CORS error and the log says nothing" is the
+      exact confusion this warning exists to prevent.
+    - ``*``. This app sends credentials (the sign-in cookie), and a browser
+      rejects a wildcard origin on a credentialed response — a setting that looks
+      like it opens everything and in fact answers nothing.
+
+    An unset setting is an empty list, which means no added policy: whatever the
+    caller already allows stands.
+    """
+    found = _first_set_value(names)
+    if found is None:
+        return []
+    name, raw = found
+    origins: list[str] = []
+    for part in (piece.strip() for piece in raw.split(",")):
+        if not part:
+            continue
+        if part == "*":
+            logger.warning(
+                '%s contains "*", which this app cannot use: it sends credentials, '
+                "and a browser rejects a wildcard origin on a credentialed response",
+                name,
+            )
+            continue
+        if "://" not in part:
+            logger.warning(
+                '%s contains %r, which names no scheme; a browser sends an Origin like '
+                '"http://192.168.31.178:3000", so it can never match and is dropped',
+                name,
+                part,
+            )
+            continue
+        origins.append(part)
+    return origins
 
 
 def stage_setting_names(base_name: str, stage: str) -> tuple[str, str]:

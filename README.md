@@ -37,6 +37,29 @@ uv run uvicorn main:app --reload
 
 The API will be available at `http://localhost:8000`.
 
+### …and reachable from another device
+
+Running the app on a laptop and using it on a phone needs two settings, because
+the browser checks two different things.
+
+```bash
+# 1. the server must answer the network, not just the laptop
+uv run uvicorn main:app --reload --host 0.0.0.0 --port $PORT   # or: python main.py, which already binds 0.0.0.0
+
+# 2. the browser's origin must be allowed
+CORS_ORIGINS=http://192.168.1.5:3000
+```
+
+`CORS_ORIGINS` adds to `FRONTEND_DOMAIN`; it never replaces it — the origin a
+deployment is served from is the one that signs itself in, and swapping it out is
+how a deploy quietly stops being able to. Each allowed origin shows up once in the
+startup log (`CORS: answering 2 origin(s): …`), because a CORS refusal is reported
+by the browser as a problem with the page, and the developer's phone is not the
+laptop. A value with no scheme, or a `*`, is named in the log and dropped: a bare
+`host:3000` can never match what a browser sends, and a wildcard is rejected by
+browsers on a response that carries credentials — which every signed-in request
+here does.
+
 ## Environment Variables
 
 Copy `.env.example` to `.env` and adjust as needed:
@@ -45,7 +68,8 @@ Copy `.env.example` to `.env` and adjust as needed:
 |---|---|---|
 | `DATABASE_URL` | Postgres connection string | `postgresql+psycopg://postgres:postgres@localhost:5432/learn_anything` |
 | `PORT` | API server port | `8000` |
-| `FRONTEND_DOMAIN` | Allowed CORS origin | `http://localhost:3000` |
+| `FRONTEND_DOMAIN` | The origin this API answers first — the one the frontend is served from | `http://localhost:3000` |
+| `CORS_ORIGINS` | Comma-separated origins **added** to it: another device on your network, a preview deploy | — |
 | `SANDBOX_URL` | Esbuild sandbox URL for slide compilation | `http://localhost:8080` |
 | `SANDBOX_SERVICE_TOKEN` | Shared token for the internal `/slides` gate (#103) | — |
 | `JWT_SECRET` | Shared sign-in token secret; **must match the frontend** | — |
