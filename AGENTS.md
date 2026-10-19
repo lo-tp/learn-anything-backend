@@ -39,8 +39,9 @@ This repo follows Git Flow, adapted to its pipeline:
   feature work never lands on `main` directly.
 - `feature/<slug>` — cut from `develop` for each feature or ticket; merged
   back into `develop` when done.
-- `hotfix/<slug>` — cut from `main` when what is serving is broken; merged
-  back into `main` and into `develop`.
+- `hotfix/<slug>` — cut from `main` when what is serving is broken;
+  rebase-merged into `main`, then `develop` is rebased onto `main` to
+  inherit the fix.
 - `release` — this repo's release step is a persistent protected branch,
   not a per-release branch: merging `main` into `release` is the act that
   ships. The image is built, its smoke step asserts `/health`, it is
@@ -49,7 +50,8 @@ This repo follows Git Flow, adapted to its pipeline:
   in between.
 
 So: feature work flows `feature/<slug>` → `develop` → `main`, hotfixes flow
-`hotfix/<slug>` → `main` + `develop`, nothing lands on `release` directly, and
+`hotfix/<slug>` → `main` (then `develop` is rebased onto `main`), nothing
+lands on `release` directly, and
 never expect a push to `main` to change what is serving. What production runs is recorded in that infrastructure repository's
 `manifests/overlays/prod/kustomization.yaml`; reverting that pin commit is the
 rollback. A migration that has run does not run backwards — a rollback across a
@@ -59,8 +61,9 @@ migration is a fix-forward.
 
 - `develop` → `main` and `main` → `release`: merge as a **merge commit**
   (the PR's merge commit, never its rebase or squash).
-- A hotfix: one commit, merged as a merge commit into both `main` and
-  `develop`.
+- A hotfix: rebase-merge `hotfix/<slug>` into `main`, then rebase
+  `develop` onto `main` so it inherits the fix as a shared ancestor;
+  rebase open feature branches onto the new `develop`.
 - `feature/<slug>` → `develop`: rebase-merge.
 - The same work lands on one branch at a time — never on two of `develop`,
   `main`, `release` (a cherry-pick across the pair counts as landing it
