@@ -54,3 +54,20 @@ never expect a push to `main` to change what is serving. What production runs is
 `manifests/overlays/prod/kustomization.yaml`; reverting that pin commit is the
 rollback. A migration that has run does not run backwards — a rollback across a
 migration is a fix-forward.
+
+## Branch promotion
+
+- `develop` → `main` and `main` → `release`: merge as a **merge commit**
+  (the PR's merge commit, never its rebase or squash).
+- A hotfix: one commit, merged as a merge commit into both `main` and
+  `develop`.
+- `feature/<slug>` → `develop`: rebase-merge.
+- The same work lands on one branch at a time — never on two of `develop`,
+  `main`, `release` (a cherry-pick across the pair counts as landing it
+  twice).
+
+If a promotion PR conflicts in files both branches recently touched, the
+lineages may be duplicated; diagnose before resolving: `git cherry
+<target> <source>` (a `-` line is work already on the target), `git
+merge-base <source> <target>`, `git merge-tree --write-tree <source>
+<target>` (the merge's conflicts, without touching a working tree).
