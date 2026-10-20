@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 load_dotenv()
 
 from core.mock_llm import is_mock_mode
+from core.settings import CORS_ORIGINS_ENV, origin_list_setting
 from db import seed_mock_user
 from routers import auth, clarify, explore, plan, probe, review, sessions, slides
 
@@ -48,11 +49,53 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-FRONTEND_DOMAIN = os.getenv("FRONTEND_DOMAIN", "http://localhost:3000")
+_DEFAULT_FRONTEND_DOMAIN = "http://localhost:3000"
+
+
+def cors_allow_origins() -> list[str]:
+    r"""Every origin this API will answer, in the order it will match them.
+
+    ``FRONTEND_DOMAIN`` comes first, because it is the origin the deployment is
+    actually served from and the one every existing environment already names —
+    including the infrastructure repo's prod overlay, which sets
+    ``https://learn.lotp.xyz``. It is not replaced by ``CORS_ORIGINS``; a
+    setting that adds origins is what a developer debugging from another device
+    needs, and a setting that swaps the served origin out is how a deployment
+    quietly stops being able to sign itself in.
+
+    Duplicates are removed keeping the first, so writing the deployment origin
+    into ``CORS_ORIGINS`` as well (the intuitive thing to do when a request from
+    it is failing) changes nothing instead of producing a list with two answers
+    for one origin.
+
+    Read per call rather than at import, like :func:`core.security.cookie_policy`,
+    so the list a test builds is the list the app would build.
+    """
+    served = os.getenv("FRONTEND_DOMAIN", _DEFAULT_FRONTEND_DOMAIN).strip()
+    requested = origin_list_setting((CORS_ORIGINS_ENV,))
+    origins: list[str] = []
+    seen: set[str] = set()
+    for origin in ([served] if served else []) + requested:
+        if origin not in seen:
+            seen.add(origin)
+            origins.append(origin)
+    return origins
+
+
+_ALLOWED_ORIGINS = cors_allow_origins()
+# Named once, at startup, because the failure this prevents is a browser refusing
+# a request with a message that points at the browser. A developer whose phone
+# gets a CORS error should be able to see from the log which origins this process
+# will answer, without reading its environment file.
+logging.getLogger(__name__).info(
+    "CORS: answering %d origin(s): %s",
+    len(_ALLOWED_ORIGINS),
+    ", ".join(_ALLOWED_ORIGINS) or "none (no origin is allowed)",
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_DOMAIN],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
