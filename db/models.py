@@ -454,9 +454,10 @@ def seed_mock_user(engine: Engine | None = None) -> None:
     """Ensure the fixed fake user exists in the mock-mode RAM DB.
 
     Called from ``main`` at startup when ``MOCK_LLM`` is set, so the in-memory
-    ``users`` table always starts with one known account (id: mock@example.com /
-    password: mock-password-123). Idempotent: a no-op when the user already
-    exists, so it is safe to call on every start.
+    ``users`` table always starts with one known account — the email, display
+    name and password in the constants above, which are the only place those
+    values are written out. Idempotent: a no-op when the user already exists, so
+    it is safe to call on every start.
 
     ``engine`` defaults to the module engine; a test may pass its own engine.
     """

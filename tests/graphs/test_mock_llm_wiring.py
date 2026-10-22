@@ -7,6 +7,8 @@ Acceptance criteria:
   never invokes it).
 - A session can go Clarify -> Probe -> Plan in mock mode with canned
   output (zero real LLM calls).
+- The intake shape is the shape a real run produces: Clarify asks two rounds
+  (3 clarifying questions, then 2), Probe asks a batch of three.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from core.external_tools import external_search_tools
 from core.llm import llm
 from core.mock_llm import MockChatModel
 from graphs import graph_config
-from graphs.clarify import build_clarify_graph
+from graphs.clarify import ClarifyState, build_clarify_graph
 from graphs.plan import build_plan_graph
 from graphs.probe import ProbeState, build_probe_graph
 from services.stage_timings import empty_stage_timings
@@ -118,29 +120,54 @@ class TestExternalSearchWiring:
             importlib.reload(graphs)
 
 
+def _answer_batch(batch: list[dict]) -> dict:
+    """A resume payload shaped exactly as routers/probe.py sends one: the whole
+    batch, one answer per question."""
+    return {"answers": [{"question_id": q["id"], "selected_index": 0} for q in batch]}
+
+
 class TestCannedPipeline:
     """Clarify -> Probe -> Plan end-to-end on MockChatModel: zero real LLM."""
 
-    def test_clarify_returns_narrowed_goal_immediately(self):
+    def test_clarify_asks_two_rounds_then_narrows(self):
+        """The mock's Clarify script walked through the real graph.
+
+        Three questions, then two, then the narrowed goal: five clarifying
+        questions in two learner turns, with the real 1-3-per-round limit never
+        exceeded and the round cap never reached.
+        """
         graph = build_clarify_graph(MockChatModel(), checkpointer=MemorySaver())
-        result = graph.invoke(
-            {
-                "goal": "Learn calculus",
-                "language": "English",
-                "working_goal": "Learn calculus",
-                "open_dimensions": [],
-                "round_count": 0,
-                "clarifying_questions": [],
-                "last_answer": None,
-                "narrowed_goal": None,
-            },
-            {"configurable": {"thread_id": "t:clarify"}},
-        )
-        # One canned narrowed goal, zero questions (no __interrupt__).
+        config = graph_config("t:clarify", "clarify")
+        state: ClarifyState = {
+            "goal": "Learn calculus",
+            "language": "English",
+            "working_goal": "Learn calculus",
+            "open_dimensions": [],
+            "round_count": 0,
+            "clarifying_questions": [],
+            "last_answer": None,
+            "narrowed_goal": None,
+        }
+        result = graph.invoke(state, config)
+        assert "__interrupt__" in result
+        first_round = result["clarifying_questions"]
+        assert len(first_round) == 3
+
+        result = graph.invoke(Command(resume={"answer": "Mock answer 1"}), config)
+        assert "__interrupt__" in result
+        second_round = result["clarifying_questions"]
+        assert len(second_round) == 2
+
+        result = graph.invoke(Command(resume={"answer": "Mock answer 2"}), config)
         assert "__interrupt__" not in result
         assert result["narrowed_goal"]
+        # Ended by the script, not by MAX_CLARIFY_ROUNDS.
+        assert result["round_count"] == 2
+        asked = first_round + second_round
+        assert len(asked) == 5
+        assert len(set(asked)) == 5
 
-    def test_probe_brackets_after_one_answer(self):
+    def test_probe_brackets_after_one_answered_batch(self):
         graph = build_probe_graph(MockChatModel(), checkpointer=MemorySaver())
         config = graph_config("t:probe", "probe")
         state: ProbeState = {
@@ -155,23 +182,21 @@ class TestCannedPipeline:
         }
         result = graph.invoke(state, config)
         assert "__interrupt__" in result
-        # One canned MCQ.
-        assert len(result["next_batch"]) == 1
-        question = result["next_batch"][0]
-        # Resume with the learner's (mock) answer.
+        # A full batch: what the new-session form's Probing step shows.
+        assert len(result["next_batch"]) == 3
+        assert {q["strand"] for q in result["next_batch"]} == set(result["strands"])
+        # Resume with the learner's (mock) answers for the whole batch.
         result = graph.invoke(
-            Command(
-                resume={
-                    "answers": [{"question_id": question["id"], "selected_index": 0}]
-                }
-            ),
+            Command(resume=_answer_batch(result["next_batch"])),
             config,
         )
-        # evaluate_batch brackets the strand -> done, no second question.
+        # evaluate_batch brackets every strand -> done, no second batch.
         assert "__interrupt__" not in result
-        strand = result["strands"][0]
-        assert result["boundary_map"][strand]["floor"] is not None
-        assert result["boundary_map"][strand]["ceiling"] is not None
+        assert result["question_count"] == 3
+        assert len(result["history"]) == 3
+        for strand in result["strands"]:
+            assert result["boundary_map"][strand]["floor"] is not None
+            assert result["boundary_map"][strand]["ceiling"] is not None
 
     def test_plan_produces_canned_plan(self):
         graph = build_plan_graph(MockChatModel(), checkpointer=MemorySaver())
@@ -208,7 +233,7 @@ class TestPreMaterialStageTimings:
     def _stages(result: dict) -> list[str]:
         return [t["stage"] for t in result["stage_timings"]]
 
-    def test_clarify_records_its_llm_stage(self):
+    def test_clarify_records_each_stage_and_not_the_pause(self):
         graph = build_clarify_graph(MockChatModel(), checkpointer=MemorySaver())
         result = graph.invoke(
             {
@@ -223,7 +248,9 @@ class TestPreMaterialStageTimings:
             },
             {"configurable": {"thread_id": "timings:clarify"}},
         )
-        assert self._stages(result) == ["assess_goal"]
+        # A request that ends in questions records both model calls it made.
+        # The pause itself is the learner's time, not this service's.
+        assert self._stages(result) == ["assess_goal", "generate_questions"]
         assert all(t["duration_seconds"] >= 0 for t in result["stage_timings"])
 
     def test_probe_records_each_stage_and_not_the_pause(self):
@@ -246,11 +273,8 @@ class TestPreMaterialStageTimings:
         )
         assert self._stages(result) == ["decompose_strands", "generate_batch"]
 
-        question = result["next_batch"][0]
         result = graph.invoke(
-            Command(
-                resume={"answers": [{"question_id": question["id"], "selected_index": 0}]}
-            ),
+            Command(resume=_answer_batch(result["next_batch"])),
             config,
         )
         assert self._stages(result) == [
@@ -329,13 +353,53 @@ class TestEachRequestRecordsOnlyItsOwnStages:
             "decompose_strands",
             "generate_batch",
         ]
-        question = result["next_batch"][0]
 
         result = graph.invoke(
             Command(
-                resume={"answers": [{"question_id": question["id"], "selected_index": 0}]},
+                resume=_answer_batch(result["next_batch"]),
                 update={"stage_timings": empty_stage_timings()},
             ),
             config,
         )
         assert [t["stage"] for t in result["stage_timings"]] == ["evaluate_batch"]
+
+    def test_a_clarify_resume_records_only_the_stages_it_ran(self):
+        """A clarify resume re-enters the loop rather than continuing a stage.
+
+        Folding the answer in, judging the goal again, and — because the mock's
+        script has a second round left — asking that round: exactly what the
+        second request cost, and nothing from the first one.
+        """
+        graph = build_clarify_graph(MockChatModel(), checkpointer=MemorySaver())
+        config = graph_config("clear:clarify", "clarify")
+        result = graph.invoke(
+            {
+                "goal": "Learn calculus",
+                "language": "English",
+                "working_goal": "Learn calculus",
+                "open_dimensions": [],
+                "round_count": 0,
+                "clarifying_questions": [],
+                "last_answer": None,
+                "narrowed_goal": None,
+                "stage_timings": empty_stage_timings(),
+            },
+            config,
+        )
+        assert [t["stage"] for t in result["stage_timings"]] == [
+            "assess_goal",
+            "generate_questions",
+        ]
+
+        result = graph.invoke(
+            Command(
+                resume={"answer": "Mock answer 1"},
+                update={"language": "English", "stage_timings": empty_stage_timings()},
+            ),
+            config,
+        )
+        assert [t["stage"] for t in result["stage_timings"]] == [
+            "refine_goal",
+            "assess_goal",
+            "generate_questions",
+        ]
