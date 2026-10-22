@@ -79,7 +79,7 @@ Copy `.env.example` to `.env` and adjust as needed:
 | `TAVILY_API_KEY` | Web search for the plan graph's `research_topic` step, through Tavily's MCP server (#166). Unset — or `MOCK_LLM` — means no external search: planning proceeds as before | — |
 | `TAVILY_MCP_URL` | Override the hosted Tavily MCP endpoint | `https://mcp.tavily.com/mcp/` |
 | `DEV_MODE` | `true`/`1` skips the sign-in gate on the Session **write** endpoints (the reads are public — #178) | off |
-| `MOCK_LLM` | `true`/`1` runs the pre-material phases without an LLM, on an in-memory DB | off |
+| `MOCK_LLM` | `true`/`1` runs the pre-material phases without an LLM, on an in-memory DB seeded with one account — `mock@example.com` / `12345678`. Sign in with it first: mock mode opens the phase gates, but creating a Session still asks for a sign-in cookie (#145) | off |
 | `LA_PROMPTS_STUB` | `1` uses the public prompt stubs when `prompts/` is not checked out | off |
 | `MAX_PROBE_QUESTIONS` | Max questions per probe session | `10` |
 | `MAX_MATERIAL_ATTEMPTS` | Max compile retry attempts per slide | `3` |
